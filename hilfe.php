@@ -184,13 +184,19 @@ $currentUser = Auth::getCurrentUser();
             </ul>
         </div>
 
-        <!-- 5. Benutzerrollen -->
+        <!-- 5. Benutzerrollen & Alarme -->
         <div id="sec-rechte" class="help-card">
-            <h2>5. Benutzerrollen &amp; Adminbereich</h2>
+            <h2>5. Benutzerrollen, Einstellungen &amp; Geräte-Alarme (SMTP)</h2>
             <ul>
-                <li><span class="badge" style="background:rgba(239,68,68,0.2);color:#fca5a5;">ADMIN</span> <strong>Administrator:</strong> Vollzugriff auf alle Funktionen sowie auf den Reiter <strong>⚙ Adminbereich (DB &amp; Rechte)</strong> zur Konfiguration der MySQL-/SQLite-Datenbankverbindung und zur Benutzerverwaltung.</li>
-                <li><span class="badge" style="background:rgba(16,185,129,0.2);color:#6ee7b7;">OPERATOR</span> <strong>Operator (Techniker):</strong> Darf Netzwerk-Scans starten, Scopes anlegen, Geräte umbenennen, Switch-Ports zuweisen und Geräte/Gruppen ein- oder ausblenden.</li>
+                <li><span class="badge" style="background:rgba(239,68,68,0.2);color:#fca5a5;">ADMIN</span> <strong>Administrator:</strong> Vollzugriff auf alle Funktionen sowie auf den Reiter <strong>⚙ Einstellungen</strong> zur Konfiguration der MySQL-/SQLite-Datenbankverbindung, des SMTP-E-Mail-Servers, der Benutzerverwaltung sowie zum Leeren einzelner Scopes.</li>
+                <li><span class="badge" style="background:rgba(16,185,129,0.2);color:#6ee7b7;">OPERATOR</span> <strong>Operator (Techniker):</strong> Darf Netzwerk-Scans starten, Scopes anlegen, Geräte umbenennen, Switch-Ports zuweisen, Geräte-Alarme aktivieren und Geräte/Gruppen ein- oder ausblenden.</li>
                 <li><span class="badge" style="background:rgba(59,130,246,0.2);color:#93c5fd;">VIEWER</span> <strong>Betrachter (Nur Lesen):</strong> Darf alle 6 Ansichten, den SNMP-Inspektor und alle Export-Funktionen nutzen, aber keine Änderungen speichern oder Scans auslösen.</li>
+            </ul>
+            <h3>🔔 Online-/Offline-Geräte-Alarme &amp; E-Mail-Benachrichtigungen</h3>
+            <ul>
+                <li><strong>Gerät überwachen:</strong> Klicke ein Gerät im Plan an und wähle rechts unter <strong>„🔔 Alarm-Überwachung (Online / Offline)“</strong> den gewünschten Modus (z. B. <em>🔴 Alarm wenn OFFLINE (+ Online-Recovery)</em>). Vor einem Offline-Alarm führt der Scanner automatisch einen Sicherheits-Nachping aus, um Fehlalarme zu vermeiden.</li>
+                <li><strong>Web-Alarm-Zentrale:</strong> Über die Glocke <strong>„🔔 Alarme“</strong> oben in der Navigationsleiste siehst du jederzeit alle ausgelösten Statuswechsel und aktuell überwachten Geräte.</li>
+                <li><strong>E-Mail-Versand per SMTP:</strong> Unter <strong>⚙ Einstellungen</strong> kannst du einen beliebigen SMTP-Server (STARTTLS Port 587, SSL Port 465 oder unverschlüsselt Port 25) hinterlegen und per <strong>„✉ Test-E-Mail senden“</strong> sofort testen.</li>
             </ul>
         </div>
 

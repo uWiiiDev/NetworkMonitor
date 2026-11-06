@@ -28,6 +28,10 @@
   - **Draw.io / Visio XML (`.drawio`)** – direkt in Draw.io oder Microsoft Visio weiterbearbeitbar
   - **PDF / Druck-Report** & **4K Ultra-HD PNG (3840 × 2160 px)**
   - **CSV-Inventarexport** mit sortierbaren und ein-/ausblendbaren Tabellenspalten
+- **🔔 Geräte-Alarme (Online/Offline-Überwachung) & SMTP-Benachrichtigungen:**
+  - Individuelle Überwachung kritischer Geräte (Router, Switches, Server, Drucker) auf **Offline-Ausfall** (+ automatische Online-Wiederherstellungsmeldung) oder **Online-Erscheinen**
+  - Integrierter **Sicherheits-Nachping** vor einem Offline-Alarm zum Schutz vor Fehlalarmen
+  - **Web-Alarm-Zentrale (`🔔 Alarme`)** mit Ungelesen-Zähler in der Kopfzeile sowie **automatischer HTML-E-Mail-Versand** über einen frei konfigurierbaren **SMTP-Server** (`STARTTLS` Port 587 / `SSL` Port 465 / Plain Port 25 inkl. Live-Test-Button)
 - **Authentifizierung, Rollen & Adminbereich (`⚙ Einstellungen`):**
   - 3 Rollen: **`ADMIN`** (Vollzugriff), **`OPERATOR`** (Scans & Bearbeitung), **`VIEWER`** (Nur Lesen & Export)
   - Konfiguration & Live-Test für **MySQL / MariaDB** oder **SQLite (Zero-Config mit WAL-Modus)** direkt im Webinterface
