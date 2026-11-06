@@ -1,0 +1,18 @@
+# Lokale Datenbanken & persönliche Scan-Daten niemals auf GitHub hochladen
+data/*.sqlite
+data/*.sqlite-shm
+data/*.sqlite-wal
+data/*.db
+data/custom_config.json
+
+# Behalte das leere data/-Verzeichnis im Repository
+!data/.gitkeep
+
+# Editor- & Systemdateien
+.DS_Store
+Thumbs.db
+*.log
+*.swp
+*~
+.idea/
+.vscode/

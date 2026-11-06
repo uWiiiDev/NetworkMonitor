@@ -1,0 +1,1563 @@
+<?php
+/**
+ * NetworkScanner - Discovery Engine (Nmap / Parallel Ping / ARP / Async TCP Ports / SNMP / Topologie-Builder)
+ * Kompatibel mit PHP 5.5+ (Ubuntu 14.04) bis PHP 8.x
+ */
+
+require_once __DIR__ . '/db.php';
+require_once __DIR__ . '/oui.php';
+require_once __DIR__ . '/snmp_client.php';
+
+class NetworkScanner
+{
+    private $db;
+    private $pdo;
+    private $config;
+
+    public function __construct()
+    {
+        $this->db = Database::getInstance();
+        $this->pdo = $this->db->getPdo();
+        $fullConf = $this->db->getConfig();
+        $this->config = $fullConf['scanner'];
+    }
+
+    /**
+     * Scannt einen einzelnen Scope anhand seiner ID
+     */
+    public function scanScope($scopeId, $triggerType = 'manual')
+    {
+        $stmt = $this->pdo->prepare("SELECT * FROM scopes WHERE id = :id");
+        $stmt->execute(array(':id' => (int)$scopeId));
+        $scope = $stmt->fetch();
+        if (!$scope) {
+            throw new InvalidArgumentException("Scope ID $scopeId nicht gefunden.");
+        }
+
+        $scanStartMicro = microtime(true);
+        $now = date('Y-m-d H:i:s');
+        $logStmt = $this->pdo->prepare("
+            INSERT INTO scan_logs (scope_id, trigger_type, started_at, status, summary)
+            VALUES (:sid, :trig, :start, 'running', 'Scan gestartet...')
+        ");
+        $logStmt->execute(array(
+            ':sid'   => $scope['id'],
+            ':trig'  => $triggerType,
+            ':start' => $now,
+        ));
+        $logId = (int)$this->pdo->lastInsertId();
+
+        $this->pdo->prepare("UPDATE scopes SET last_scan_status = 'running', last_scan_at = :now WHERE id = :id")
+                  ->execute(array(':now' => $now, ':id' => $scope['id']));
+
+        try {
+            $ipList = $this->expandCidrOrRange($scope['cidr'], $this->config['max_hosts_per_scan']);
+            $gatewayIp = !empty($scope['gateway_ip']) ? $scope['gateway_ip'] : (!empty($ipList) ? $ipList[0] : null);
+            $community = !empty($scope['snmp_community']) ? $scope['snmp_community'] : $this->config['default_snmp_community'];
+
+            // 1. Live-Hosts & Latenz ermitteln (Nmap falls vorhanden, sonst Parallel-Ping + ARP-Cache)
+            $liveHosts = $this->discoverLiveHosts($scope['cidr'], $ipList);
+
+            // Lokale Server-IP einbeziehen, falls im Subnetz
+            $localServerInfo = $this->getLocalServerInterfaces();
+            foreach ($localServerInfo as $lip => $lmac) {
+                if (in_array($lip, $ipList, true)) {
+                    if (!isset($liveHosts[$lip])) {
+                        $liveHosts[$lip] = array('latency_ms' => 0.1, 'mac' => $lmac, 'hostname' => gethostname(), 'ttl' => 64);
+                    } elseif (empty($liveHosts[$lip]['mac'])) {
+                        $liveHosts[$lip]['mac'] = $lmac;
+                    }
+                }
+            }
+
+            // ARP-Tabelle nach dem Ping-Sweep auslesen
+            $arpMap = $this->readArpTable();
+            foreach ($arpMap as $aip => $amac) {
+                if (in_array($aip, $ipList, true)) {
+                    if (!isset($liveHosts[$aip])) {
+                        $liveHosts[$aip] = array('latency_ms' => 1.0, 'mac' => $amac, 'hostname' => null, 'ttl' => null);
+                    } elseif (empty($liveHosts[$aip]['mac'])) {
+                        $liveHosts[$aip]['mac'] = $amac;
+                    }
+                }
+            }
+
+            // Alle bisherigen Geräte dieses Scopes zunächst als offline markieren (sofern nicht manuell)
+            $this->pdo->prepare("UPDATE devices SET status = 'offline' WHERE scope_id = :sid")
+                      ->execute(array(':sid' => $scope['id']));
+
+            $switchesFound = 0;
+            $hostsUp = count($liveHosts);
+            $liveIpList = array_keys($liveHosts);
+
+            // 2. Multi-Host-Batch: Hostnamen für alle aktiven IPs in einem Rutsch auflösen (UDP DNS PTR)
+            $batchHostnames = $this->resolveHostnamesBatch($liveIpList);
+
+            // 3. Multi-Host-Batch: NetBIOS Node Status (UDP 137) für Windows-Namen & Arbeitsgruppen
+            $batchNetbios = $this->probeNetbiosBatch($liveIpList, 250);
+
+            // 4. Multi-Host-Batch: TCP-Port-Scan für je 32 Hosts gleichzeitig (statt einzeln nacheinander!)
+            $portBatchSize = isset($this->config['port_host_batch_size']) ? (int)$this->config['port_host_batch_size'] : 32;
+            $batchOpenPorts = $this->probeTcpPortsMultiHostBatch(
+                $liveIpList,
+                $this->config['probe_ports'],
+                $this->config['port_timeout_ms'],
+                $portBatchSize
+            );
+
+            // 5. Multi-Host-Batch: HTTP/HTTPS (<title> + Server-Header) & SSH-Banner Grabbing für offene Ports
+            $batchBanners = $this->probeServiceBannersBatch($batchOpenPorts, 500);
+
+            // 6. Multi-Host-Batch: SNMP UDP-Vorfilter für je 100 Hosts gleichzeitig
+            // Nur Geräte, die auf dieses schnelle UDP-Paket antworten, werden im Detail per SNMP abgefragt!
+            $snmpBatchSize = isset($this->config['snmp_batch_size']) ? (int)$this->config['snmp_batch_size'] : 100;
+            $responsiveSnmpIps = SnmpClient::discoverResponsiveHostsBatch(
+                $liveIpList,
+                $community,
+                500,
+                $snmpBatchSize
+            );
+
+            // 7. Alle gefundenen Geräte innerhalb einer schnellen Datenbank-Transaktion speichern
+            $this->pdo->beginTransaction();
+            try {
+                foreach ($liveHosts as $ip => $hostMeta) {
+                    $mac = !empty($hostMeta['mac']) ? OuiLookup::normalizeMac($hostMeta['mac']) : null;
+                    $vendor = $mac ? OuiLookup::lookupVendor($mac) : null;
+                    $ttl = isset($hostMeta['ttl']) ? $hostMeta['ttl'] : null;
+
+                    $hostname = !empty($hostMeta['hostname'])
+                        ? $hostMeta['hostname']
+                        : (isset($batchHostnames[$ip]) ? $batchHostnames[$ip] : null);
+
+                    // Falls kein DNS-Hostname vorhanden, nutze Windows NetBIOS-Namen als Fallback
+                    $nbInfo = isset($batchNetbios[$ip]) ? $batchNetbios[$ip] : null;
+                    if (empty($hostname) && !empty($nbInfo['name'])) {
+                        $hostname = $nbInfo['name'];
+                    }
+
+                    $openPorts = isset($batchOpenPorts[$ip]) ? $batchOpenPorts[$ip] : array();
+                    $bannerInfo = isset($batchBanners[$ip]) ? $batchBanners[$ip] : array();
+
+                    $snmpEnabled = 0;
+                    $snmpSysName = null;
+                    $snmpSysDescr = null;
+                    $snmpSysObjectId = null;
+                    $snmpLocation = null;
+                    $snmpPortsJson = null;
+                    $hasBridgeTable = false;
+
+                    // Detail-SNMP-Abfrage (Interfaces, Bridge-MIB MAC-Tabelle, LLDP) NUR für Geräte,
+                    // die beim schnellen Multi-Host-UDP-Check geantwortet haben!
+                    if (isset($responsiveSnmpIps[$ip])) {
+                        $snmpClient = new SnmpClient($ip, $community, $this->config['snmp_timeout_ms']);
+                        $snmpData = $snmpClient->probeDevice();
+                        if ($snmpData !== null) {
+                            $snmpEnabled = 1;
+                            $snmpSysName = $snmpData['sysName'];
+                            $snmpSysDescr = $snmpData['sysDescr'];
+                            $snmpSysObjectId = $snmpData['sysObjectID'];
+                            $snmpLocation = $snmpData['sysLocation'];
+                            $snmpPortsJson = json_encode($snmpData);
+                            if (!empty($snmpData['mac_table']) || !empty($snmpData['lldp_neighbors'])) {
+                                $hasBridgeTable = true;
+                            }
+                            if (empty($hostname) && !empty($snmpSysName)) {
+                                $hostname = $snmpSysName;
+                            }
+                        }
+                    }
+
+                    // Baue kompakten Service-/Fingerprint-String zusammen
+                    $infoParts = array();
+                    if ($ttl !== null) {
+                        $infoParts[] = 'TTL: ' . (int)$ttl;
+                    }
+                    if (!empty($bannerInfo['http_title'])) {
+                        $infoParts[] = 'Web: ' . $bannerInfo['http_title'];
+                    }
+                    if (!empty($bannerInfo['http_server'])) {
+                        $infoParts[] = 'Server: ' . $bannerInfo['http_server'];
+                    }
+                    if (!empty($bannerInfo['ssh_banner'])) {
+                        $infoParts[] = 'SSH: ' . $bannerInfo['ssh_banner'];
+                    }
+                    if (!empty($nbInfo['workgroup'])) {
+                        $infoParts[] = 'Workgroup: ' . $nbInfo['workgroup'];
+                    }
+                    $serviceInfo = !empty($infoParts) ? implode(' | ', $infoParts) : null;
+
+                    $autoType = OuiLookup::classifyDevice($ip, $gatewayIp, $vendor, $hostname, $openPorts, $snmpSysDescr, $hasBridgeTable, $serviceInfo);
+                    if ($autoType === 'switch') {
+                        $switchesFound++;
+                    }
+
+                    $osGuess = $this->guessOs($openPorts, $vendor, $snmpSysDescr, $autoType, $ttl, $hostname, $serviceInfo);
+                    $portsFormatted = $this->formatOpenPorts($openPorts);
+
+                    $this->upsertDevice(array(
+                        'scope_id'        => $scope['id'],
+                        'ip_address'      => $ip,
+                        'mac_address'     => $mac,
+                        'vendor'          => $vendor,
+                        'hostname'        => $hostname,
+                        'device_type'     => $autoType,
+                        'os_guess'        => $osGuess,
+                        'open_ports'      => $portsFormatted,
+                        'service_info'    => $serviceInfo,
+                        'snmp_enabled'    => $snmpEnabled,
+                        'snmp_sysname'    => $snmpSysName,
+                        'snmp_sysdescr'   => $snmpSysDescr,
+                        'snmp_sysobjectid'=> $snmpSysObjectId,
+                        'snmp_location'   => $snmpLocation,
+                        'snmp_ports_json' => $snmpPortsJson,
+                        'status'          => 'online',
+                        'latency_ms'      => isset($hostMeta['latency_ms']) ? $hostMeta['latency_ms'] : 1.0,
+                    ));
+                }
+                $this->pdo->commit();
+            } catch (Exception $txEx) {
+                if ($this->pdo->inTransaction()) {
+                    $this->pdo->rollBack();
+                }
+                throw $txEx;
+            }
+
+            // Topologie-Verbindungen (Layer 2 Switch-Ports + Layer 3 Gateway) neu berechnen
+            $this->rebuildTopologyLinks($scope['id'], $gatewayIp);
+
+            $finishedAt = date('Y-m-d H:i:s');
+            $durationSec = round(microtime(true) - $scanStartMicro, 2);
+            $summary = sprintf(
+                'Scan abgeschlossen in %.2f s: %d aktive Geräte (%d Managed Switches) in %s gefunden.',
+                $durationSec,
+                $hostsUp,
+                $switchesFound,
+                $scope['cidr']
+            );
+
+            $this->pdo->prepare("
+                UPDATE scopes
+                SET last_scan_at = :fin, last_scan_status = 'completed', last_scan_hosts = :cnt
+                WHERE id = :id
+            ")->execute(array(
+                ':fin' => $finishedAt,
+                ':cnt' => $hostsUp,
+                ':id'  => $scope['id'],
+            ));
+
+            $this->pdo->prepare("
+                UPDATE scan_logs
+                SET finished_at = :fin, status = 'completed', hosts_up = :cnt, switches_found = :sw, summary = :sum
+                WHERE id = :lid
+            ")->execute(array(
+                ':fin' => $finishedAt,
+                ':cnt' => $hostsUp,
+                ':sw'  => $switchesFound,
+                ':sum' => $summary,
+                ':lid' => $logId,
+            ));
+
+            return array(
+                'scope_id'       => (int)$scope['id'],
+                'scope_name'     => $scope['name'],
+                'cidr'           => $scope['cidr'],
+                'hosts_up'       => $hostsUp,
+                'switches_found' => $switchesFound,
+                'summary'        => $summary,
+            );
+        } catch (Exception $e) {
+            $finishedAt = date('Y-m-d H:i:s');
+            $this->pdo->prepare("UPDATE scopes SET last_scan_status = 'error' WHERE id = :id")
+                      ->execute(array(':id' => $scope['id']));
+            $this->pdo->prepare("UPDATE scan_logs SET finished_at = :fin, status = 'error', summary = :sum WHERE id = :lid")
+                      ->execute(array(':fin' => $finishedAt, ':sum' => $e->getMessage(), ':lid' => $logId));
+            throw $e;
+        }
+    }
+
+    /**
+     * Scannt alle aktiven Scopes nacheinander
+     */
+    public function scanAllActiveScopes($triggerType = 'manual')
+    {
+        $stmt = $this->pdo->query("SELECT id FROM scopes WHERE is_active = 1 ORDER BY id ASC");
+        $results = array();
+        while ($row = $stmt->fetch()) {
+            $results[] = $this->scanScope($row['id'], $triggerType);
+        }
+        return $results;
+    }
+
+    /**
+     * Berechnet die Topologie-Links (Layer 2 SNMP MAC-Table / LLDP & Layer 3 Subnet Gateway)
+     */
+    public function rebuildTopologyLinks($scopeId, $gatewayIp = null)
+    {
+        // Lösche nur automatisch generierte Links dieses Scopes (manuelle bleiben erhalten)
+        $this->pdo->prepare("DELETE FROM links WHERE scope_id = :sid AND is_manual = 0")
+                  ->execute(array(':sid' => (int)$scopeId));
+
+        $stmt = $this->pdo->prepare("SELECT * FROM devices WHERE scope_id = :sid ORDER BY id ASC");
+        $stmt->execute(array(':sid' => (int)$scopeId));
+        $devices = $stmt->fetchAll();
+        if (empty($devices)) {
+            return;
+        }
+
+        $byId = array();
+        $byIp = array();
+        $byMac = array();
+        $byName = array();
+        $switches = array();
+        $routerDevice = null;
+
+        foreach ($devices as $dev) {
+            $byId[$dev['id']] = $dev;
+            $byIp[$dev['ip_address']] = $dev;
+            if (!empty($dev['mac_address'])) {
+                $byMac[strtoupper($dev['mac_address'])] = $dev;
+            }
+            if (!empty($dev['hostname'])) {
+                $byName[strtolower($dev['hostname'])] = $dev;
+            }
+            if (!empty($dev['snmp_sysname'])) {
+                $byName[strtolower($dev['snmp_sysname'])] = $dev;
+            }
+            if ($dev['device_type'] === 'switch') {
+                $switches[] = $dev;
+            }
+            if ($dev['device_type'] === 'router' || ($gatewayIp && $dev['ip_address'] === $gatewayIp)) {
+                if ($routerDevice === null || $dev['ip_address'] === $gatewayIp) {
+                    $routerDevice = $dev;
+                }
+            }
+        }
+
+        // Falls kein expliziter Router erkannt wurde, nutze ersten Switch oder erstes Gerät als Wurzelknoten
+        if ($routerDevice === null) {
+            $routerDevice = !empty($switches) ? $switches[0] : $devices[0];
+        }
+
+        $linkedTargets = array();
+        $scanStartMicro = microtime(true);
+        $now = date('Y-m-d H:i:s');
+        $insertLink = $this->pdo->prepare("
+            INSERT INTO links (scope_id, source_device_id, target_device_id, source_port, target_port, link_type, is_manual, updated_at)
+            VALUES (:sid, :src, :dst, :sport, :dport, :ltype, 0, :now)
+        ");
+
+        // 1. LLDP Switch-zu-Switch / Router Nachbarschaften auswerten
+        foreach ($switches as $sw) {
+            if (empty($sw['snmp_ports_json'])) {
+                continue;
+            }
+            $snmp = @json_decode($sw['snmp_ports_json'], true);
+            if (!empty($snmp['lldp_neighbors'])) {
+                foreach ($snmp['lldp_neighbors'] as $nbr) {
+                    $remKey = strtolower(trim($nbr['remote_name']));
+                    if (isset($byName[$remKey]) && (int)$byName[$remKey]['id'] !== (int)$sw['id']) {
+                        $targetDev = $byName[$remKey];
+                        $insertLink->execute(array(
+                            ':sid'   => $scopeId,
+                            ':src'   => $sw['id'],
+                            ':dst'   => $targetDev['id'],
+                            ':sport' => $nbr['local_port'],
+                            ':dport' => isset($nbr['remote_port']) ? $nbr['remote_port'] : 'Uplink',
+                            ':ltype' => 'lldp',
+                            ':now'   => $now,
+                        ));
+                        $linkedTargets[$targetDev['id']] = true;
+                    }
+                }
+            }
+        }
+
+        // 2. Verbinde Managed Switches mit dem Gateway-Router (sofern noch nicht per LLDP verknüpft)
+        $primarySwitch = !empty($switches) ? $switches[0] : null;
+        foreach ($switches as $sw) {
+            if ((int)$sw['id'] === (int)$routerDevice['id']) {
+                continue;
+            }
+            if (!isset($linkedTargets[$sw['id']])) {
+                $parent = ($primarySwitch && (int)$primarySwitch['id'] !== (int)$sw['id']) ? $primarySwitch : $routerDevice;
+                $insertLink->execute(array(
+                    ':sid'   => $scopeId,
+                    ':src'   => $parent['id'],
+                    ':dst'   => $sw['id'],
+                    ':sport' => 'Trunk',
+                    ':dport' => 'Uplink',
+                    ':ltype' => 'trunk',
+                    ':now'   => $now,
+                ));
+                $linkedTargets[$sw['id']] = true;
+            }
+        }
+
+        // 3. SNMP Bridge-MIB MAC-Adresstabelle der Switches auswerten (Endgeräte -> Switch-Port)
+        foreach ($switches as $sw) {
+            if (empty($sw['snmp_ports_json'])) {
+                continue;
+            }
+            $snmp = @json_decode($sw['snmp_ports_json'], true);
+            if (empty($snmp['mac_table']) || !is_array($snmp['mac_table'])) {
+                continue;
+            }
+            foreach ($snmp['mac_table'] as $macAddr => $portInfo) {
+                $macKey = strtoupper($macAddr);
+                if (!isset($byMac[$macKey])) {
+                    continue;
+                }
+                $targetDev = $byMac[$macKey];
+                if ((int)$targetDev['id'] === (int)$sw['id'] || (int)$targetDev['id'] === (int)$routerDevice['id']) {
+                    continue;
+                }
+                if ($targetDev['device_type'] === 'switch') {
+                    continue; // Switch-Links wurden bereits in Schritt 1 & 2 angelegt
+                }
+                if (isset($linkedTargets[$targetDev['id']])) {
+                    continue;
+                }
+                $portLabel = isset($portInfo['port_name']) ? $portInfo['port_name'] : ('Port ' . $portInfo['bridge_port']);
+                $insertLink->execute(array(
+                    ':sid'   => $scopeId,
+                    ':src'   => $sw['id'],
+                    ':dst'   => $targetDev['id'],
+                    ':sport' => $portLabel,
+                    ':dport' => 'eth0',
+                    ':ltype' => 'snmp_l2',
+                    ':now'   => $now,
+                ));
+                $linkedTargets[$targetDev['id']] = true;
+            }
+        }
+
+        // 4. Alle übrigen Geräte im Scope an den Haupt-Switch (falls vorhanden) oder an den Gateway-Router hängen
+        $defaultParent = $primarySwitch ? $primarySwitch : $routerDevice;
+        foreach ($devices as $dev) {
+            if ((int)$dev['id'] === (int)$routerDevice['id'] || isset($linkedTargets[$dev['id']])) {
+                continue;
+            }
+            if ((int)$dev['id'] === (int)$defaultParent['id']) {
+                continue;
+            }
+            $insertLink->execute(array(
+                ':sid'   => $scopeId,
+                ':src'   => $defaultParent['id'],
+                ':dst'   => $dev['id'],
+                ':sport' => null,
+                ':dport' => null,
+                ':ltype' => 'subnet',
+                ':now'   => $now,
+            ));
+            $linkedTargets[$dev['id']] = true;
+        }
+    }
+
+    private function upsertDevice($data)
+    {
+        $scanStartMicro = microtime(true);
+        $now = date('Y-m-d H:i:s');
+        $stmt = $this->pdo->prepare("SELECT id, is_manual_type, device_type FROM devices WHERE ip_address = :ip");
+        $stmt->execute(array(':ip' => $data['ip_address']));
+        $existing = $stmt->fetch();
+
+        if ($existing) {
+            $deviceType = ((int)$existing['is_manual_type'] === 1) ? $existing['device_type'] : $data['device_type'];
+            $upd = $this->pdo->prepare("
+                UPDATE devices SET
+                    scope_id = :scope_id,
+                    mac_address = COALESCE(:mac_address, mac_address),
+                    vendor = COALESCE(:vendor, vendor),
+                    hostname = COALESCE(:hostname, hostname),
+                    device_type = :device_type,
+                    os_guess = :os_guess,
+                    open_ports = :open_ports,
+                    service_info = COALESCE(:service_info, service_info),
+                    snmp_enabled = :snmp_enabled,
+                    snmp_sysname = COALESCE(:snmp_sysname, snmp_sysname),
+                    snmp_sysdescr = COALESCE(:snmp_sysdescr, snmp_sysdescr),
+                    snmp_sysobjectid = COALESCE(:snmp_sysobjectid, snmp_sysobjectid),
+                    snmp_location = COALESCE(:snmp_location, snmp_location),
+                    snmp_ports_json = COALESCE(:snmp_ports_json, snmp_ports_json),
+                    status = :status,
+                    latency_ms = :latency_ms,
+                    last_seen = :now
+                WHERE id = :id
+            ");
+            $upd->execute(array(
+                ':scope_id'        => $data['scope_id'],
+                ':mac_address'     => $data['mac_address'],
+                ':vendor'          => $data['vendor'],
+                ':hostname'        => $data['hostname'],
+                ':device_type'     => $deviceType,
+                ':os_guess'        => $data['os_guess'],
+                ':open_ports'      => $data['open_ports'],
+                ':service_info'    => isset($data['service_info']) ? $data['service_info'] : null,
+                ':snmp_enabled'    => $data['snmp_enabled'],
+                ':snmp_sysname'    => $data['snmp_sysname'],
+                ':snmp_sysdescr'   => $data['snmp_sysdescr'],
+                ':snmp_sysobjectid'=> $data['snmp_sysobjectid'],
+                ':snmp_location'   => $data['snmp_location'],
+                ':snmp_ports_json' => $data['snmp_ports_json'],
+                ':status'          => $data['status'],
+                ':latency_ms'      => $data['latency_ms'],
+                ':now'             => $now,
+                ':id'              => $existing['id'],
+            ));
+            return (int)$existing['id'];
+        } else {
+            $ins = $this->pdo->prepare("
+                INSERT INTO devices (
+                    scope_id, ip_address, mac_address, vendor, hostname, device_type,
+                    os_guess, open_ports, service_info, snmp_enabled, snmp_sysname, snmp_sysdescr,
+                    snmp_sysobjectid, snmp_location, snmp_ports_json, status, latency_ms,
+                    first_seen, last_seen
+                ) VALUES (
+                    :scope_id, :ip_address, :mac_address, :vendor, :hostname, :device_type,
+                    :os_guess, :open_ports, :service_info, :snmp_enabled, :snmp_sysname, :snmp_sysdescr,
+                    :snmp_sysobjectid, :snmp_location, :snmp_ports_json, :status, :latency_ms,
+                    :first_seen, :last_seen
+                )
+            ");
+            $ins->execute(array(
+                ':scope_id'        => $data['scope_id'],
+                ':ip_address'      => $data['ip_address'],
+                ':mac_address'     => $data['mac_address'],
+                ':vendor'          => $data['vendor'],
+                ':hostname'        => $data['hostname'],
+                ':device_type'     => $data['device_type'],
+                ':os_guess'        => $data['os_guess'],
+                ':open_ports'      => $data['open_ports'],
+                ':service_info'    => isset($data['service_info']) ? $data['service_info'] : null,
+                ':snmp_enabled'    => $data['snmp_enabled'],
+                ':snmp_sysname'    => $data['snmp_sysname'],
+                ':snmp_sysdescr'   => $data['snmp_sysdescr'],
+                ':snmp_sysobjectid'=> $data['snmp_sysobjectid'],
+                ':snmp_location'   => $data['snmp_location'],
+                ':snmp_ports_json' => $data['snmp_ports_json'],
+                ':status'          => $data['status'],
+                ':latency_ms'      => $data['latency_ms'],
+                ':first_seen'      => $now,
+                ':last_seen'       => $now,
+            ));
+            return (int)$this->pdo->lastInsertId();
+        }
+    }
+
+    /**
+     * Erweitert CIDR (z.B. 192.168.1.0/24) oder IP-Range (z.B. 192.168.1.1-50) in ein Array von IP-Strings
+     */
+    public function expandCidrOrRange($input, $maxHosts = 512)
+    {
+        $input = trim($input);
+
+        // Fall 1: IP-Bereich wie 192.168.1.10-192.168.1.50 oder 192.168.1.10-50
+        if (strpos($input, '-') !== false) {
+            list($startPart, $endPart) = array_map('trim', explode('-', $input, 2));
+            $startLong = ip2long($startPart);
+            if ($startLong === false) {
+                throw new InvalidArgumentException("Ungültiger IP-Bereich: $input");
+            }
+            if (strpos($endPart, '.') === false) {
+                $octets = explode('.', $startPart);
+                $octets[3] = (int)$endPart;
+                $endPart = implode('.', $octets);
+            }
+            $endLong = ip2long($endPart);
+            if ($endLong === false || $endLong < $startLong) {
+                throw new InvalidArgumentException("Ungültiges Bereichsende: $input");
+            }
+            $ips = array();
+            for ($ip = $startLong; $ip <= $endLong && count($ips) < $maxHosts; $ip++) {
+                $ips[] = long2ip($ip);
+            }
+            return $ips;
+        }
+
+        // Fall 2: CIDR Notation wie 192.168.178.0/24
+        if (strpos($input, '/') !== false) {
+            list($baseIp, $prefix) = explode('/', $input, 2);
+            $prefix = (int)$prefix;
+            $ipLong = ip2long(trim($baseIp));
+            if ($ipLong === false || $prefix < 16 || $prefix > 32) {
+                throw new InvalidArgumentException("Ungültiges CIDR-Subnetz (unterstützt /16 bis /32): $input");
+            }
+            if ($prefix === 32) {
+                return array(long2ip($ipLong));
+            }
+            $mask = -1 << (32 - $prefix);
+            $netLong = $ipLong & $mask;
+            $bcastLong = $netLong | (~$mask & 0xFFFFFFFF);
+
+            $ips = array();
+            for ($cur = $netLong + 1; $cur < $bcastLong && count($ips) < $maxHosts; $cur++) {
+                $ips[] = long2ip($cur);
+            }
+            return $ips;
+        }
+
+        // Fall 3: Einzelne IP
+        if (ip2long($input) !== false) {
+            return array($input);
+        }
+
+        throw new InvalidArgumentException("Ungültiges Netzwerk-Format: $input");
+    }
+
+    /**
+     * Findet aktive Hosts im Subnetz via Nmap (falls installiert) oder schnellem Parallel-Ping
+     */
+    private function discoverLiveHosts($cidr, $ipList)
+    {
+        $live = array();
+
+        // Prüfe ob nmap verfügbar ist
+        $nmapPath = trim((string)@shell_exec('which nmap 2>/dev/null'));
+        if ($nmapPath !== '' && is_executable($nmapPath) && strpos($cidr, '/') !== false) {
+            $cmd = escapeshellcmd($nmapPath) . ' -sn -T4 -oX - ' . escapeshellarg($cidr) . ' 2>/dev/null';
+            $xmlOut = @shell_exec($cmd);
+            if ($xmlOut && strpos($xmlOut, '<nmaprun') !== false) {
+                $xml = @simplexml_load_string($xmlOut);
+                if ($xml && isset($xml->host)) {
+                    foreach ($xml->host as $h) {
+                        if ((string)$h->status['state'] !== 'up') {
+                            continue;
+                        }
+                        $ip = null;
+                        $mac = null;
+                        foreach ($h->address as $addr) {
+                            $type = (string)$addr['addrtype'];
+                            if ($type === 'ipv4') {
+                                $ip = (string)$addr['addr'];
+                            } elseif ($type === 'mac') {
+                                $mac = (string)$addr['addr'];
+                            }
+                        }
+                        $hostname = null;
+                        if (isset($h->hostnames->hostname[0]['name'])) {
+                            $hostname = (string)$h->hostnames->hostname[0]['name'];
+                        }
+                        $lat = 1.0;
+                        if (isset($h->times['srtt'])) {
+                            $lat = round(((int)$h->times['srtt']) / 1000, 2);
+                        }
+                        $ttl = null;
+                        if (isset($h->status['reason_ttl']) && (int)$h->status['reason_ttl'] > 0) {
+                            $ttl = (int)$h->status['reason_ttl'];
+                        }
+                        if ($ip) {
+                            $live[$ip] = array(
+                                'latency_ms' => $lat,
+                                'mac'        => $mac,
+                                'hostname'   => $hostname,
+                                'ttl'        => $ttl,
+                            );
+                        }
+                    }
+                    if (!empty($live)) {
+                        return $live;
+                    }
+                }
+            }
+        }
+
+        // Fallback: Schneller paralleler Ping-Sweep in Batches
+        $batchSize = isset($this->config['ping_batch_size']) ? (int)$this->config['ping_batch_size'] : 64;
+        $chunks = array_chunk($ipList, $batchSize);
+
+        foreach ($chunks as $chunk) {
+            $procs = array();
+            foreach ($chunk as $ip) {
+                $descriptors = array(
+                    0 => array('pipe', 'r'),
+                    1 => array('pipe', 'w'),
+                    2 => array('pipe', 'w'),
+                );
+                $cmd = 'ping -n -c 1 -W 1 ' . escapeshellarg($ip);
+                $p = @proc_open($cmd, $descriptors, $pipes);
+                if (is_resource($p)) {
+                    fclose($pipes[0]);
+                    $procs[$ip] = array('proc' => $p, 'stdout' => $pipes[1], 'stderr' => $pipes[2]);
+                }
+            }
+
+            foreach ($procs as $ip => $info) {
+                $out = stream_get_contents($info['stdout']);
+                fclose($info['stdout']);
+                fclose($info['stderr']);
+                $exitCode = proc_close($info['proc']);
+                if ($exitCode === 0) {
+                    $lat = 1.0;
+                    if (preg_match('/time[=<]([0-9.]+)\s*ms/i', $out, $m)) {
+                        $lat = (float)$m[1];
+                    }
+                    $ttl = null;
+                    if (preg_match('/ttl[=<]([0-9]+)/i', $out, $tm)) {
+                        $ttl = (int)$tm[1];
+                    }
+                    $live[$ip] = array(
+                        'latency_ms' => $lat,
+                        'mac'        => null,
+                        'hostname'   => null,
+                        'ttl'        => $ttl,
+                    );
+                }
+            }
+        }
+
+        return $live;
+    }
+
+    /**
+     * Liest den ARP-/Neighbor-Cache des Linux-Kernels (/proc/net/arp & ip neigh)
+     */
+    private function readArpTable()
+    {
+        $map = array();
+        if (is_readable('/proc/net/arp')) {
+            $lines = @file('/proc/net/arp', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+            if (is_array($lines)) {
+                foreach ($lines as $idx => $line) {
+                    if ($idx === 0) {
+                        continue;
+                    }
+                    $cols = preg_split('/\s+/', trim($line));
+                    if (count($cols) >= 4) {
+                        $ip = $cols[0];
+                        $mac = $cols[3];
+                        if ($mac !== '00:00:00:00:00:00' && strlen($mac) === 17) {
+                            $map[$ip] = strtoupper($mac);
+                        }
+                    }
+                }
+            }
+        }
+
+        $neighOut = @shell_exec('ip -4 neigh show 2>/dev/null');
+        if ($neighOut) {
+            $lines = explode("\n", trim($neighOut));
+            foreach ($lines as $line) {
+                if (preg_match('/^([0-9.]+)\s+.*lladdr\s+([0-9a-fA-F:]{17})/', trim($line), $m)) {
+                    $map[$m[1]] = strtoupper($m[2]);
+                }
+            }
+        }
+        return $map;
+    }
+
+    /**
+     * Liest IP + MAC der lokalen Netzwerkkarten des Servers aus
+     */
+    private function getLocalServerInterfaces()
+    {
+        $res = array();
+        $out = @shell_exec('ip -o addr show 2>/dev/null');
+        $linkOut = @shell_exec('ip -o link show 2>/dev/null');
+        $ifMacs = array();
+        if ($linkOut) {
+            foreach (explode("\n", trim($linkOut)) as $line) {
+                if (preg_match('/^\d+:\s+([^:@]+).*link\/ether\s+([0-9a-fA-F:]{17})/', $line, $m)) {
+                    $ifMacs[trim($m[1])] = strtoupper($m[2]);
+                }
+            }
+        }
+        if ($out) {
+            foreach (explode("\n", trim($out)) as $line) {
+                if (preg_match('/^\d+:\s+([^\s]+)\s+inet\s+([0-9.]+)\//', $line, $m)) {
+                    $ifName = trim($m[1]);
+                    $ip = $m[2];
+                    if ($ip !== '127.0.0.1') {
+                        $res[$ip] = isset($ifMacs[$ifName]) ? $ifMacs[$ifName] : null;
+                    }
+                }
+            }
+        }
+        return $res;
+    }
+
+    /**
+     * Multi-Host-Batch TCP-Port-Check:
+     * Prüft $hostBatchSize Hosts × 15 Ports gleichzeitig über einen einzigen asynchronen stream_select()-Loop!
+     * Dadurch dauern 32 Hosts zusammen nur ~350ms (statt 32 × 350ms = 11,2 Sekunden).
+     */
+    private function probeTcpPortsMultiHostBatch(array $ipList, array $portsMap, $timeoutMs = 350, $hostBatchSize = 32)
+    {
+        $results = array();
+        foreach ($ipList as $ip) {
+            $results[$ip] = array();
+        }
+        if (empty($ipList) || empty($portsMap)) {
+            return $results;
+        }
+
+        $chunks = array_chunk($ipList, max(1, (int)$hostBatchSize));
+        $timeoutSec = $timeoutMs / 1000.0;
+
+        foreach ($chunks as $chunk) {
+            $sockets = array();
+            $metaBySockId = array();
+
+            foreach ($chunk as $ip) {
+                foreach ($portsMap as $port => $label) {
+                    $errno = 0;
+                    $errstr = '';
+                    $s = @stream_socket_client(
+                        'tcp://' . $ip . ':' . (int)$port,
+                        $errno,
+                        $errstr,
+                        0,
+                        STREAM_CLIENT_ASYNC_CONNECT | STREAM_CLIENT_CONNECT
+                    );
+                    if ($s) {
+                        stream_set_blocking($s, false);
+                        $id = (int)$s;
+                        $sockets[$id] = $s;
+                        $metaBySockId[$id] = array('ip' => $ip, 'port' => (int)$port);
+                    }
+                }
+            }
+
+            $start = microtime(true);
+            while (!empty($sockets)) {
+                $rem = $timeoutSec - (microtime(true) - $start);
+                if ($rem <= 0) {
+                    break;
+                }
+                $write = array_values($sockets);
+                $read = null;
+                $except = null;
+                $sec = (int)floor($rem);
+                $usec = (int)(($rem - $sec) * 1000000);
+
+                $num = @stream_select($read, $write, $except, $sec, $usec);
+                if ($num === false || $num === 0) {
+                    break;
+                }
+                foreach ($write as $s) {
+                    $id = (int)$s;
+                    $meta = $metaBySockId[$id];
+                    $peer = @stream_socket_get_name($s, true);
+                    if ($peer !== false) {
+                        $p = $meta['port'];
+                        $results[$meta['ip']][$p] = $portsMap[$p];
+                    }
+                    @fclose($s);
+                    unset($sockets[$id]);
+                }
+            }
+
+            foreach ($sockets as $s) {
+                @fclose($s);
+            }
+        }
+
+        foreach ($results as $ip => $openMap) {
+            ksort($results[$ip]);
+        }
+        return $results;
+    }
+
+    /**
+     * Multi-Host-Batch DNS Reverse-Lookup (PTR) über parallele nicht-blockierende UDP-Sockets (Port 53)
+     * Löst 64 IPs gleichzeitig in ~250ms auf, ohne durch mDNS/Avahi-Timeouts aufgehalten zu werden.
+     */
+    private function resolveHostnamesBatch(array $ipList, $timeoutMs = 250)
+    {
+        $map = array();
+        if (empty($ipList)) {
+            return $map;
+        }
+
+        // Ermittle lokalen DNS-Server aus /etc/resolv.conf (oder nutze .1 Gateway des ersten Hosts)
+        $dnsServer = '127.0.0.53';
+        if (is_readable('/etc/resolv.conf')) {
+            $resolv = @file_get_contents('/etc/resolv.conf');
+            if ($resolv && preg_match('/^\s*nameserver\s+([0-9.]+)/m', $resolv, $m)) {
+                $dnsServer = $m[1];
+            }
+        }
+        // Falls systemd-resolved (127.0.0.53), prüfe ob ein echter Router-DNS erreichbar ist
+        $firstOctets = explode('.', $ipList[0]);
+        $routerDns = (count($firstOctets) === 4) ? ($firstOctets[0] . '.' . $firstOctets[1] . '.' . $firstOctets[2] . '.1') : $dnsServer;
+
+        $chunks = array_chunk($ipList, 64);
+        $timeoutSec = $timeoutMs / 1000.0;
+
+        foreach ($chunks as $chunk) {
+            $sockets = array();
+            $ipBySockId = array();
+
+            foreach ($chunk as $ip) {
+                $parts = explode('.', $ip);
+                if (count($parts) !== 4) {
+                    continue;
+                }
+                $ptrDomain = $parts[3] . '.' . $parts[2] . '.' . $parts[1] . '.' . $parts[0] . '.in-addr.arpa';
+                $pkt = $this->buildDnsPtrQuery($ptrDomain);
+
+                $errno = 0;
+                $errstr = '';
+                $sock = @stream_socket_client('udp://' . $routerDns . ':53', $errno, $errstr, 0, STREAM_CLIENT_ASYNC_CONNECT | STREAM_CLIENT_CONNECT);
+                if ($sock) {
+                    stream_set_blocking($sock, false);
+                    @fwrite($sock, $pkt);
+                    $id = (int)$sock;
+                    $sockets[$id] = $sock;
+                    $ipBySockId[$id] = $ip;
+                }
+            }
+
+            $start = microtime(true);
+            while (!empty($sockets)) {
+                $rem = $timeoutSec - (microtime(true) - $start);
+                if ($rem <= 0) {
+                    break;
+                }
+                $read = array_values($sockets);
+                $write = null;
+                $except = null;
+                $sec = (int)floor($rem);
+                $usec = (int)(($rem - $sec) * 1000000);
+
+                $num = @stream_select($read, $write, $except, $sec, $usec);
+                if ($num === false || $num === 0) {
+                    break;
+                }
+                foreach ($read as $rSock) {
+                    $id = (int)$rSock;
+                    $resp = @fread($rSock, 512);
+                    if ($resp && strlen($resp) > 12) {
+                        $host = $this->parseDnsPtrResponse($resp);
+                        if ($host) {
+                            $map[$ipBySockId[$id]] = $host;
+                        }
+                    }
+                    @fclose($rSock);
+                    unset($sockets[$id]);
+                }
+            }
+
+            foreach ($sockets as $s) {
+                @fclose($s);
+            }
+        }
+
+        return $map;
+    }
+
+    private function buildDnsPtrQuery($domain)
+    {
+        $txId = mt_rand(1, 65000);
+        // Header: ID, Flags (0x0100 Standard Query), QDCOUNT=1, ANCOUNT=0, NSCOUNT=0, ARCOUNT=0
+        $pkt = pack('nnnnnn', $txId, 0x0100, 1, 0, 0, 0);
+        foreach (explode('.', $domain) as $label) {
+            $pkt .= chr(strlen($label)) . $label;
+        }
+        $pkt .= "\x00"; // Root null label
+        $pkt .= pack('nn', 12, 1); // QTYPE = 12 (PTR), QCLASS = 1 (IN)
+        return $pkt;
+    }
+
+    private function parseDnsPtrResponse($resp)
+    {
+        $len = strlen($resp);
+        if ($len < 12) {
+            return null;
+        }
+        $hdr = unpack('nid/nflags/nqdcount/nancount', substr($resp, 0, 8));
+        if (!$hdr || $hdr['ancount'] < 1 || ($hdr['flags'] & 0x000F) !== 0) {
+            return null;
+        }
+        $pos = 12;
+        // Skip Question section
+        for ($q = 0; $q < $hdr['qdcount']; $q++) {
+            $this->readDnsName($resp, $pos);
+            $pos += 4;
+        }
+        // Read first Answer RR
+        for ($a = 0; $a < $hdr['ancount']; $a++) {
+            if ($pos + 10 > $len) {
+                break;
+            }
+            $this->readDnsName($resp, $pos);
+            if ($pos + 10 > $len) {
+                break;
+            }
+            $ans = unpack('ntype/nclass/Nttl/nrdlen', substr($resp, $pos, 10));
+            $pos += 10;
+            if ($ans['type'] === 12) { // PTR
+                $rpos = $pos;
+                $name = $this->readDnsName($resp, $rpos);
+                return $name !== '' ? rtrim($name, '.') : null;
+            }
+            $pos += $ans['rdlen'];
+        }
+        return null;
+    }
+
+    private function readDnsName($pkt, &$pos)
+    {
+        $len = strlen($pkt);
+        $labels = array();
+        $jumped = false;
+        $maxJumps = 10;
+        $origPos = $pos;
+
+        while ($pos < $len && $maxJumps-- > 0) {
+            $l = ord($pkt[$pos]);
+            if ($l === 0) {
+                $pos++;
+                break;
+            }
+            if (($l & 0xC0) === 0xC0) {
+                if ($pos + 1 >= $len) {
+                    break;
+                }
+                $ptr = (($l & 0x3F) << 8) | ord($pkt[$pos + 1]);
+                if (!$jumped) {
+                    $origPos = $pos + 2;
+                    $jumped = true;
+                }
+                $pos = $ptr;
+                continue;
+            }
+            $pos++;
+            if ($pos + $l > $len) {
+                break;
+            }
+            $labels[] = substr($pkt, $pos, $l);
+            $pos += $l;
+        }
+        if ($jumped) {
+            $pos = $origPos;
+        }
+        return implode('.', $labels);
+    }
+
+    /**
+     * Asynchroner paralleler TCP-Port-Check für einen einzelnen Host
+     */
+    private function probeTcpPorts($ip, $portsMap, $timeoutMs = 350)
+    {
+        $open = array();
+        $sockets = array();
+        $portBySockId = array();
+
+        foreach ($portsMap as $port => $label) {
+            $errno = 0;
+            $errstr = '';
+            $s = @stream_socket_client(
+                'tcp://' . $ip . ':' . (int)$port,
+                $errno,
+                $errstr,
+                0,
+                STREAM_CLIENT_ASYNC_CONNECT | STREAM_CLIENT_CONNECT
+            );
+            if ($s) {
+                stream_set_blocking($s, false);
+                $id = (int)$s;
+                $sockets[$id] = $s;
+                $portBySockId[$id] = (int)$port;
+            }
+        }
+
+        $start = microtime(true);
+        $timeoutSec = $timeoutMs / 1000.0;
+
+        while (!empty($sockets)) {
+            $elapsed = microtime(true) - $start;
+            $rem = $timeoutSec - $elapsed;
+            if ($rem <= 0) {
+                break;
+            }
+            $write = array_values($sockets);
+            $read = null;
+            $except = null;
+            $sec = (int)floor($rem);
+            $usec = (int)(($rem - $sec) * 1000000);
+
+            $num = @stream_select($read, $write, $except, $sec, $usec);
+            if ($num === false || $num === 0) {
+                break;
+            }
+            foreach ($write as $s) {
+                $id = (int)$s;
+                $port = $portBySockId[$id];
+                // Prüfen ob der Socket wirklich verbunden ist (kein Connection Refused)
+                $peer = @stream_socket_get_name($s, true);
+                if ($peer !== false) {
+                    $open[$port] = $portsMap[$port];
+                }
+                @fclose($s);
+                unset($sockets[$id]);
+            }
+        }
+
+        foreach ($sockets as $s) {
+            @fclose($s);
+        }
+        ksort($open);
+        return $open;
+    }
+
+    private function resolveHostname($ip)
+    {
+        $host = @gethostbyaddr($ip);
+        if ($host && $host !== $ip) {
+            return $host;
+        }
+        return null;
+    }
+
+    private function formatOpenPorts($openPorts)
+    {
+        if (empty($openPorts)) {
+            return '';
+        }
+        $parts = array();
+        foreach ($openPorts as $p => $name) {
+            $parts[] = $p . '/' . $name;
+        }
+        return implode(', ', $parts);
+    }
+
+    /**
+     * Multi-Host-Batch NetBIOS Node Status (NBSTAT UDP 137):
+     * Ermittelt Windows-Rechnernamen und Arbeitsgruppen/Domänen parallel in ~250ms.
+     */
+    private function probeNetbiosBatch(array $ipList, $timeoutMs = 250)
+    {
+        $results = array();
+        if (empty($ipList)) {
+            return $results;
+        }
+
+        // Standard NetBIOS Node Status Request für "*" (Wildcard)
+        $nbQuery = "\x80\x94\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00"
+                 . "\x20\x43\x4b\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41"
+                 . "\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x00"
+                 . "\x00\x21\x00\x01";
+
+        $chunks = array_chunk($ipList, 64);
+        $timeoutSec = $timeoutMs / 1000.0;
+
+        foreach ($chunks as $chunk) {
+            $sockets = array();
+            $ipBySockId = array();
+
+            foreach ($chunk as $ip) {
+                $errno = 0;
+                $errstr = '';
+                $sock = @stream_socket_client('udp://' . $ip . ':137', $errno, $errstr, 0, STREAM_CLIENT_ASYNC_CONNECT | STREAM_CLIENT_CONNECT);
+                if ($sock) {
+                    stream_set_blocking($sock, false);
+                    @fwrite($sock, $nbQuery);
+                    $id = (int)$sock;
+                    $sockets[$id] = $sock;
+                    $ipBySockId[$id] = $ip;
+                }
+            }
+
+            $start = microtime(true);
+            while (!empty($sockets)) {
+                $rem = $timeoutSec - (microtime(true) - $start);
+                if ($rem <= 0) {
+                    break;
+                }
+                $read = array_values($sockets);
+                $write = null;
+                $except = null;
+                $sec = (int)floor($rem);
+                $usec = (int)(($rem - $sec) * 1000000);
+
+                $num = @stream_select($read, $write, $except, $sec, $usec);
+                if ($num === false || $num === 0) {
+                    break;
+                }
+                foreach ($read as $rSock) {
+                    $id = (int)$rSock;
+                    $resp = @fread($rSock, 512);
+                    if ($resp && strlen($resp) > 57) {
+                        $parsed = $this->parseNetbiosResponse($resp);
+                        if ($parsed) {
+                            $results[$ipBySockId[$id]] = $parsed;
+                        }
+                    }
+                    @fclose($rSock);
+                    unset($sockets[$id]);
+                }
+            }
+
+            foreach ($sockets as $s) {
+                @fclose($s);
+            }
+        }
+
+        return $results;
+    }
+
+    private function parseNetbiosResponse($resp)
+    {
+        $len = strlen($resp);
+        if ($len < 57) {
+            return null;
+        }
+        $numNames = ord($resp[56]);
+        if ($numNames < 1 || $numNames > 32) {
+            return null;
+        }
+        $pos = 57;
+        $hostName = null;
+        $workgroup = null;
+
+        for ($i = 0; $i < $numNames && ($pos + 18) <= $len; $i++) {
+            $rawName = substr($resp, $pos, 15);
+            $suffix = ord($resp[$pos + 15]);
+            $flags = unpack('nf', substr($resp, $pos + 16, 2));
+            $isGroup = ($flags && ($flags['f'] & 0x8000) !== 0);
+            $clean = trim(preg_replace('/[^\x20-\x7E]/', '', $rawName));
+
+            if ($clean !== '') {
+                if (!$isGroup && $suffix === 0x00 && $hostName === null) {
+                    $hostName = $clean;
+                } elseif ($isGroup && $suffix === 0x00 && $workgroup === null) {
+                    $workgroup = $clean;
+                }
+            }
+            $pos += 18;
+        }
+
+        if ($hostName === null && $workgroup === null) {
+            return null;
+        }
+        return array('name' => $hostName, 'workgroup' => $workgroup);
+    }
+
+    /**
+     * Multi-Host-Batch Service-Banner & HTTP-Title Grabber:
+     * Liest von bereits als offen erkannten Ports (22 SSH, 80/8080 HTTP) parallel
+     * den SSH-Versionsstring, den HTTP Server-Header sowie den HTML <title> aus.
+     */
+    private function probeServiceBannersBatch(array $batchOpenPorts, $timeoutMs = 550)
+    {
+        $banners = array();
+        $targets = array();
+
+        foreach ($batchOpenPorts as $ip => $ports) {
+            $banners[$ip] = array(
+                'ssh_banner'  => null,
+                'http_server' => null,
+                'http_title'  => null,
+            );
+            if (isset($ports[22])) {
+                $targets[] = array('ip' => $ip, 'port' => 22, 'proto' => 'ssh');
+            }
+            if (isset($ports[80])) {
+                $targets[] = array('ip' => $ip, 'port' => 80, 'proto' => 'http');
+            } elseif (isset($ports[8080])) {
+                $targets[] = array('ip' => $ip, 'port' => 8080, 'proto' => 'http');
+            }
+        }
+
+        if (empty($targets)) {
+            return $banners;
+        }
+
+        $chunks = array_chunk($targets, 32);
+        $timeoutSec = $timeoutMs / 1000.0;
+
+        foreach ($chunks as $chunk) {
+            $sockets = array();
+            $meta = array();
+
+            foreach ($chunk as $t) {
+                $errno = 0;
+                $errstr = '';
+                $s = @stream_socket_client(
+                    'tcp://' . $t['ip'] . ':' . $t['port'],
+                    $errno,
+                    $errstr,
+                    0,
+                    STREAM_CLIENT_ASYNC_CONNECT | STREAM_CLIENT_CONNECT
+                );
+                if ($s) {
+                    stream_set_blocking($s, false);
+                    $id = (int)$s;
+                    $sockets[$id] = $s;
+                    $meta[$id] = array(
+                        'ip'    => $t['ip'],
+                        'port'  => $t['port'],
+                        'proto' => $t['proto'],
+                        'sent'  => false,
+                        'buf'   => '',
+                    );
+                }
+            }
+
+            $start = microtime(true);
+            while (!empty($sockets)) {
+                $rem = $timeoutSec - (microtime(true) - $start);
+                if ($rem <= 0) {
+                    break;
+                }
+                $read = array_values($sockets);
+                $write = array();
+                foreach ($sockets as $id => $s) {
+                    if ($meta[$id]['proto'] === 'http' && !$meta[$id]['sent']) {
+                        $write[] = $s;
+                    }
+                }
+                if (empty($write)) {
+                    $write = null;
+                }
+                $except = null;
+                $sec = (int)floor($rem);
+                $usec = (int)(($rem - $sec) * 1000000);
+
+                $num = @stream_select($read, $write, $except, $sec, $usec);
+                if ($num === false || $num === 0) {
+                    break;
+                }
+
+                if (is_array($write)) {
+                    foreach ($write as $wSock) {
+                        $id = (int)$wSock;
+                        if (isset($meta[$id]) && !$meta[$id]['sent']) {
+                            $req = "GET / HTTP/1.0\r\nHost: " . $meta[$id]['ip'] . "\r\nUser-Agent: NetworkMonitor/1.0\r\nConnection: close\r\n\r\n";
+                            @fwrite($wSock, $req);
+                            $meta[$id]['sent'] = true;
+                        }
+                    }
+                }
+
+                if (is_array($read)) {
+                    foreach ($read as $rSock) {
+                        $id = (int)$rSock;
+                        if (!isset($meta[$id])) {
+                            continue;
+                        }
+                        $chunkData = @fread($rSock, 4096);
+                        if ($chunkData === false || $chunkData === '') {
+                            $this->extractBannerFromBuffer($banners, $meta[$id]);
+                            @fclose($rSock);
+                            unset($sockets[$id], $meta[$id]);
+                        } else {
+                            $meta[$id]['buf'] .= $chunkData;
+                            if ($meta[$id]['proto'] === 'ssh' && strpos($meta[$id]['buf'], "\n") !== false) {
+                                $this->extractBannerFromBuffer($banners, $meta[$id]);
+                                @fclose($rSock);
+                                unset($sockets[$id], $meta[$id]);
+                            } elseif (strlen($meta[$id]['buf']) >= 4096 || stripos($meta[$id]['buf'], '</title>') !== false) {
+                                $this->extractBannerFromBuffer($banners, $meta[$id]);
+                                @fclose($rSock);
+                                unset($sockets[$id], $meta[$id]);
+                            }
+                        }
+                    }
+                }
+            }
+
+            foreach ($sockets as $id => $s) {
+                if (isset($meta[$id]) && $meta[$id]['buf'] !== '') {
+                    $this->extractBannerFromBuffer($banners, $meta[$id]);
+                }
+                @fclose($s);
+            }
+        }
+
+        return $banners;
+    }
+
+    private function extractBannerFromBuffer(&$banners, $m)
+    {
+        $ip = $m['ip'];
+        $buf = $m['buf'];
+        if ($buf === '') {
+            return;
+        }
+
+        if ($m['proto'] === 'ssh') {
+            $firstLine = strtok($buf, "\r\n");
+            if ($firstLine && strpos($firstLine, 'SSH-') === 0) {
+                $clean = trim(preg_replace('/^SSH-\d+\.\d+-/', '', $firstLine));
+                $banners[$ip]['ssh_banner'] = substr($clean, 0, 60);
+            }
+            return;
+        }
+
+        if ($m['proto'] === 'http') {
+            if (preg_match('/^Server:\s*([^\r\n]+)/mi', $buf, $sm)) {
+                $srv = trim($sm[1]);
+                if ($srv !== '') {
+                    $banners[$ip]['http_server'] = substr($srv, 0, 50);
+                }
+            }
+            if (preg_match('/<title[^>]*>(.*?)<\/title>/is', $buf, $tm)) {
+                $title = trim(html_entity_decode(strip_tags($tm[1]), ENT_QUOTES, 'UTF-8'));
+                $title = preg_replace('/\s+/', ' ', $title);
+                if ($title !== '' && stripos($title, '301 Moved') === false && stripos($title, '302 Found') === false && stripos($title, '404 Not Found') === false) {
+                    $banners[$ip]['http_title'] = substr($title, 0, 65);
+                }
+            }
+        }
+    }
+
+    /**
+     * Intelligente Betriebssystem-Erkennung (OS-Fingerprinting):
+     * Kombiniert SNMP sysDescr, SSH/HTTP-Banner, Hostnamen, offene Ports, Hersteller-OUI und den ICMP-TTL-Wert!
+     * (TTL ~64 = Linux/macOS/iOS/Android | TTL ~128 = Windows | TTL ~255 = Cisco/Switch/Netzwerkgerät)
+     */
+    private function guessOs($openPorts, $vendor, $snmpSysDescr, $deviceType, $ttl = null, $hostname = null, $serviceInfo = null)
+    {
+        // Lokales DNS-Suffix (.fritz.box / .local / .lan) vor dem Keyword-Matching entfernen!
+        $hostShort = preg_replace('/\.(fritz\.box|local|lan)$/i', '', (string)$hostname);
+
+        $combined = strtolower(
+            (string)$snmpSysDescr . ' ' .
+            (string)$vendor . ' ' .
+            $hostShort . ' ' .
+            (string)$serviceInfo
+        );
+
+        // 1. Spezifische Netzwerk- & Infrastruktur-Systeme
+        if (strpos($combined, 'cisco ios') !== false) {
+            return 'Cisco IOS';
+        }
+        if (strpos($combined, 'procurve') !== false || strpos($combined, 'arubaos') !== false) {
+            return 'HP ArubaOS / ProCurve';
+        }
+        if (strpos($combined, 'routeros') !== false || strpos($combined, 'mikrotik') !== false) {
+            return 'MikroTik RouterOS';
+        }
+        if (
+            strpos($combined, 'fritz!box') !== false ||
+            strpos($combined, 'fritzbox') !== false ||
+            strtolower($hostShort) === 'fritz.box' ||
+            strpos($combined, 'avm gmbh') !== false
+        ) {
+            return 'AVM FRITZ!OS (Linux)';
+        }
+        if (strpos($combined, 'ubnt') !== false || strpos($combined, 'ubiquiti') !== false || strpos($combined, 'unifi') !== false) {
+            return 'Ubiquiti UniFi OS (Linux)';
+        }
+        if (strpos($combined, 'synology') !== false || strpos($combined, 'diskstation') !== false) {
+            return 'Synology DSM (Linux)';
+        }
+        if (strpos($combined, 'qnap') !== false) {
+            return 'QNAP QTS (Linux)';
+        }
+        if (strpos($combined, 'proxmox') !== false) {
+            return 'Proxmox VE (Debian Linux)';
+        }
+        if (strpos($combined, 'vmware') !== false || strpos($combined, 'esxi') !== false) {
+            return 'VMware ESXi';
+        }
+
+        // 2. Exakte Linux-Distributionen aus SSH-Banner oder SNMP
+        if (strpos($combined, 'ubuntu') !== false) {
+            return 'Ubuntu Linux';
+        }
+        if (strpos($combined, 'debian') !== false || strpos($combined, 'raspbian') !== false) {
+            return 'Debian / Raspberry Pi OS';
+        }
+
+        // 3. Apple-Ökosystem (iOS / iPadOS / tvOS / macOS)
+        if (strpos($combined, 'iphone') !== false) {
+            return 'Apple iOS (iPhone)';
+        }
+        if (strpos($combined, 'ipad') !== false) {
+            return 'Apple iPadOS (iPad)';
+        }
+        if (strpos($combined, 'apple-tv') !== false || strpos($combined, 'appletv') !== false) {
+            return 'Apple tvOS';
+        }
+        if (strpos($combined, 'macbook') !== false || strpos($combined, 'imac') !== false || strpos($combined, 'mac-mini') !== false) {
+            return 'Apple macOS';
+        }
+        if (strpos($combined, 'apple') !== false) {
+            return 'Apple iOS / macOS (Darwin)';
+        }
+
+        // 4. Google Android / Samsung / Mobile
+        if (
+            strpos($combined, 'android') !== false ||
+            strpos($combined, 'galaxy') !== false ||
+            strpos($combined, 's25') !== false ||
+            strpos($combined, 's24') !== false ||
+            strpos($combined, 's23') !== false ||
+            strpos($combined, 'pixel') !== false ||
+            strpos($combined, 'xiaomi') !== false ||
+            strpos($combined, 'huawei') !== false
+        ) {
+            return 'Google Android';
+        }
+
+        // 5. Smart-Home & Embedded IoT (Espressif ESP32/ESP8266, Tuya, Amazon Echo, Internet Radio)
+        if (strpos($combined, 'espressif') !== false || strpos($combined, 'esp32') !== false || strpos($combined, 'esp8266') !== false || strpos($combined, 'tasmota') !== false) {
+            return 'FreeRTOS / ESP-IDF (IoT)';
+        }
+        if (strpos($combined, 'tuya') !== false) {
+            return 'Embedded IoT Linux (Tuya)';
+        }
+        if (strpos($combined, 'magic iradio') !== false || strpos($combined, 'frontier silicon') !== false || strpos($combined, 'http-ir-') !== false) {
+            return 'Frontier Smart Radio OS (Embedded)';
+        }
+        if (strpos($combined, 'amazon') !== false || strpos($combined, 'echo') !== false || strpos($combined, 'fire') !== false) {
+            return 'Amazon Fire OS (Android/Linux)';
+        }
+
+        // 6. Drucker-Firmware
+        if ($deviceType === 'printer' || strpos($combined, 'jetdirect') !== false || strpos($combined, 'laserjet') !== false || strpos($combined, 'officejet') !== false) {
+            return 'HP / Embedded Printer Firmware';
+        }
+
+        // 7. Microsoft Windows (Ports 3389 RDP, 445 SMB, 135 RPC, IIS, Workgroup oder ICMP TTL ~128!)
+        if (
+            strpos($combined, 'windows') !== false ||
+            strpos($combined, 'microsoft-iis') !== false ||
+            strpos($combined, 'workgroup:') !== false ||
+            isset($openPorts[3389]) ||
+            (isset($openPorts[445]) && !isset($openPorts[22])) ||
+            ($ttl !== null && $ttl > 64 && $ttl <= 128) ||
+            (($ttl === null || $ttl > 64) && (strpos($combined, 'desktop-') !== false || strpos($combined, 'laptop-') !== false))
+        ) {
+            return 'Microsoft Windows 10 / 11';
+        }
+
+        // 8. Linux / Unix (Port 22 SSH, Linux-Banner oder PC/Notebook mit TTL 64)
+        if (strpos($combined, 'linux') !== false || isset($openPorts[22])) {
+            return 'Linux / Unix';
+        }
+        if ($ttl !== null && $ttl <= 64 && (strpos($combined, 'intel') !== false || strpos($combined, 'asustek') !== false || strpos($combined, 'realtek') !== false || strpos($combined, 'dell') !== false)) {
+            return 'Linux Workstation / Desktop (TTL ' . (int)$ttl . ')';
+        }
+
+        // 9. ICMP TTL-basierte Klassifizierung, falls keine Ports offen sind (z.B. Firewall aktiv)
+        if ($ttl !== null) {
+            if ($ttl > 128) {
+                return 'Embedded / Network Appliance (TTL ' . (int)$ttl . ')';
+            }
+            if ($ttl > 64 && $ttl <= 128) {
+                return 'Microsoft Windows (TTL ' . (int)$ttl . ')';
+            }
+            if ($ttl <= 64) {
+                if (strpos($combined, 'randomisiert') !== false || strpos($combined, 'private') !== false) {
+                    return 'iOS / Android Mobilgerät (TTL ' . (int)$ttl . ')';
+                }
+                return 'Linux / Embedded / Mobile OS (TTL ' . (int)$ttl . ')';
+            }
+        }
+
+        if (strpos($combined, 'randomisiert') !== false || strpos($combined, 'private') !== false) {
+            return 'iOS / Android Mobilgerät (Sleep)';
+        }
+        if ($deviceType === 'switch') {
+            return 'Managed Switch OS';
+        }
+        if ($deviceType === 'router') {
+            return 'Router / Firewall OS';
+        }
+        return 'Embedded / Unbekannt';
+    }
+}
