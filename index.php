@@ -62,6 +62,12 @@ $isAdmin = ($userRole === 'admin');
                 </button>
             <?php endif; ?>
 
+            <!-- Alarm-Glocke (Online/Offline Geräte-Überwachung) -->
+            <button id="btn-topbar-alerts" class="btn btn-sm" onclick="openAlertsModal()" title="Geräte-Alarme &amp; Statuswechsel anzeigen">
+                🔔 <span id="topbar-alert-label" style="font-size:12px;">Alarme</span>
+                <span id="topbar-alert-badge" class="badge badge-offline" style="display:none;margin-left:3px;">0</span>
+            </button>
+
             <!-- Benutzermenü Dropdown -->
             <div class="dropdown">
                 <button class="btn btn-sm" onclick="toggleDropdown('dd-user-menu', event)">
@@ -333,6 +339,73 @@ $isAdmin = ($userRole === 'admin');
                                 • <b>ADMIN (Administrator):</b> Vollzugriff inkl. Datenbank-Konfiguration, Benutzerverwaltung, Scans &amp; Bearbeitung.<br>
                                 • <b>OPERATOR (Techniker):</b> Darf Scans starten, Scopes anlegen sowie Geräte, Switch-Ports und Gruppen bearbeiten.<br>
                                 • <b>VIEWER (Betrachter):</b> Darf sich anmelden, alle 6 Netzwerkplan-Ansichten nutzen, filtern und Pläne (SVG/Draw.io/PDF/CSV) exportieren, aber nichts verändern.
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- SMTP E-Mail-Server & Alarm-Benachrichtigungen -->
+                    <div style="background:var(--bg-panel);border:1px solid var(--border-color);border-radius:10px;padding:18px;display:flex;flex-direction:column;gap:14px;">
+                        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+                            <div>
+                                <h3 style="font-size:15px;">🔔 SMTP E-Mail-Server &amp; Geräte-Alarm-Benachrichtigungen</h3>
+                                <div style="font-size:12.5px;color:var(--text-secondary);">
+                                    Konfiguriere einen SMTP-Server, um bei Statuswechseln überwachter Geräte (Offline-Ausfall / Online-Wiederherstellung) automatisch eine E-Mail zu versenden.
+                                </div>
+                            </div>
+                            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;background:rgba(59,130,246,0.12);border:1px solid rgba(59,130,246,0.35);padding:6px 12px;border-radius:8px;font-size:13px;font-weight:600;color:#93c5fd;">
+                                <input type="checkbox" id="adm-smtp-enabled" style="width:16px;height:16px;">
+                                <span>E-Mail-Alarme aktivieren</span>
+                            </label>
+                        </div>
+
+                        <div style="display:grid;grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));gap:12px;">
+                            <div class="form-group">
+                                <label>SMTP-Server (Host / IP) *</label>
+                                <input type="text" id="adm-smtp-host" class="form-input" placeholder="z.B. smtp.office365.com oder mail.firma.de">
+                            </div>
+                            <div class="form-group">
+                                <label>SMTP-Port *</label>
+                                <input type="number" id="adm-smtp-port" class="form-input" value="587" placeholder="587 (STARTTLS) oder 465 (SSL)">
+                            </div>
+                            <div class="form-group">
+                                <label>Verschlüsselung</label>
+                                <select id="adm-smtp-enc" class="select-input">
+                                    <option value="tls">STARTTLS (Port 587 empfohlen)</option>
+                                    <option value="ssl">SSL / TLS (Port 465)</option>
+                                    <option value="none">Keine Verschlüsselung (Port 25 / Internes Relay)</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label>SMTP Benutzername (optional bei Relay)</label>
+                                <input type="text" id="adm-smtp-user" class="form-input" placeholder="z.B. monitoring@firma.de">
+                            </div>
+                            <div class="form-group">
+                                <label>SMTP Passwort</label>
+                                <input type="password" id="adm-smtp-pass" class="form-input" value="********" placeholder="Passwort oder App-Kennwort">
+                            </div>
+                            <div class="form-group">
+                                <label>Absender E-Mail-Adresse (From) *</label>
+                                <input type="text" id="adm-smtp-from" class="form-input" placeholder="z.B. monitoring@firma.de">
+                            </div>
+                            <div class="form-group">
+                                <label>Absender-Anzeigename</label>
+                                <input type="text" id="adm-smtp-fromname" class="form-input" value="NetworkMonitor Alarm" placeholder="NetworkMonitor Alarm">
+                            </div>
+                            <div class="form-group">
+                                <label>Empfänger E-Mail-Adresse(n) (Kommagetrennt) *</label>
+                                <input type="text" id="adm-smtp-to" class="form-input" placeholder="z.B. admin@firma.de, bereitsschaft@firma.de">
+                            </div>
+                        </div>
+
+                        <div id="adm-smtp-test-result" style="font-size:12.5px;display:none;padding:8px 12px;border-radius:6px;"></div>
+
+                        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+                            <div style="font-size:12px;color:var(--text-secondary);">
+                                💡 <b>Hinweis:</b> Um ein Gerät zu überwachen, klicke es im Netzwerkplan an und wähle rechts unter <b>„🔔 Alarm-Überwachung“</b> den gewünschten Modus (z.B. <i>Alarm wenn OFFLINE</i>). Vor einem Offline-Alarm führt der Scanner automatisch einen Sicherheits-Nachping aus.
+                            </div>
+                            <div style="display:flex;gap:8px;">
+                                <button class="btn" onclick="testSmtpConfig()">✉ Test-E-Mail senden</button>
+                                <button class="btn btn-primary" onclick="saveAdminSmtpConfig()">SMTP-Konfiguration speichern</button>
                             </div>
                         </div>
                     </div>
@@ -615,6 +688,28 @@ $isAdmin = ($userRole === 'admin');
             </div>
             <div class="modal-footer">
                 <button class="btn btn-primary" onclick="closeSnmpModal()">Schließen</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal: Alarm-Zentrale (Online/Offline Geräte-Alarme) -->
+    <div id="alerts-modal" class="modal-backdrop">
+        <div class="modal" style="width:760px;max-width:95vw;max-height:86vh;display:flex;flex-direction:column;">
+            <div class="panel-header">
+                <span class="panel-title">🔔 Geräte-Alarme &amp; Status-Ereignisse</span>
+                <button class="btn btn-sm" onclick="closeAlertsModal()">×</button>
+            </div>
+            <div id="alerts-modal-body" class="modal-body" style="overflow-y:auto;max-height:70vh;display:flex;flex-direction:column;gap:12px;">
+                <!-- Dynamisch per JS gefüllt -->
+            </div>
+            <div class="modal-footer" style="justify-content:space-between;">
+                <div style="display:flex;gap:8px;">
+                    <button class="btn btn-sm" onclick="ackAllAlerts()">✓ Alle als gelesen markieren</button>
+                    <?php if ($canEdit): ?>
+                        <button class="btn btn-sm btn-danger" onclick="clearAllAlerts()">🗑 Alarm-Historie leeren</button>
+                    <?php endif; ?>
+                </div>
+                <button class="btn btn-primary" onclick="closeAlertsModal()">Schließen</button>
             </div>
         </div>
     </div>

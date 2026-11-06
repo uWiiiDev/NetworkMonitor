@@ -26,6 +26,12 @@ class Database
                 if (isset($customData['scanner']) && is_array($customData['scanner'])) {
                     $baseConfig['scanner'] = array_merge($baseConfig['scanner'], $customData['scanner']);
                 }
+                if (isset($customData['smtp']) && is_array($customData['smtp'])) {
+                    if (!isset($baseConfig['smtp']) || !is_array($baseConfig['smtp'])) {
+                        $baseConfig['smtp'] = array();
+                    }
+                    $baseConfig['smtp'] = array_merge($baseConfig['smtp'], $customData['smtp']);
+                }
             }
         }
         $this->config = $baseConfig;
@@ -133,16 +139,16 @@ class Database
     }
 
     /**
-     * Speichert Datenbank- & Scanner-Einstellungen aus dem Adminbereich in data/custom_config.json
+     * Speichert Datenbank-, Scanner- & SMTP-Einstellungen aus dem Adminbereich in data/custom_config.json
      */
-    public static function saveCustomConfig(array $dbSettings, array $scannerSettings = array())
+    public static function saveCustomConfig(array $dbSettings, array $scannerSettings = array(), array $smtpSettings = array())
     {
         $customFile = __DIR__ . '/../data/custom_config.json';
         $dataDir = dirname($customFile);
         if (!is_dir($dataDir)) {
             @mkdir($dataDir, 0775, true);
         }
-        $existing = array('db' => array(), 'scanner' => array());
+        $existing = array('db' => array(), 'scanner' => array(), 'smtp' => array());
         if (is_readable($customFile)) {
             $loaded = @json_decode(file_get_contents($customFile), true);
             if (is_array($loaded)) {
@@ -154,6 +160,9 @@ class Database
         }
         if (!empty($scannerSettings)) {
             $existing['scanner'] = array_merge($existing['scanner'], $scannerSettings);
+        }
+        if (!empty($smtpSettings)) {
+            $existing['smtp'] = array_merge(isset($existing['smtp']) && is_array($existing['smtp']) ? $existing['smtp'] : array(), $smtpSettings);
         }
         file_put_contents($customFile, json_encode($existing, JSON_PRETTY_PRINT));
     }
@@ -174,6 +183,8 @@ class Database
         $this->ensureColumnExists('devices', 'is_hidden', 'TINYINT(1) NOT NULL DEFAULT 0');
         $this->ensureColumnExists('devices', 'custom_group', 'VARCHAR(100) DEFAULT NULL');
         $this->ensureColumnExists('devices', 'service_info', 'TEXT DEFAULT NULL');
+        $this->ensureColumnExists('devices', 'alert_mode', "VARCHAR(20) NOT NULL DEFAULT 'none'");
+        $this->ensureColumnExists('devices', 'last_alert_state', 'VARCHAR(20) DEFAULT NULL');
     }
 
     private function initSqliteSchema()
@@ -222,6 +233,8 @@ class Database
                 notes TEXT DEFAULT NULL,
                 is_manual_type INTEGER NOT NULL DEFAULT 0,
                 is_hidden INTEGER NOT NULL DEFAULT 0,
+                alert_mode TEXT NOT NULL DEFAULT 'none',
+                last_alert_state TEXT DEFAULT NULL,
                 first_seen TEXT NOT NULL,
                 last_seen TEXT NOT NULL
             )
@@ -230,6 +243,8 @@ class Database
         $this->ensureColumnExists('devices', 'is_hidden', 'INTEGER NOT NULL DEFAULT 0');
         $this->ensureColumnExists('devices', 'custom_group', 'TEXT DEFAULT NULL');
         $this->ensureColumnExists('devices', 'service_info', 'TEXT DEFAULT NULL');
+        $this->ensureColumnExists('devices', 'alert_mode', "TEXT NOT NULL DEFAULT 'none'");
+        $this->ensureColumnExists('devices', 'last_alert_state', 'TEXT DEFAULT NULL');
 
         $this->pdo->exec("
             CREATE TABLE IF NOT EXISTS links (
@@ -268,6 +283,22 @@ class Database
                 role TEXT NOT NULL DEFAULT 'viewer',
                 is_active INTEGER NOT NULL DEFAULT 1,
                 last_login TEXT DEFAULT NULL,
+                created_at TEXT NOT NULL
+            )
+        ");
+
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS device_alerts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_id INTEGER NOT NULL,
+                scope_id INTEGER DEFAULT NULL,
+                ip_address TEXT NOT NULL,
+                device_name TEXT DEFAULT NULL,
+                alert_type TEXT NOT NULL,
+                severity TEXT NOT NULL DEFAULT 'critical',
+                message TEXT NOT NULL,
+                email_sent INTEGER NOT NULL DEFAULT 0,
+                is_acknowledged INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
             )
         ");

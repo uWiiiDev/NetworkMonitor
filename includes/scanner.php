@@ -7,6 +7,7 @@
 require_once __DIR__ . '/db.php';
 require_once __DIR__ . '/oui.php';
 require_once __DIR__ . '/snmp_client.php';
+require_once __DIR__ . '/mailer.php';
 
 class NetworkScanner
 {
@@ -78,6 +79,31 @@ class NetworkScanner
                         $liveHosts[$aip] = array('latency_ms' => 1.0, 'mac' => $amac, 'hostname' => null, 'ttl' => null);
                     } elseif (empty($liveHosts[$aip]['mac'])) {
                         $liveHosts[$aip]['mac'] = $amac;
+                    }
+                }
+            }
+
+            // Vorherigen Gerätestand dieses Scopes für die Alarm-Auswertung merken
+            $prevStmt = $this->pdo->prepare("SELECT id, ip_address, hostname, custom_name, status, alert_mode, last_alert_state FROM devices WHERE scope_id = :sid");
+            $prevStmt->execute(array(':sid' => $scope['id']));
+            $prevDevicesByIp = array();
+            while ($pr = $prevStmt->fetch()) {
+                $prevDevicesByIp[$pr['ip_address']] = $pr;
+                // Sicherheits-Nach-Ping für überwachte Geräte, falls ein einzelnes Ping-Paket verloren ging
+                $am = isset($pr['alert_mode']) ? $pr['alert_mode'] : 'none';
+                if (($am === 'offline' || $am === 'both') && !isset($liveHosts[$pr['ip_address']])) {
+                    $reOut = @shell_exec('ping -n -c 2 -W 1 ' . escapeshellarg($pr['ip_address']) . ' 2>/dev/null');
+                    if ($reOut && preg_match('/time[=<]([0-9.]+)\s*ms/i', $reOut, $rm)) {
+                        $rTtl = null;
+                        if (preg_match('/ttl[=<]([0-9]+)/i', $reOut, $rtm)) {
+                            $rTtl = (int)$rtm[1];
+                        }
+                        $liveHosts[$pr['ip_address']] = array(
+                            'latency_ms' => (float)$rm[1],
+                            'mac'        => isset($arpMap[$pr['ip_address']]) ? $arpMap[$pr['ip_address']] : null,
+                            'hostname'   => null,
+                            'ttl'        => $rTtl,
+                        );
                     }
                 }
             }
@@ -226,14 +252,19 @@ class NetworkScanner
             // Topologie-Verbindungen (Layer 2 Switch-Ports + Layer 3 Gateway) neu berechnen
             $this->rebuildTopologyLinks($scope['id'], $gatewayIp);
 
+            // 8. Geräte-Alarme (Online / Offline Statuswechsel) auswerten & ggf. SMTP-E-Mail senden
+            $alertsCount = $this->processDeviceAlerts($scope, $prevDevicesByIp);
+
             $finishedAt = date('Y-m-d H:i:s');
             $durationSec = round(microtime(true) - $scanStartMicro, 2);
+            $alertSuffix = ($alertsCount > 0) ? sprintf(' [%d Alarm(e) ausgelöst!]', $alertsCount) : '';
             $summary = sprintf(
-                'Scan abgeschlossen in %.2f s: %d aktive Geräte (%d Managed Switches) in %s gefunden.',
+                'Scan abgeschlossen in %.2f s: %d aktive Geräte (%d Managed Switches) in %s gefunden.%s',
                 $durationSec,
                 $hostsUp,
                 $switchesFound,
-                $scope['cidr']
+                $scope['cidr'],
+                $alertSuffix
             );
 
             $this->pdo->prepare("
@@ -287,6 +318,156 @@ class NetworkScanner
             $results[] = $this->scanScope($row['id'], $triggerType);
         }
         return $results;
+    }
+
+    /**
+     * Prüft überwachte Geräte (alert_mode != 'none') auf Statuswechsel (online <-> offline),
+     * legt Alarme in device_alerts an und versendet bei aktivem SMTP-Server eine E-Mail-Benachrichtigung.
+     */
+    private function processDeviceAlerts($scope, array $prevDevicesByIp)
+    {
+        $stmt = $this->pdo->prepare("SELECT * FROM devices WHERE scope_id = :sid AND alert_mode != 'none'");
+        $stmt->execute(array(':sid' => $scope['id']));
+        $monitored = $stmt->fetchAll();
+        if (empty($monitored)) {
+            return 0;
+        }
+
+        $now = date('Y-m-d H:i:s');
+        $newAlerts = array();
+        $insAlert = $this->pdo->prepare("
+            INSERT INTO device_alerts (device_id, scope_id, ip_address, device_name, alert_type, severity, message, email_sent, is_acknowledged, created_at)
+            VALUES (:did, :sid, :ip, :dname, :atype, :sev, :msg, 0, 0, :now)
+        ");
+        $updState = $this->pdo->prepare("UPDATE devices SET last_alert_state = :st WHERE id = :id");
+
+        foreach ($monitored as $dev) {
+            $ip = $dev['ip_address'];
+            $mode = $dev['alert_mode']; // 'offline', 'online', 'both'
+            $curStatus = $dev['status']; // 'online' oder 'offline'
+            $prevStatus = null;
+            if (!empty($dev['last_alert_state'])) {
+                $prevStatus = $dev['last_alert_state'];
+            } elseif (isset($prevDevicesByIp[$ip])) {
+                $prevStatus = $prevDevicesByIp[$ip]['status'];
+            }
+
+            $devLabel = !empty($dev['custom_name']) ? $dev['custom_name'] : (!empty($dev['hostname']) ? $dev['hostname'] : $ip);
+            $alertType = null;
+            $severity = 'critical';
+            $message = '';
+
+            if ($mode === 'offline' || $mode === 'both') {
+                if ($curStatus === 'offline' && $prevStatus !== 'offline') {
+                    $alertType = 'offline_alarm';
+                    $severity = 'critical';
+                    $message = sprintf(
+                        'AUSFALL-ALARM: Gerät "%s" (%s) im Scope "%s" ist nicht mehr erreichbar (OFFLINE)!',
+                        $devLabel,
+                        $ip,
+                        $scope['name']
+                    );
+                } elseif ($curStatus === 'online' && $prevStatus === 'offline') {
+                    $alertType = 'online_recovery';
+                    $severity = 'recovery';
+                    $message = sprintf(
+                        'ENTWARNUNG (ONLINE): Gerät "%s" (%s) im Scope "%s" antwortet wieder (Latenz: %s ms).',
+                        $devLabel,
+                        $ip,
+                        $scope['name'],
+                        isset($dev['latency_ms']) ? $dev['latency_ms'] : '1.0'
+                    );
+                }
+            }
+
+            if ($alertType === null && ($mode === 'online' || $mode === 'both')) {
+                if ($curStatus === 'online' && $prevStatus !== 'online') {
+                    $alertType = 'online_alarm';
+                    $severity = 'warning';
+                    $message = sprintf(
+                        'ONLINE-ALARM: Überwachtes Gerät "%s" (%s) ist im Scope "%s" aktiv geworden (ONLINE)!',
+                        $devLabel,
+                        $ip,
+                        $scope['name']
+                    );
+                }
+            }
+
+            // Aktualisiere den gemerkten Status für künftige Vergleiche
+            if ($prevStatus !== $curStatus) {
+                $updState->execute(array(':st' => $curStatus, ':id' => $dev['id']));
+            }
+
+            if ($alertType !== null) {
+                $insAlert->execute(array(
+                    ':did'   => $dev['id'],
+                    ':sid'   => $scope['id'],
+                    ':ip'    => $ip,
+                    ':dname' => $devLabel,
+                    ':atype' => $alertType,
+                    ':sev'   => $severity,
+                    ':msg'   => $message,
+                    ':now'   => $now,
+                ));
+                $alertId = (int)$this->pdo->lastInsertId();
+                $newAlerts[] = array(
+                    'id'          => $alertId,
+                    'ip_address'  => $ip,
+                    'device_name' => $devLabel,
+                    'severity'    => $severity,
+                    'message'     => $message,
+                    'created_at'  => $now,
+                );
+            }
+        }
+
+        if (!empty($newAlerts)) {
+            $this->sendAlertEmailsIfConfigured($scope, $newAlerts);
+        }
+
+        return count($newAlerts);
+    }
+
+    private function sendAlertEmailsIfConfigured($scope, array $alerts)
+    {
+        $fullConf = $this->db->getConfig();
+        $smtpConf = isset($fullConf['smtp']) ? $fullConf['smtp'] : array();
+        if (empty($smtpConf['enabled']) || empty($smtpConf['host']) || empty($smtpConf['to_email'])) {
+            return;
+        }
+
+        try {
+            $subject = sprintf('[NetworkMonitor] %d Geräte-Alarm(e) in %s (%s)', count($alerts), $scope['name'], $scope['cidr']);
+            $rowsHtml = '';
+            foreach ($alerts as $a) {
+                $badgeCol = ($a['severity'] === 'critical') ? '#ef4444' : (($a['severity'] === 'recovery') ? '#10b981' : '#f59e0b');
+                $rowsHtml .= '<tr>'
+                    . '<td style="padding:8px 12px;border-bottom:1px solid #334155;font-family:monospace;">' . htmlspecialchars($a['created_at'], ENT_QUOTES, 'UTF-8') . '</td>'
+                    . '<td style="padding:8px 12px;border-bottom:1px solid #334155;font-weight:bold;color:' . $badgeCol . ';">' . htmlspecialchars(strtoupper($a['severity']), ENT_QUOTES, 'UTF-8') . '</td>'
+                    . '<td style="padding:8px 12px;border-bottom:1px solid #334155;font-weight:bold;">' . htmlspecialchars($a['device_name'] . ' (' . $a['ip_address'] . ')', ENT_QUOTES, 'UTF-8') . '</td>'
+                    . '<td style="padding:8px 12px;border-bottom:1px solid #334155;">' . htmlspecialchars($a['message'], ENT_QUOTES, 'UTF-8') . '</td>'
+                    . '</tr>';
+            }
+
+            $htmlBody = '<div style="font-family:Segoe UI,Arial,sans-serif;background:#0f172a;color:#f8fafc;padding:20px;border-radius:8px;">'
+                . '<h2 style="color:#60a5fa;margin-top:0;">NetworkMonitor – Automatische Alarm-Benachrichtigung</h2>'
+                . '<p style="color:#cbd5e1;">Beim Netzwerk-Scan des Scopes <b>' . htmlspecialchars($scope['name'] . ' (' . $scope['cidr'] . ')', ENT_QUOTES, 'UTF-8') . '</b> wurden folgende Statuswechsel erkannt:</p>'
+                . '<table style="width:100%;border-collapse:collapse;background:#1e293b;color:#f8fafc;font-size:13px;">'
+                . '<thead><tr style="background:#334155;text-align:left;">'
+                . '<th style="padding:8px 12px;">Zeitpunkt</th><th style="padding:8px 12px;">Typ</th><th style="padding:8px 12px;">Gerät</th><th style="padding:8px 12px;">Meldung</th>'
+                . '</tr></thead><tbody>' . $rowsHtml . '</tbody></table>'
+                . '</div>';
+
+            $mailer = new SmtpMailer($smtpConf);
+            if ($mailer->sendMail($subject, $htmlBody)) {
+                $upd = $this->pdo->prepare("UPDATE device_alerts SET email_sent = 1 WHERE id = :id");
+                foreach ($alerts as $a) {
+                    $upd->execute(array(':id' => $a['id']));
+                }
+            }
+        } catch (Exception $e) {
+            // Fehler beim E-Mail-Versand soll den Scan selbst nicht abbrechen
+        }
     }
 
     /**

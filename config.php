@@ -57,4 +57,17 @@ return array(
         'default_snmp_community' => 'public',
         'snmp_timeout_ms'        => 800,
     ),
+
+    // SMTP-Einstellungen für E-Mail-Alarm-Benachrichtigungen (im Adminbereich konfigurierbar)
+    'smtp' => array(
+        'enabled'    => 0,
+        'host'       => '',
+        'port'       => 587,
+        'encryption' => 'tls', // 'tls' (STARTTLS Port 587), 'ssl' (Port 465), 'none' (Port 25)
+        'username'   => '',
+        'password'   => '',
+        'from_email' => '',
+        'from_name'  => 'NetworkMonitor Alarm',
+        'to_email'   => '',
+    ),
 );

@@ -41,12 +41,21 @@ try {
                 ORDER BY l.id DESC LIMIT 20
             ")->fetchAll();
 
+            $alerts = $pdo->query("
+                SELECT a.*, s.name AS scope_name
+                FROM device_alerts a
+                LEFT JOIN scopes s ON a.scope_id = s.id
+                ORDER BY a.id DESC LIMIT 50
+            ")->fetchAll();
+            $unackCount = (int)$pdo->query("SELECT COUNT(*) FROM device_alerts WHERE is_acknowledged = 0")->fetchColumn();
+
             $nmapPath = trim((string)@shell_exec('which nmap 2>/dev/null'));
             $snmpExt = extension_loaded('snmp');
 
             $adminData = null;
             if ($currentUser['role'] === 'admin') {
                 $fullConf = $db->getConfig();
+                $smtpConf = isset($fullConf['smtp']) ? $fullConf['smtp'] : array();
                 $usersList = $pdo->query("SELECT id, username, full_name, role, is_active, last_login, created_at FROM users ORDER BY id ASC")->fetchAll();
                 $adminData = array(
                     'db_config' => array(
@@ -65,6 +74,16 @@ try {
                         'snmp_batch_size'        => $fullConf['scanner']['snmp_batch_size'],
                         'default_snmp_community' => $fullConf['scanner']['default_snmp_community'],
                     ),
+                    'smtp_config' => array(
+                        'enabled'    => !empty($smtpConf['enabled']) ? 1 : 0,
+                        'host'       => isset($smtpConf['host']) ? $smtpConf['host'] : '',
+                        'port'       => isset($smtpConf['port']) ? (int)$smtpConf['port'] : 587,
+                        'encryption' => isset($smtpConf['encryption']) ? $smtpConf['encryption'] : 'tls',
+                        'username'   => isset($smtpConf['username']) ? $smtpConf['username'] : '',
+                        'from_email' => isset($smtpConf['from_email']) ? $smtpConf['from_email'] : '',
+                        'from_name'  => isset($smtpConf['from_name']) ? $smtpConf['from_name'] : 'NetworkMonitor Alarm',
+                        'to_email'   => isset($smtpConf['to_email']) ? $smtpConf['to_email'] : '',
+                    ),
                     'users' => $usersList,
                 );
             }
@@ -76,6 +95,8 @@ try {
                 'devices'      => $devices,
                 'links'        => $links,
                 'logs'         => $logs,
+                'alerts'       => $alerts,
+                'unack_alerts' => $unackCount,
                 'admin'        => $adminData,
                 'system'       => array(
                     'php_version' => PHP_VERSION,
@@ -174,6 +195,7 @@ try {
             if ($id <= 0) {
                 throw new InvalidArgumentException('Ungültige Scope-ID.');
             }
+            $pdo->prepare("DELETE FROM device_alerts WHERE scope_id = :id")->execute(array(':id' => $id));
             $pdo->prepare("DELETE FROM links WHERE scope_id = :id")->execute(array(':id' => $id));
             $pdo->prepare("DELETE FROM devices WHERE scope_id = :id")->execute(array(':id' => $id));
             $pdo->prepare("DELETE FROM scan_logs WHERE scope_id = :id")->execute(array(':id' => $id));
@@ -190,19 +212,24 @@ try {
             $customName = isset($input['custom_name']) ? trim($input['custom_name']) : null;
             $customGroup = isset($input['custom_group']) ? trim($input['custom_group']) : null;
             $deviceType = isset($input['device_type']) ? trim($input['device_type']) : 'workstation';
+            $alertMode = isset($input['alert_mode']) && in_array($input['alert_mode'], array('none', 'offline', 'online', 'both'), true)
+                ? $input['alert_mode']
+                : 'none';
             $notes = isset($input['notes']) ? trim($input['notes']) : null;
             $parentDeviceId = isset($input['parent_device_id']) ? (int)$input['parent_device_id'] : 0;
             $parentPort = isset($input['parent_port']) ? trim($input['parent_port']) : null;
 
             $stmt = $pdo->prepare("
                 UPDATE devices
-                SET custom_name = :cname, custom_group = :cgroup, device_type = :dtype, notes = :notes, is_manual_type = 1
+                SET custom_name = :cname, custom_group = :cgroup, device_type = :dtype,
+                    alert_mode = :amode, last_alert_state = status, notes = :notes, is_manual_type = 1
                 WHERE id = :id
             ");
             $stmt->execute(array(
                 ':cname'  => $customName !== '' ? $customName : null,
                 ':cgroup' => $customGroup !== '' ? $customGroup : null,
                 ':dtype'  => $deviceType,
+                ':amode'  => $alertMode,
                 ':notes'  => $notes,
                 ':id'     => $id,
             ));
@@ -231,6 +258,7 @@ try {
         case 'delete_device':
             Auth::requireRole(array('operator', 'admin'));
             $id = isset($input['id']) ? (int)$input['id'] : 0;
+            $pdo->prepare("DELETE FROM device_alerts WHERE device_id = :id")->execute(array(':id' => $id));
             $pdo->prepare("DELETE FROM links WHERE source_device_id = :id OR target_device_id = :id")->execute(array(':id' => $id));
             $pdo->prepare("DELETE FROM devices WHERE id = :id")->execute(array(':id' => $id));
             echo json_encode(array('ok' => true));
@@ -403,6 +431,7 @@ try {
             Auth::requireRole(array('admin'));
             $scopeId = isset($input['scope_id']) ? $input['scope_id'] : 0;
             if ($scopeId === 'all') {
+                $pdo->exec("DELETE FROM device_alerts");
                 $pdo->exec("DELETE FROM links");
                 $pdo->exec("DELETE FROM devices");
                 $pdo->exec("DELETE FROM scan_logs");
@@ -412,6 +441,7 @@ try {
                 if ($sid <= 0) {
                     throw new InvalidArgumentException('Ungültige Scope-ID.');
                 }
+                $pdo->prepare("DELETE FROM device_alerts WHERE scope_id = :id")->execute(array(':id' => $sid));
                 $pdo->prepare("DELETE FROM links WHERE scope_id = :id")->execute(array(':id' => $sid));
                 $pdo->prepare("DELETE FROM devices WHERE scope_id = :id")->execute(array(':id' => $sid));
                 $pdo->prepare("DELETE FROM scan_logs WHERE scope_id = :id")->execute(array(':id' => $sid));
@@ -423,6 +453,7 @@ try {
 
         case 'admin_delete_all_scopes':
             Auth::requireRole(array('admin'));
+            $pdo->exec("DELETE FROM device_alerts");
             $pdo->exec("DELETE FROM links");
             $pdo->exec("DELETE FROM devices");
             $pdo->exec("DELETE FROM scan_logs");
@@ -433,6 +464,75 @@ try {
         case 'admin_clear_scan_logs':
             Auth::requireRole(array('admin'));
             $pdo->exec("DELETE FROM scan_logs");
+            echo json_encode(array('ok' => true));
+            break;
+
+        case 'save_smtp_config':
+            Auth::requireRole(array('admin'));
+            $smtpSettings = array(
+                'enabled'    => !empty($input['enabled']),
+                'host'       => isset($input['host']) ? trim($input['host']) : '',
+                'port'       => isset($input['port']) ? (int)$input['port'] : 587,
+                'encryption' => isset($input['encryption']) ? strtolower(trim($input['encryption'])) : 'tls',
+                'username'   => isset($input['username']) ? trim($input['username']) : '',
+                'from_email' => isset($input['from_email']) ? trim($input['from_email']) : '',
+                'from_name'  => isset($input['from_name']) ? trim($input['from_name']) : 'NetworkMonitor Alarm',
+                'to_email'   => isset($input['to_email']) ? trim($input['to_email']) : '',
+            );
+            if (isset($input['password']) && $input['password'] !== '********') {
+                $smtpSettings['password'] = $input['password'];
+            }
+            Database::saveCustomConfig(array(), array(), $smtpSettings);
+            echo json_encode(array('ok' => true));
+            break;
+
+        case 'test_smtp':
+            Auth::requireRole(array('admin'));
+            $storedSmtp = Database::getInstance()->getConfig('smtp', array());
+            $testConf = array(
+                'enabled'    => true,
+                'host'       => isset($input['host']) ? trim($input['host']) : '',
+                'port'       => isset($input['port']) ? (int)$input['port'] : 587,
+                'encryption' => isset($input['encryption']) ? strtolower(trim($input['encryption'])) : 'tls',
+                'username'   => isset($input['username']) ? trim($input['username']) : '',
+                'password'   => (isset($input['password']) && $input['password'] !== '********')
+                                ? $input['password']
+                                : (isset($storedSmtp['password']) ? $storedSmtp['password'] : ''),
+                'from_email' => isset($input['from_email']) ? trim($input['from_email']) : '',
+                'from_name'  => isset($input['from_name']) && trim($input['from_name']) !== '' ? trim($input['from_name']) : 'NetworkMonitor Alarm',
+                'to_email'   => isset($input['to_email']) ? trim($input['to_email']) : '',
+            );
+
+            $mailer = new SmtpMailer($testConf);
+            $subject = '[NetworkMonitor] SMTP Test-E-Mail erfolgreich';
+            $now = date('d.m.Y H:i:s');
+            $body = '<div style="font-family:sans-serif;max-width:580px;margin:0 auto;border:1px solid #e2e8f0;border-radius:8px;overflow:hidden;">'
+                  . '<div style="background:#3b82f6;color:#ffffff;padding:14px 20px;font-size:16px;font-weight:bold;">✉ NetworkMonitor — SMTP Test-Benachrichtigung</div>'
+                  . '<div style="padding:20px;background:#ffffff;color:#1e293b;line-height:1.5;">'
+                  . '<p style="margin-top:0;">Der SMTP-Versand aus deinem <strong>NetworkMonitor</strong> funktioniert einwandfrei!</p>'
+                  . '<table style="width:100%;border-collapse:collapse;font-size:14px;">'
+                  . '<tr><td style="padding:6px 0;color:#64748b;width:150px;">SMTP-Server:</td><td><code>' . htmlspecialchars($testConf['host'] . ':' . $testConf['port'], ENT_QUOTES, 'UTF-8') . '</code> (' . strtoupper(htmlspecialchars($testConf['encryption'], ENT_QUOTES, 'UTF-8')) . ')</td></tr>'
+                  . '<tr><td style="padding:6px 0;color:#64748b;">Empfänger:</td><td>' . htmlspecialchars($testConf['to_email'], ENT_QUOTES, 'UTF-8') . '</td></tr>'
+                  . '<tr><td style="padding:6px 0;color:#64748b;">Zeitpunkt:</td><td>' . $now . '</td></tr>'
+                  . '</table>'
+                  . '</div></div>';
+            $info = $mailer->send($testConf['to_email'], $subject, $body);
+            echo json_encode(array('ok' => true, 'info' => $info));
+            break;
+
+        case 'ack_alerts':
+            $alertId = isset($input['id']) ? (int)$input['id'] : 0;
+            if ($alertId > 0) {
+                $pdo->prepare("UPDATE device_alerts SET is_acknowledged = 1 WHERE id = :id")->execute(array(':id' => $alertId));
+            } else {
+                $pdo->exec("UPDATE device_alerts SET is_acknowledged = 1 WHERE is_acknowledged = 0");
+            }
+            echo json_encode(array('ok' => true));
+            break;
+
+        case 'clear_alerts':
+            Auth::requireRole(array('operator', 'admin'));
+            $pdo->exec("DELETE FROM device_alerts");
             echo json_encode(array('ok' => true));
             break;
 

@@ -8,6 +8,9 @@ var AppState = {
     devices: [],
     links: [],
     logs: [],
+    alerts: [],
+    unackAlerts: 0,
+    lastToastAlertCount: 0,
     system: {},
     selectedScopeId: 'all',
     selectedDeviceId: null,
@@ -117,8 +120,12 @@ function loadTopologyData(callback) {
             AppState.devices = data.devices || [];
             AppState.links = data.links || [];
             AppState.logs = data.logs || [];
+            AppState.alerts = data.alerts || [];
+            AppState.unackAlerts = parseInt(data.unack_alerts || 0, 10);
             AppState.system = data.system || {};
             AppState.admin = data.admin || null;
+
+            updateTopbarAlertsBadge();
 
             // Initialisiere benutzerdefinierte Gruppen
             for (var i = 0; i < AppState.devices.length; i++) {
@@ -443,6 +450,9 @@ function renderNetworkGraph() {
         var titleName = dev.custom_name || dev.hostname || dev.snmp_sysname || dev.ip_address;
         if (titleName.length > 24) {
             titleName = titleName.substring(0, 22) + '…';
+        }
+        if (dev.alert_mode && dev.alert_mode !== 'none') {
+            titleName = '🔔 ' + titleName;
         }
         var label = titleName + '\n' + dev.ip_address;
         if (dev.custom_group) {
@@ -1261,11 +1271,37 @@ function selectDevice(deviceId) {
         typeOpts += '<option value="' + types[t].k + '" ' + tsel + '>' + types[t].l + '</option>';
     }
 
+    var alertModes = [
+        { k: 'none',    l: 'Keine Überwachung (Standard)' },
+        { k: 'offline', l: '🔴 Alarm wenn OFFLINE (+ Online-Recovery)' },
+        { k: 'online',  l: '🟢 Alarm wenn ONLINE (z.B. neues/fremdes Gerät)' },
+        { k: 'both',    l: '🔄 Bei jedem Statuswechsel (Online ↔ Offline)' }
+    ];
+    var curAlertMode = dev.alert_mode || 'none';
+    var alertOpts = '';
+    for (var a = 0; a < alertModes.length; a++) {
+        var asel = (curAlertMode === alertModes[a].k) ? 'selected' : '';
+        alertOpts += '<option value="' + alertModes[a].k + '" ' + asel + '>' + alertModes[a].l + '</option>';
+    }
+
+    var alertBadgeHtml = '<span style="color:var(--text-secondary);">Aus</span>';
+    if (curAlertMode === 'offline') {
+        alertBadgeHtml = '<span class="badge" style="background:rgba(239,68,68,0.2);color:#fca5a5;">🔔 Bei Offline-Ausfall</span>';
+    } else if (curAlertMode === 'online') {
+        alertBadgeHtml = '<span class="badge" style="background:rgba(16,185,129,0.2);color:#34d399;">🔔 Bei Online-Status</span>';
+    } else if (curAlertMode === 'both') {
+        alertBadgeHtml = '<span class="badge" style="background:rgba(59,130,246,0.2);color:#93c5fd;">🔔 Online &amp; Offline</span>';
+    }
+
     var editFormHtml = '';
     if (userCanEdit()) {
         editFormHtml =
             '<div style="border-top:1px solid var(--border-color);padding-top:12px;display:flex;flex-direction:column;gap:10px;">' +
-                '<div class="panel-title">Gerät, Gruppe &amp; Switch-Port anpassen</div>' +
+                '<div class="panel-title">Gerät, Alarm &amp; Switch-Port anpassen</div>' +
+                '<div class="form-group">' +
+                    '<label style="color:#fcd34d;font-weight:700;">🔔 Alarm-Überwachung (Online / Offline)</label>' +
+                    '<select id="edit-dev-alert" class="select-input" style="border-color:rgba(245,158,11,0.45);">' + alertOpts + '</select>' +
+                '</div>' +
                 '<div class="form-group">' +
                     '<label>Anzeigename im Netzwerkplan</label>' +
                     '<input type="text" id="edit-dev-name" class="form-input" value="' + escapeHtml(dev.custom_name || '') + '" placeholder="' + escapeHtml(dev.hostname || dev.ip_address) + '">' +
@@ -1310,6 +1346,7 @@ function selectDevice(deviceId) {
     panel.innerHTML =
         '<div class="kv-grid">' +
             '<div class="kv-label">Status</div><div class="kv-val"><span class="badge badge-' + dev.status + '">' + dev.status.toUpperCase() + '</span> (' + (dev.latency_ms || '1.0') + ' ms)</div>' +
+            '<div class="kv-label">Alarm-Modus</div><div class="kv-val">' + alertBadgeHtml + '</div>' +
             '<div class="kv-label">IP-Adresse</div><div class="kv-val">' + escapeHtml(dev.ip_address) + '</div>' +
             '<div class="kv-label">MAC-Adresse</div><div class="kv-val">' + escapeHtml(dev.mac_address || 'Nicht im lokalen ARP') + '</div>' +
             '<div class="kv-label">Hersteller</div><div class="kv-val">' + escapeHtml(dev.vendor || 'Unbekannt') + '</div>' +
@@ -1324,11 +1361,13 @@ function selectDevice(deviceId) {
 }
 
 function saveDeviceChanges(devId) {
+    var alertEl = document.getElementById('edit-dev-alert');
     var payload = {
         id: devId,
         custom_name: document.getElementById('edit-dev-name').value,
         custom_group: document.getElementById('edit-dev-group').value,
         device_type: document.getElementById('edit-dev-type').value,
+        alert_mode: alertEl ? alertEl.value : 'none',
         parent_device_id: document.getElementById('edit-dev-parent').value,
         parent_port: document.getElementById('edit-dev-port').value,
         notes: document.getElementById('edit-dev-notes').value
@@ -1814,6 +1853,9 @@ function renderInventoryTable() {
         var visChk = '<input type="checkbox" ' + (isVisible ? 'checked' : '') + (userCanEdit() ? '' : ' disabled') +
                      ' onchange="toggleSingleDeviceHidden(' + dev.id + ', this.checked ? 0 : 1)" title="Im Netzwerkplan anzeigen">';
         var grpInfo = dev.custom_group ? (' <span class="badge" style="background:rgba(245,158,11,0.2);color:#fcd34d;">' + escapeHtml(dev.custom_group) + '</span>') : '';
+        var alertTag = (dev.alert_mode && dev.alert_mode !== 'none')
+            ? (' <span class="badge" style="background:rgba(239,68,68,0.18);color:#fca5a5;" title="Alarm-Überwachung aktiv (' + escapeHtml(dev.alert_mode) + ')">🔔</span>')
+            : '';
         var snmpBadge = parseInt(dev.snmp_enabled, 10) === 1
             ? '<button class="btn btn-sm" style="background:rgba(16,185,129,0.16);border-color:#10b981;color:#34d399;padding:2px 8px;font-size:11px;" onclick="event.stopPropagation(); openSnmpModal(' + dev.id + ');">🔍 SNMP (' + escapeHtml(dev.snmp_sysname || 'Details') + ')</button>'
             : '-';
@@ -1827,7 +1869,7 @@ function renderInventoryTable() {
             if (ck === 'visible') {
                 html += '<td style="text-align:center;" onclick="event.stopPropagation();">' + visChk + '</td>';
             } else if (ck === 'status') {
-                html += '<td><span class="badge badge-' + dev.status + '">' + escapeHtml(dev.status) + '</span></td>';
+                html += '<td><span class="badge badge-' + dev.status + '">' + escapeHtml(dev.status) + '</span>' + alertTag + '</td>';
             } else if (ck === 'ip_address') {
                 html += '<td style="font-family:monospace;font-weight:600;color:#93c5fd;">' + escapeHtml(dev.ip_address) + '</td>';
             } else if (ck === 'name') {
@@ -2131,6 +2173,19 @@ function renderAdminSection() {
         document.getElementById('adm-sc-snmpbatch').value = sc.snmp_batch_size || 100;
     }
 
+    var smtp = adm.smtp_config || {};
+    if (document.getElementById('adm-smtp-host')) {
+        document.getElementById('adm-smtp-enabled').checked = !!smtp.enabled;
+        document.getElementById('adm-smtp-host').value = smtp.host || '';
+        document.getElementById('adm-smtp-port').value = smtp.port || 587;
+        document.getElementById('adm-smtp-enc').value = smtp.encryption || 'tls';
+        document.getElementById('adm-smtp-user').value = smtp.username || '';
+        document.getElementById('adm-smtp-pass').value = '********';
+        document.getElementById('adm-smtp-from').value = smtp.from_email || '';
+        document.getElementById('adm-smtp-fromname').value = smtp.from_name || 'NetworkMonitor Alarm';
+        document.getElementById('adm-smtp-to').value = smtp.to_email || '';
+    }
+
     var tbody = document.getElementById('admin-users-tbody');
     if (!tbody) return;
     var users = adm.users || [];
@@ -2337,6 +2392,211 @@ function saveAdminDbAndScannerConfig() {
             loadTopologyData();
         } else {
             showToast('Fehler: ' + res.error);
+        }
+    });
+}
+
+function saveAdminSmtpConfig() {
+    var payload = {
+        enabled: document.getElementById('adm-smtp-enabled').checked,
+        host: document.getElementById('adm-smtp-host').value,
+        port: document.getElementById('adm-smtp-port').value,
+        encryption: document.getElementById('adm-smtp-enc').value,
+        username: document.getElementById('adm-smtp-user').value,
+        password: document.getElementById('adm-smtp-pass').value,
+        from_email: document.getElementById('adm-smtp-from').value,
+        from_name: document.getElementById('adm-smtp-fromname').value,
+        to_email: document.getElementById('adm-smtp-to').value
+    };
+
+    fetch('api.php?action=save_smtp_config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (res) {
+        if (res.ok) {
+            showToast('SMTP-Konfiguration für Alarm-Benachrichtigungen gespeichert!');
+            loadTopologyData();
+        } else {
+            showToast('Fehler: ' + (res.error || 'Unbekannt'));
+        }
+    });
+}
+
+function testSmtpConfig() {
+    var box = document.getElementById('adm-smtp-test-result');
+    box.style.display = 'block';
+    box.style.background = 'rgba(59,130,246,0.15)';
+    box.style.color = '#93c5fd';
+    box.textContent = 'Verbinde mit SMTP-Server und sende Test-E-Mail...';
+
+    var payload = {
+        host: document.getElementById('adm-smtp-host').value,
+        port: document.getElementById('adm-smtp-port').value,
+        encryption: document.getElementById('adm-smtp-enc').value,
+        username: document.getElementById('adm-smtp-user').value,
+        password: document.getElementById('adm-smtp-pass').value,
+        from_email: document.getElementById('adm-smtp-from').value,
+        from_name: document.getElementById('adm-smtp-fromname').value,
+        to_email: document.getElementById('adm-smtp-to').value
+    };
+
+    fetch('api.php?action=test_smtp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (res) {
+        if (res.ok) {
+            box.style.background = 'rgba(16,185,129,0.18)';
+            box.style.color = '#34d399';
+            box.textContent = '✓ Test-E-Mail erfolgreich über ' + res.info.host + ':' + res.info.port + ' versendet!';
+        } else {
+            box.style.background = 'rgba(239,68,68,0.18)';
+            box.style.color = '#fca5a5';
+            box.textContent = '✕ SMTP-Fehler: ' + (res.error || 'Versand fehlgeschlagen');
+        }
+    })
+    .catch(function (err) {
+        box.style.background = 'rgba(239,68,68,0.18)';
+        box.style.color = '#fca5a5';
+        box.textContent = '✕ Verbindungsfehler: ' + err.message;
+    });
+}
+
+function updateTopbarAlertsBadge() {
+    var badge = document.getElementById('topbar-alert-badge');
+    var btn = document.getElementById('btn-topbar-alerts');
+    if (!badge || !btn) return;
+
+    var cnt = AppState.unackAlerts || 0;
+    if (cnt > 0) {
+        badge.style.display = 'inline-block';
+        badge.textContent = cnt;
+        btn.style.borderColor = '#ef4444';
+        btn.style.background = 'rgba(239,68,68,0.16)';
+        if (cnt > AppState.lastToastAlertCount) {
+            showToast('🔔 ' + cnt + ' unbestätigte(r) Geräte-Alarm(e) vorhanden!');
+        }
+    } else {
+        badge.style.display = 'none';
+        badge.textContent = '0';
+        btn.style.borderColor = '';
+        btn.style.background = '';
+    }
+    AppState.lastToastAlertCount = cnt;
+}
+
+function openAlertsModal() {
+    renderAlertsModal();
+    document.getElementById('alerts-modal').classList.add('open');
+}
+
+function closeAlertsModal() {
+    document.getElementById('alerts-modal').classList.remove('open');
+}
+
+function renderAlertsModal() {
+    var body = document.getElementById('alerts-modal-body');
+    if (!body) return;
+
+    // Übersicht überwachter Geräte
+    var monitoredDevs = [];
+    for (var i = 0; i < AppState.devices.length; i++) {
+        var d = AppState.devices[i];
+        if (d.alert_mode && d.alert_mode !== 'none') {
+            monitoredDevs.push(d);
+        }
+    }
+
+    var html = '<div style="background:rgba(15,23,42,0.7);border:1px solid var(--border-color);border-radius:8px;padding:12px;">' +
+        '<div style="font-size:12px;font-weight:700;color:#93c5fd;text-transform:uppercase;margin-bottom:8px;">Aktuell überwachte Geräte (' + monitoredDevs.length + ')</div>';
+
+    if (monitoredDevs.length > 0) {
+        html += '<div style="display:flex;gap:8px;flex-wrap:wrap;">';
+        for (var m = 0; m < monitoredDevs.length; m++) {
+            var md = monitoredDevs[m];
+            var mName = md.custom_name || md.hostname || md.ip_address;
+            var stCol = (md.status === 'online') ? '#34d399' : '#ef4444';
+            var modeLabel = (md.alert_mode === 'offline') ? 'Offline-Wächter' : ((md.alert_mode === 'online') ? 'Online-Wächter' : 'Beide Richtungen');
+            html += '<div onclick="closeAlertsModal(); selectDevice(' + md.id + ');" style="cursor:pointer;background:var(--bg-panel);border:1px solid var(--border-color);border-radius:6px;padding:6px 10px;display:flex;align-items:center;gap:8px;font-size:12px;">' +
+                '<span style="width:8px;height:8px;border-radius:50%;background:' + stCol + ';display:inline-block;"></span>' +
+                '<b>' + escapeHtml(mName) + '</b>' +
+                '<span style="font-family:monospace;color:#93c5fd;">(' + escapeHtml(md.ip_address) + ')</span>' +
+                '<span class="badge" style="background:rgba(255,255,255,0.08);color:var(--text-secondary);">' + escapeHtml(modeLabel) + '</span>' +
+            '</div>';
+        }
+        html += '</div>';
+    } else {
+        html += '<div style="font-size:12.5px;color:var(--text-secondary);">Noch keine Geräte für Alarme aktiviert. Klicke im Netzwerkplan auf ein Gerät und wähle rechts unter <b>„🔔 Alarm-Überwachung“</b> den gewünschten Modus aus.</div>';
+    }
+    html += '</div>';
+
+    // Liste der ausgelösten Alarme
+    var alerts = AppState.alerts || [];
+    html += '<div style="font-size:12px;font-weight:700;color:var(--text-secondary);text-transform:uppercase;margin-top:4px;">Ausgelöste Alarm-Ereignisse (' + alerts.length + ')</div>';
+
+    if (alerts.length === 0) {
+        html += '<div style="padding:24px;text-align:center;color:var(--text-secondary);background:rgba(15,23,42,0.4);border-radius:8px;border:1px solid var(--border-color);">Keine Alarme protokolliert – alle überwachten Systeme laufen normal.</div>';
+    } else {
+        html += '<table class="data-table"><thead><tr><th>Zeitpunkt</th><th>Ereignis</th><th>Gerät</th><th>IP-Adresse</th><th>Details</th></tr></thead><tbody>';
+        for (var a = 0; a < alerts.length; a++) {
+            var al = alerts[a];
+            var isUnack = parseInt(al.is_acknowledged || 0, 10) === 0;
+            var evBadge = '<span class="badge badge-offline">OFFLINE ALARM</span>';
+            if (al.event_type === 'online_recovery') {
+                evBadge = '<span class="badge badge-online">WIEDER ONLINE</span>';
+            } else if (al.event_type === 'online_alarm') {
+                evBadge = '<span class="badge" style="background:rgba(59,130,246,0.2);color:#93c5fd;">ONLINE ALARM</span>';
+            }
+            html += '<tr style="' + (isUnack ? 'background:rgba(239,68,68,0.08);font-weight:600;' : 'opacity:0.75;') + '">' +
+                '<td style="white-space:nowrap;font-size:12px;">' + escapeHtml(al.created_at || '-') + (isUnack ? ' <span class="badge badge-offline" style="font-size:9px;">NEU</span>' : '') + '</td>' +
+                '<td>' + evBadge + '</td>' +
+                '<td><b>' + escapeHtml(al.device_name || '-') + '</b></td>' +
+                '<td style="font-family:monospace;color:#93c5fd;">' + escapeHtml(al.ip_address || '-') + '</td>' +
+                '<td style="font-size:12px;">' + escapeHtml(al.message || '') + '</td>' +
+            '</tr>';
+        }
+        html += '</tbody></table>';
+    }
+
+    body.innerHTML = html;
+}
+
+function ackAllAlerts() {
+    fetch('api.php?action=ack_alerts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({})
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (res) {
+        if (res.ok) {
+            showToast('Alle Alarme als gelesen markiert.');
+            loadTopologyData(function () {
+                renderAlertsModal();
+            });
+        }
+    });
+}
+
+function clearAllAlerts() {
+    if (!confirm('Gesamte Alarm-Historie wirklich löschen?')) return;
+    fetch('api.php?action=clear_alerts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({})
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (res) {
+        if (res.ok) {
+            showToast('Alarm-Historie geleert.');
+            loadTopologyData(function () {
+                renderAlertsModal();
+            });
         }
     });
 }

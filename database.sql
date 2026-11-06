@@ -52,6 +52,8 @@ CREATE TABLE IF NOT EXISTS `devices` (
   `notes` TEXT DEFAULT NULL,
   `is_manual_type` TINYINT(1) NOT NULL DEFAULT 0,
   `is_hidden` TINYINT(1) NOT NULL DEFAULT 0,
+  `alert_mode` VARCHAR(20) NOT NULL DEFAULT 'none',
+  `last_alert_state` VARCHAR(20) DEFAULT NULL,
   `first_seen` DATETIME NOT NULL,
   `last_seen` DATETIME NOT NULL,
   PRIMARY KEY (`id`),
@@ -102,5 +104,23 @@ CREATE TABLE IF NOT EXISTS `users` (
   `created_at` DATETIME NOT NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `idx_username` (`username`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8;
+
+-- 6. Geräte-Alarme (Online / Offline Überwachung & E-Mail-Historie)
+CREATE TABLE IF NOT EXISTS `device_alerts` (
+  `id` INT(11) NOT NULL AUTO_INCREMENT,
+  `device_id` INT(11) NOT NULL,
+  `scope_id` INT(11) DEFAULT NULL,
+  `ip_address` VARCHAR(45) NOT NULL,
+  `device_name` VARCHAR(255) DEFAULT NULL,
+  `alert_type` VARCHAR(40) NOT NULL,
+  `severity` VARCHAR(20) NOT NULL DEFAULT 'critical',
+  `message` TEXT NOT NULL,
+  `email_sent` TINYINT(1) NOT NULL DEFAULT 0,
+  `is_acknowledged` TINYINT(1) NOT NULL DEFAULT 0,
+  `created_at` DATETIME NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_device_id` (`device_id`),
+  KEY `idx_ack` (`is_acknowledged`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8;
 
