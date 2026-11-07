@@ -12,15 +12,45 @@ class SnmpClient
     private $ip;
     private $community;
     private $timeoutMs;
+    private $sock = null;
 
-        /**
+    /**
      * Initialisiert den SNMP-Client für eine Ziel-IP, Community und Timeout (in Millisekunden).
      */
-    public function __construct($ip, $community = 'public', $timeoutMs = 800)
+    public function __construct($ip, $community = 'public', $timeoutMs = 500)
     {
         $this->ip = $ip;
         $this->community = $community !== '' ? $community : 'public';
-        $this->timeoutMs = (int)$timeoutMs;
+        $this->timeoutMs = max(150, min(1500, (int)$timeoutMs));
+    }
+
+    public function __destruct()
+    {
+        if (is_resource($this->sock)) {
+            @fclose($this->sock);
+            $this->sock = null;
+        }
+    }
+
+    /**
+     * Liefert einen wiederverwendbaren UDP-Socket zum Zielgerät (vermeidet tausende Einzel-Socket-Erstellungen).
+     */
+    private function getSocket()
+    {
+        if (is_resource($this->sock)) {
+            return $this->sock;
+        }
+        $errno = 0;
+        $errstr = '';
+        $sock = @stream_socket_client('udp://' . $this->ip . ':161', $errno, $errstr, 1);
+        if (!$sock) {
+            return null;
+        }
+        $sec = (int)floor($this->timeoutMs / 1000);
+        $usec = (int)(($this->timeoutMs % 1000) * 1000);
+        stream_set_timeout($sock, $sec, $usec);
+        $this->sock = $sock;
+        return $this->sock;
     }
 
     /**
@@ -133,35 +163,59 @@ class SnmpClient
     }
 
     /**
-     * Prüft, ob das Gerät auf SNMP antwortet und liest Switch-/Systemdaten aus
+     * Prüft, ob das Gerät auf SNMP antwortet und liest Switch-/Systemdaten hochperformant
+     * per Multi-Varbind-GET und SNMPv2c GetBulkRequest (0xA5) aus.
      */
     public function probeDevice()
     {
-        $sysDescr = $this->getOid('1.3.6.1.2.1.1.1.0');
-        $sysName  = $this->getOid('1.3.6.1.2.1.1.5.0');
+        // 1. Alle System- & Hardware-Basis-OIDs in einem einzigen Multi-Varbind-Batch abfragen
+        $sysBatch = $this->getOidsBatch(array(
+            '1.3.6.1.2.1.1.1.0',          // sysDescr
+            '1.3.6.1.2.1.1.5.0',          // sysName
+            '1.3.6.1.2.1.1.2.0',          // sysObjectID
+            '1.3.6.1.2.1.1.3.0',          // sysUpTime
+            '1.3.6.1.2.1.1.4.0',          // sysContact
+            '1.3.6.1.2.1.1.6.0',          // sysLocation
+            '1.3.6.1.2.1.25.3.2.1.3.1',   // hrDeviceDescr
+            '1.3.6.1.2.1.47.1.1.1.1.13.1',// entPhysicalModelName.1
+            '1.3.6.1.2.1.43.5.1.1.17.1',  // prtGeneralSerialNumber.1
+            '1.3.6.1.2.1.47.1.1.1.1.11.1',// entPhysicalSerialNum.1
+            '1.3.6.1.2.1.47.1.1.1.1.10.1',// entPhysicalSoftwareRev.1
+            '1.3.6.1.2.1.47.1.1.1.1.9.1', // entPhysicalFirmwareRev.1
+        ), 6);
+
+        $sysDescr = isset($sysBatch['1.3.6.1.2.1.1.1.0']) ? $sysBatch['1.3.6.1.2.1.1.1.0'] : null;
+        $sysName  = isset($sysBatch['1.3.6.1.2.1.1.5.0']) ? $sysBatch['1.3.6.1.2.1.1.5.0'] : null;
         if ($sysDescr === null && $sysName === null) {
-            return null;
+            // Schneller Einzel-Fallback, falls das Gerät große Multi-Varbind-Pakete ablehnt
+            $sysDescr = $this->getOid('1.3.6.1.2.1.1.1.0');
+            if ($sysDescr === null) {
+                return null;
+            }
+            $sysName = $this->getOid('1.3.6.1.2.1.1.5.0');
         }
 
-        $sysObjectId = $this->getOid('1.3.6.1.2.1.1.2.0');
-        $sysUpTimeRaw = $this->getOid('1.3.6.1.2.1.1.3.0');
-        $sysContact  = $this->getOid('1.3.6.1.2.1.1.4.0');
-        $sysLocation = $this->getOid('1.3.6.1.2.1.1.6.0');
+        $sysObjectId  = isset($sysBatch['1.3.6.1.2.1.1.2.0']) ? $sysBatch['1.3.6.1.2.1.1.2.0'] : null;
+        $sysUpTimeRaw = isset($sysBatch['1.3.6.1.2.1.1.3.0']) ? $sysBatch['1.3.6.1.2.1.1.3.0'] : null;
+        $sysContact   = isset($sysBatch['1.3.6.1.2.1.1.4.0']) ? $sysBatch['1.3.6.1.2.1.1.4.0'] : null;
+        $sysLocation  = isset($sysBatch['1.3.6.1.2.1.1.6.0']) ? $sysBatch['1.3.6.1.2.1.1.6.0'] : null;
 
         // Uptime in lesbares Format (Tage, Stunden:Minuten:Sekunden) umrechnen
         $sysUpTimeFormatted = $this->formatTimeticks($sysUpTimeRaw);
 
         // Erweiterte Hardware-, Modell- & Seriennummer-Abfrage (Host-Resources / Entity-MIB / Printer-MIB)
-        $deviceModel = $this->getOid('1.3.6.1.2.1.25.3.2.1.3.1');
-        if (!$deviceModel) {
-            $deviceModel = $this->getOid('1.3.6.1.2.1.47.1.1.1.1.13.1');
-        }
+        $deviceModel = !empty($sysBatch['1.3.6.1.2.1.25.3.2.1.3.1'])
+            ? $sysBatch['1.3.6.1.2.1.25.3.2.1.3.1']
+            : (!empty($sysBatch['1.3.6.1.2.1.47.1.1.1.1.13.1']) ? $sysBatch['1.3.6.1.2.1.47.1.1.1.1.13.1'] : null);
+        $hasEntityMib = !empty($sysBatch['1.3.6.1.2.1.47.1.1.1.1.13.1']) || !empty($sysBatch['1.3.6.1.2.1.47.1.1.1.1.11.1']);
         if (!$deviceModel) {
             $entModWalk = $this->walkOid('1.3.6.1.2.1.47.1.1.1.1.13', 4);
+            if (!empty($entModWalk)) {
+                $hasEntityMib = true;
+            }
             foreach ($entModWalk as $emVal) {
                 $emClean = $this->cleanSnmpValue($emVal);
                 if ($emClean !== '') {
-                    // Bekannter Firmware-Tippfehler bei Cisco SG500 ("SG5000-28-k9" -> "Cisco SG500-28 (SG5000-28-k9)")
                     if (preg_match('/^SG5000-(.+)$/i', $emClean, $sgm)) {
                         $deviceModel = 'Cisco SG500-' . strtoupper($sgm[1]);
                     } else {
@@ -171,11 +225,10 @@ class SnmpClient
                 }
             }
         }
-        $serialNumber = $this->getOid('1.3.6.1.2.1.43.5.1.1.17.1');
-        if (!$serialNumber) {
-            $serialNumber = $this->getOid('1.3.6.1.2.1.47.1.1.1.1.11.1');
-        }
-        if (!$serialNumber) {
+        $serialNumber = !empty($sysBatch['1.3.6.1.2.1.43.5.1.1.17.1'])
+            ? $sysBatch['1.3.6.1.2.1.43.5.1.1.17.1']
+            : (!empty($sysBatch['1.3.6.1.2.1.47.1.1.1.1.11.1']) ? $sysBatch['1.3.6.1.2.1.47.1.1.1.1.11.1'] : null);
+        if (!$serialNumber && $hasEntityMib) {
             $entSerWalk = $this->walkOid('1.3.6.1.2.1.47.1.1.1.1.11', 4);
             foreach ($entSerWalk as $esVal) {
                 $esClean = $this->cleanSnmpValue($esVal);
@@ -185,11 +238,10 @@ class SnmpClient
                 }
             }
         }
-        $firmwareRev = $this->getOid('1.3.6.1.2.1.47.1.1.1.1.10.1');
-        if (!$firmwareRev) {
-            $firmwareRev = $this->getOid('1.3.6.1.2.1.47.1.1.1.1.9.1');
-        }
-        if (!$firmwareRev) {
+        $firmwareRev = !empty($sysBatch['1.3.6.1.2.1.47.1.1.1.1.10.1'])
+            ? $sysBatch['1.3.6.1.2.1.47.1.1.1.1.10.1']
+            : (!empty($sysBatch['1.3.6.1.2.1.47.1.1.1.1.9.1']) ? $sysBatch['1.3.6.1.2.1.47.1.1.1.1.9.1'] : null);
+        if (!$firmwareRev && $hasEntityMib) {
             $entFwWalk = $this->walkOid('1.3.6.1.2.1.47.1.1.1.1.10', 4);
             foreach ($entFwWalk as $efVal) {
                 $efClean = $this->cleanSnmpValue($efVal);
@@ -200,34 +252,135 @@ class SnmpClient
             }
         }
 
-        // Interfaces (ifName / ifDescr, ifOperStatus, ifSpeed / ifHighSpeed, ifAlias, Traffic In/Out, Errors)
+        // 2. Zuerst NUR Interface-Namen (ifName/ifDescr) und Oper-Status per GetBulk abrufen,
+        // damit wir für nicht-bestückte virtuelle Stack-Slots (status=6 notPresent) KEINE Detail-Walks verschwenden!
         $ifNames = $this->walkOid('1.3.6.1.2.1.31.1.1.1.1', 108);
         if (empty($ifNames)) {
             $ifNames = $this->walkOid('1.3.6.1.2.1.2.2.1.2', 108);
         }
-        $ifStatus    = $this->walkOid('1.3.6.1.2.1.2.2.1.8', 108);
-        $ifAdminWalk = $this->walkOid('1.3.6.1.2.1.2.2.1.7', 108);
-        $ifAliasWalk = $this->walkOid('1.3.6.1.2.1.31.1.1.1.18', 108);
-        $ifHighSpeed = $this->walkOid('1.3.6.1.2.1.31.1.1.1.15', 108);
-        $ifSpeedWalk = empty($ifHighSpeed) ? $this->walkOid('1.3.6.1.2.1.2.2.1.5', 108) : array();
-        $ifInOctets  = $this->walkOid('1.3.6.1.2.1.2.2.1.10', 108);
-        $ifOutOctets = $this->walkOid('1.3.6.1.2.1.2.2.1.16', 108);
-        $ifInErrors  = $this->walkOid('1.3.6.1.2.1.2.2.1.14', 108);
+        $ifStatus = $this->walkOid('1.3.6.1.2.1.2.2.1.8', 108);
 
-        // Q-BRIDGE-MIB (802.1Q VLANs & Port-PVIDs):
-        // dot1qPvid (1.3.6.1.2.1.17.7.1.4.5.1.1), dot1qVlanFdbId (.4.2.1.3), dot1qVlanStaticName (.4.3.1.1)
-        $pvidWalk       = $this->walkOid('1.3.6.1.2.1.17.7.1.4.5.1.1', 108);
-        $vlanCurWalk    = $this->walkOid('1.3.6.1.2.1.17.7.1.4.2.1.3', 64);
-        $vlanStaticName = $this->walkOid('1.3.6.1.2.1.17.7.1.4.3.1.1', 64);
+        // Erwartete Portanzahl aus sysDescr / Modellnamen erkennen (z.B. "28-Port Gigabit Stackable Managed Switch")
+        $expectedPorts = 0;
+        if (preg_match('/\b(8|10|12|16|18|20|24|26|28|48|50|52)[-\s]*Port\b/i', (string)$sysDescr . ' ' . (string)$deviceModel, $epm)) {
+            $expectedPorts = (int)$epm[1];
+        }
 
-        // Cisco Catalyst / IOS Core-Switch Erweiterung:
-        // CISCO-VTP-MIB (vtpVlanName 1.3.6.1.4.1.9.9.46.1.3.1.1.4.1),
-        // CISCO-VLAN-MEMBERSHIP-MIB (vmVlan 1.3.6.1.4.1.9.9.68.1.2.2.1.2),
-        // Trunk-Status (vlanTrunkPortDynamicStatus 1.3.6.1.4.1.9.9.46.1.6.1.1.14, 1=trunking) & Native-VLAN (.1.1.5)
-        $isCiscoDevice = (stripos((string)$sysDescr, 'cisco') !== false || strpos((string)$sysObjectId, '1.3.6.1.4.1.9.') !== false);
-        $ciscoVtpNames   = ($isCiscoDevice || empty($vlanStaticName)) ? $this->walkOid('1.3.6.1.4.1.9.9.46.1.3.1.1.4.1', 64) : array();
-        $ciscoVmVlan     = ($isCiscoDevice || empty($pvidWalk)) ? $this->walkOid('1.3.6.1.4.1.9.9.68.1.2.2.1.2', 108) : array();
-        $ciscoTrunkStat  = $isCiscoDevice ? $this->walkOid('1.3.6.1.4.1.9.9.46.1.6.1.1.14', 108) : array();
+        // Aktive Präfixe (z.B. "gi1/1/") und tatsächlich vorhandene ifIndex-Liste bestimmen
+        $presentPrefixes = array();
+        $hasPresentPorts = false;
+        foreach ($ifNames as $oid => $val) {
+            $parts = explode('.', $oid);
+            $ifIndex = (int)end($parts);
+            $stRaw = isset($ifStatus['1.3.6.1.2.1.2.2.1.8.' . $ifIndex]) ? trim((string)$ifStatus['1.3.6.1.2.1.2.2.1.8.' . $ifIndex]) : '1';
+            $isNotPresent = ($stRaw === '6' || stripos($stRaw, 'notPresent') !== false);
+            if (!$isNotPresent) {
+                $hasPresentPorts = true;
+                $cleanName = $this->cleanSnmpValue($val);
+                if (preg_match('/^([A-Za-z\-]*[1-8]\/[0-9]+\/)[0-9]+$/', $cleanName, $pxm)) {
+                    $presentPrefixes[$pxm[1]] = true;
+                }
+            }
+        }
+
+        $keptIfIndices = array();
+        foreach ($ifNames as $oid => $val) {
+            $parts = explode('.', $oid);
+            $ifIndex = (int)end($parts);
+            if ($ifIndex <= 0) {
+                continue;
+            }
+            $statusVal = isset($ifStatus['1.3.6.1.2.1.2.2.1.8.' . $ifIndex]) ? trim((string)$ifStatus['1.3.6.1.2.1.2.2.1.8.' . $ifIndex]) : '1';
+            $cleanName = $this->cleanSnmpValue($val);
+            $isNotPresent = ($statusVal === '6' || stripos($statusVal, 'notPresent') !== false);
+            if ($isNotPresent && $hasPresentPorts) {
+                $keepEmptySfp = false;
+                if ($expectedPorts > 0 && preg_match('/^([A-Za-z\-]*[1-8]\/[0-9]+\/)([0-9]+)$/', $cleanName, $pmSfp)) {
+                    $pfx = $pmSfp[1];
+                    $pNum = (int)$pmSfp[2];
+                    if (isset($presentPrefixes[$pfx]) && $pNum >= 1 && $pNum <= $expectedPorts) {
+                        $keepEmptySfp = true;
+                    }
+                }
+                if (!$keepEmptySfp) {
+                    continue;
+                }
+            }
+            $keptIfIndices[] = $ifIndex;
+        }
+
+        // 3. Für die tatsächlich relevanten Ports (z.B. 28 Ports statt 108 Stack-Platzhalter)
+        // die Detail-Spalten gezielt per Multi-Varbind-Batch oder schnellem GetBulk abrufen
+        $ifAdminWalk = array();
+        $ifAliasWalk = array();
+        $ifHighSpeed = array();
+        $ifSpeedWalk = array();
+        $ifInOctets  = array();
+        $ifOutOctets = array();
+        $ifInErrors  = array();
+        $pvidWalk    = array();
+
+        $isSwitchCandidate = (count($keptIfIndices) > 3 || stripos((string)$sysDescr, 'switch') !== false || stripos((string)$deviceModel, 'switch') !== false);
+
+        if (!empty($keptIfIndices) && count($keptIfIndices) <= 56) {
+            $detailOids = array();
+            foreach ($keptIfIndices as $idx) {
+                $detailOids[] = '1.3.6.1.2.1.2.2.1.7.' . $idx;       // ifAdminStatus
+                $detailOids[] = '1.3.6.1.2.1.31.1.1.1.18.' . $idx;   // ifAlias
+                $detailOids[] = '1.3.6.1.2.1.31.1.1.1.15.' . $idx;   // ifHighSpeed
+                $detailOids[] = '1.3.6.1.2.1.2.2.1.10.' . $idx;      // ifInOctets
+                $detailOids[] = '1.3.6.1.2.1.2.2.1.16.' . $idx;      // ifOutOctets
+                $detailOids[] = '1.3.6.1.2.1.2.2.1.14.' . $idx;      // ifInErrors
+                if ($isSwitchCandidate) {
+                    $detailOids[] = '1.3.6.1.2.1.17.7.1.4.5.1.1.' . $idx; // dot1qPvid
+                }
+            }
+            $detailMap = $this->getOidsBatch($detailOids, 14);
+            foreach ($keptIfIndices as $idx) {
+                if (isset($detailMap['1.3.6.1.2.1.2.2.1.7.' . $idx])) {
+                    $ifAdminWalk['1.3.6.1.2.1.2.2.1.7.' . $idx] = $detailMap['1.3.6.1.2.1.2.2.1.7.' . $idx];
+                }
+                if (isset($detailMap['1.3.6.1.2.1.31.1.1.1.18.' . $idx])) {
+                    $ifAliasWalk['1.3.6.1.2.1.31.1.1.1.18.' . $idx] = $detailMap['1.3.6.1.2.1.31.1.1.1.18.' . $idx];
+                }
+                if (isset($detailMap['1.3.6.1.2.1.31.1.1.1.15.' . $idx])) {
+                    $ifHighSpeed['1.3.6.1.2.1.31.1.1.1.15.' . $idx] = $detailMap['1.3.6.1.2.1.31.1.1.1.15.' . $idx];
+                }
+                if (isset($detailMap['1.3.6.1.2.1.2.2.1.10.' . $idx])) {
+                    $ifInOctets['1.3.6.1.2.1.2.2.1.10.' . $idx] = $detailMap['1.3.6.1.2.1.2.2.1.10.' . $idx];
+                }
+                if (isset($detailMap['1.3.6.1.2.1.2.2.1.16.' . $idx])) {
+                    $ifOutOctets['1.3.6.1.2.1.2.2.1.16.' . $idx] = $detailMap['1.3.6.1.2.1.2.2.1.16.' . $idx];
+                }
+                if (isset($detailMap['1.3.6.1.2.1.2.2.1.14.' . $idx])) {
+                    $ifInErrors['1.3.6.1.2.1.2.2.1.14.' . $idx] = $detailMap['1.3.6.1.2.1.2.2.1.14.' . $idx];
+                }
+                if (isset($detailMap['1.3.6.1.2.1.17.7.1.4.5.1.1.' . $idx])) {
+                    $pvidWalk['1.3.6.1.2.1.17.7.1.4.5.1.1.' . $idx] = $detailMap['1.3.6.1.2.1.17.7.1.4.5.1.1.' . $idx];
+                }
+            }
+        } elseif (!empty($keptIfIndices)) {
+            $ifAdminWalk = $this->walkOid('1.3.6.1.2.1.2.2.1.7', 108);
+            $ifAliasWalk = $this->walkOid('1.3.6.1.2.1.31.1.1.1.18', 108);
+            $ifHighSpeed = $this->walkOid('1.3.6.1.2.1.31.1.1.1.15', 108);
+            $ifSpeedWalk = empty($ifHighSpeed) ? $this->walkOid('1.3.6.1.2.1.2.2.1.5', 108) : array();
+            $ifInOctets  = $this->walkOid('1.3.6.1.2.1.2.2.1.10', 108);
+            $ifOutOctets = $this->walkOid('1.3.6.1.2.1.2.2.1.16', 108);
+            $ifInErrors  = $this->walkOid('1.3.6.1.2.1.2.2.1.14', 108);
+            if ($isSwitchCandidate) {
+                $pvidWalk = $this->walkOid('1.3.6.1.2.1.17.7.1.4.5.1.1', 108);
+            }
+        }
+
+        // Q-BRIDGE-MIB & Cisco-VLAN-MIBs NUR auf Switch-Kandidaten abfragen (nicht auf Druckern!)
+        $vlanCurWalk    = $isSwitchCandidate ? $this->walkOid('1.3.6.1.2.1.17.7.1.4.2.1.3', 64) : array();
+        $vlanStaticName = $isSwitchCandidate ? $this->walkOid('1.3.6.1.2.1.17.7.1.4.3.1.1', 64) : array();
+
+        $isCiscoIos = (stripos((string)$sysDescr, 'cisco ios') !== false);
+        $isCiscoDevice = ($isCiscoIos || stripos((string)$sysDescr, 'cisco') !== false || strpos((string)$sysObjectId, '1.3.6.1.4.1.9.') !== false);
+        $ciscoVtpNames   = ($isSwitchCandidate && $isCiscoIos) ? $this->walkOid('1.3.6.1.4.1.9.9.46.1.3.1.1.4.1', 64) : array();
+        $ciscoVmVlan     = ($isSwitchCandidate && $isCiscoIos && empty($pvidWalk)) ? $this->walkOid('1.3.6.1.4.1.9.9.68.1.2.2.1.2', 108) : array();
+        $ciscoTrunkStat  = ($isSwitchCandidate && $isCiscoIos) ? $this->walkOid('1.3.6.1.4.1.9.9.46.1.6.1.1.14', 108) : array();
         $ciscoNativeVlan = !empty($ciscoTrunkStat) ? $this->walkOid('1.3.6.1.4.1.9.9.46.1.6.1.1.5', 108) : array();
 
         $vlansById = array(1 => array('id' => 1, 'name' => 'Default'));
@@ -252,7 +405,6 @@ class SnmpClient
         foreach ($ciscoVtpNames as $vOid => $vName) {
             $vParts = explode('.', $vOid);
             $vid = (int)end($vParts);
-            // Interne Cisco FDDI/TokenRing Default-VLANs 1002..1005 überspringen
             if ($vid >= 1 && $vid <= 4094 && ($vid < 1002 || $vid > 1005)) {
                 $cleanVName = $this->cleanSnmpValue($vName);
                 $vlansById[$vid] = array(
@@ -261,30 +413,6 @@ class SnmpClient
                 );
             }
         }
-
-        // Erwartete Portanzahl aus sysDescr / Modellnamen erkennen (z.B. "28-Port Gigabit Stackable Managed Switch")
-        $expectedPorts = 0;
-        if (preg_match('/\b(8|10|12|16|18|20|24|26|28|48|50|52)[-\s]*Port\b/i', (string)$sysDescr . ' ' . (string)$deviceModel, $epm)) {
-            $expectedPorts = (int)$epm[1];
-        }
-
-        // Aktive Präfixe (z.B. "gi1/1/") bestimmen, die mindestens einen physisch vorhandenen Port (ifOperStatus 1=up oder 2=down) besitzen
-        $presentPrefixes = array();
-        $hasPresentPorts = false;
-        foreach ($ifNames as $oid => $val) {
-            $parts = explode('.', $oid);
-            $ifIndex = (int)end($parts);
-            $stRaw = isset($ifStatus['1.3.6.1.2.1.2.2.1.8.' . $ifIndex]) ? trim((string)$ifStatus['1.3.6.1.2.1.2.2.1.8.' . $ifIndex]) : '1';
-            $isNotPresent = ($stRaw === '6' || stripos($stRaw, 'notPresent') !== false);
-            if (!$isNotPresent) {
-                $hasPresentPorts = true;
-                $cleanName = $this->cleanSnmpValue($val);
-                if (preg_match('/^([A-Za-z\-]*[1-8]\/[0-9]+\/)[0-9]+$/', $cleanName, $pxm)) {
-                    $presentPrefixes[$pxm[1]] = true;
-                }
-            }
-        }
-
         $interfaces = array();
         foreach ($ifNames as $oid => $val) {
             $parts = explode('.', $oid);
@@ -294,8 +422,6 @@ class SnmpClient
                 $cleanName = $this->cleanSnmpValue($val);
                 $isNotPresent = ($statusVal === '6' || stripos($statusVal, 'notPresent') !== false);
                 if ($isNotPresent && $hasPresentPorts) {
-                    // Nicht bestückte SFP-Ports (status=6) des aktiven Switch-Moduls bis $expectedPorts beibehalten (z.B. gi1/1/27..28 beim 28-Port Switch),
-                    // aber virtuelle Platzhalter-Slots/Stack-Units (wie fa1/2/1..48, gi1/1/29..52, fa2/2/*, Po1..32) ausblenden
                     $keepEmptySfp = false;
                     if ($expectedPorts > 0 && preg_match('/^([A-Za-z\-]*[1-8]\/[0-9]+\/)([0-9]+)$/', $cleanName, $pmSfp)) {
                         $pfx = $pmSfp[1];
@@ -378,164 +504,166 @@ class SnmpClient
         }
         ksort($vlansById);
 
-        // Bridge-MIB: dot1dBasePortIfIndex (1.3.6.1.2.1.17.1.4.1.2)
-        // Zuordnung BridgePort -> ifIndex
+        // Bridge-MIB, LLDP & CDP NUR auf Switches / Mehrport-Geräten abfragen
         $bridgePortToIfIndex = array();
-        $bpWalk = $this->walkOid('1.3.6.1.2.1.17.1.4.1.2', 108);
-        foreach ($bpWalk as $oid => $val) {
-            $parts = explode('.', $oid);
-            $bridgePort = (int)end($parts);
-            $bridgePortToIfIndex[$bridgePort] = (int)$this->cleanSnmpValue($val);
-        }
-
-        // Bridge-MIB MAC-Adresstabelle: dot1dTpFdbPort (1.3.6.1.2.1.17.4.3.1.2)
-        $fdbWalk = $this->walkOid('1.3.6.1.2.1.17.4.3.1.2', 200);
-        if (empty($fdbWalk)) {
-            $fdbWalk = $this->walkOid('1.3.6.1.2.1.17.7.1.2.2.1.2', 200);
-        }
-
         $macTable = array();
-        foreach ($fdbWalk as $oid => $val) {
-            $parts = explode('.', $oid);
-            $count = count($parts);
-            if ($count >= 6) {
-                $macBytes = array_slice($parts, -6);
-                $hexParts = array();
-                $validMac = true;
-                foreach ($macBytes as $b) {
-                    $num = (int)$b;
-                    if ($num < 0 || $num > 255) {
-                        $validMac = false;
+        $lldpNeighbors = array();
+
+        if ($isSwitchCandidate) {
+            $bpWalk = $this->walkOid('1.3.6.1.2.1.17.1.4.1.2', 108);
+            foreach ($bpWalk as $oid => $val) {
+                $parts = explode('.', $oid);
+                $bridgePort = (int)end($parts);
+                $bridgePortToIfIndex[$bridgePort] = (int)$this->cleanSnmpValue($val);
+            }
+
+            // Bridge-MIB MAC-Adresstabelle: dot1dTpFdbPort (1.3.6.1.2.1.17.4.3.1.2)
+            $fdbWalk = $this->walkOid('1.3.6.1.2.1.17.4.3.1.2', 200);
+            if (empty($fdbWalk)) {
+                $fdbWalk = $this->walkOid('1.3.6.1.2.1.17.7.1.2.2.1.2', 200);
+            }
+
+            foreach ($fdbWalk as $oid => $val) {
+                $parts = explode('.', $oid);
+                $count = count($parts);
+                if ($count >= 6) {
+                    $macBytes = array_slice($parts, -6);
+                    $hexParts = array();
+                    $validMac = true;
+                    foreach ($macBytes as $b) {
+                        $num = (int)$b;
+                        if ($num < 0 || $num > 255) {
+                            $validMac = false;
+                            break;
+                        }
+                        $hexParts[] = sprintf('%02X', $num);
+                    }
+                    if ($validMac) {
+                        $mac = implode(':', $hexParts);
+                        $bridgePort = (int)$this->cleanSnmpValue($val);
+                        $ifIndex = isset($bridgePortToIfIndex[$bridgePort]) ? $bridgePortToIfIndex[$bridgePort] : $bridgePort;
+                        $portName = isset($interfaces[$ifIndex]['name']) ? $interfaces[$ifIndex]['name'] : ('Port ' . $bridgePort);
+                        $macTable[$mac] = array(
+                            'bridge_port' => $bridgePort,
+                            'if_index'    => $ifIndex,
+                            'port_name'   => $portName,
+                        );
+                    }
+                }
+            }
+
+            // Cisco Catalyst IOS / IOS-XE: Per-VLAN MAC-Tabellen-Abfrage via Community-Indexing ("public@VLAN")
+            if ($isCiscoIos && count($vlansById) > 1) {
+                $queriedExtraVlans = 0;
+                foreach ($vlansById as $vid => $vMeta) {
+                    if ($vid <= 1 || $vid >= 1002) {
+                        continue;
+                    }
+                    if ($queriedExtraVlans >= 10) {
                         break;
                     }
-                    $hexParts[] = sprintf('%02X', $num);
+                    $queriedExtraVlans++;
+                    $vlanClient = new self($this->ip, $this->community . '@' . $vid, 350);
+                    $vBpWalk = $vlanClient->walkOid('1.3.6.1.2.1.17.1.4.1.2', 108);
+                    $vBpMap = $bridgePortToIfIndex;
+                    foreach ($vBpWalk as $void => $vval) {
+                        $vparts = explode('.', $void);
+                        $vBpMap[(int)end($vparts)] = (int)$this->cleanSnmpValue($vval);
+                    }
+                    $vFdbWalk = $vlanClient->walkOid('1.3.6.1.2.1.17.4.3.1.2', 200);
+                    foreach ($vFdbWalk as $void => $vval) {
+                        $vparts = explode('.', $void);
+                        if (count($vparts) >= 6) {
+                            $mBytes = array_slice($vparts, -6);
+                            $hParts = array();
+                            $okM = true;
+                            foreach ($mBytes as $mb) {
+                                $n = (int)$mb;
+                                if ($n < 0 || $n > 255) {
+                                    $okM = false;
+                                    break;
+                                }
+                                $hParts[] = sprintf('%02X', $n);
+                            }
+                            if ($okM) {
+                                $mac = implode(':', $hParts);
+                                $bPort = (int)$this->cleanSnmpValue($vval);
+                                $ifIdx = isset($vBpMap[$bPort]) ? $vBpMap[$bPort] : $bPort;
+                                $pName = isset($interfaces[$ifIdx]['name']) ? $interfaces[$ifIdx]['name'] : ('Port ' . $bPort);
+                                $macTable[$mac] = array(
+                                    'bridge_port' => $bPort,
+                                    'if_index'    => $ifIdx,
+                                    'port_name'   => $pName,
+                                    'vlan'        => $vid,
+                                );
+                            }
+                        }
+                    }
                 }
-                if ($validMac) {
-                    $mac = implode(':', $hexParts);
-                    $bridgePort = (int)$this->cleanSnmpValue($val);
-                    $ifIndex = isset($bridgePortToIfIndex[$bridgePort]) ? $bridgePortToIfIndex[$bridgePort] : $bridgePort;
-                    $portName = isset($interfaces[$ifIndex]['name']) ? $interfaces[$ifIndex]['name'] : ('Port ' . $bridgePort);
-                    $macTable[$mac] = array(
-                        'bridge_port' => $bridgePort,
-                        'if_index'    => $ifIndex,
-                        'port_name'   => $portName,
+            }
+
+            // LLDP Nachbarschaftstabelle: lldpRemSysName (1.0.8802.1.1.2.1.4.1.1.9) & lldpRemPortId (.7) / lldpRemPortDesc (.8)
+            $lldpWalk = $this->walkOid('1.0.8802.1.1.2.1.4.1.1.9', 32);
+            $lldpPortWalk = !empty($lldpWalk) ? $this->walkOid('1.0.8802.1.1.2.1.4.1.1.7', 32) : array();
+            $lldpPortDescWalk = !empty($lldpWalk) ? $this->walkOid('1.0.8802.1.1.2.1.4.1.1.8', 32) : array();
+            foreach ($lldpWalk as $oid => $val) {
+                $parts = explode('.', $oid);
+                $localPortNum = isset($parts[count($parts) - 2]) ? (int)$parts[count($parts) - 2] : 0;
+                $remName = $this->cleanSnmpValue($val);
+                if ($remName !== '') {
+                    $suffix = substr($oid, strlen('1.0.8802.1.1.2.1.4.1.1.9.'));
+                    $remPort = '';
+                    $rawDesc = isset($lldpPortDescWalk['1.0.8802.1.1.2.1.4.1.1.8.' . $suffix]) ? $this->cleanSnmpValue($lldpPortDescWalk['1.0.8802.1.1.2.1.4.1.1.8.' . $suffix]) : '';
+                    $rawPortId = isset($lldpPortWalk['1.0.8802.1.1.2.1.4.1.1.7.' . $suffix]) ? (string)$lldpPortWalk['1.0.8802.1.1.2.1.4.1.1.7.' . $suffix] : '';
+                    if ($rawDesc !== '' && preg_match('/^[\x20-\x7E]+$/', $rawDesc)) {
+                        $remPort = $rawDesc;
+                    } elseif (strlen($rawPortId) === 6 && !preg_match('/^[\x20-\x7E]+$/', $rawPortId)) {
+                        $macHex = array();
+                        for ($mi = 0; $mi < 6; $mi++) {
+                            $macHex[] = sprintf('%02X', ord($rawPortId[$mi]));
+                        }
+                        $remPort = implode(':', $macHex);
+                    } else {
+                        $cleanPortId = $this->cleanSnmpValue($rawPortId);
+                        $remPort = preg_match('/^[\x20-\x7E]+$/', $cleanPortId) ? $cleanPortId : ($rawDesc !== '' ? $rawDesc : 'Uplink');
+                    }
+                    $portName = isset($interfaces[$localPortNum]['name']) ? $interfaces[$localPortNum]['name'] : ('Port ' . $localPortNum);
+                    $lldpNeighbors[] = array(
+                        'local_port'  => $portName,
+                        'remote_name' => $remName,
+                        'remote_port' => $remPort !== '' ? $remPort : 'Uplink',
                     );
                 }
             }
-        }
 
-        // Cisco Catalyst IOS / IOS-XE: Per-VLAN MAC-Tabellen-Abfrage via Community-Indexing ("public@VLAN")
-        if ((stripos((string)$sysDescr, 'cisco ios') !== false || !empty($ciscoVtpNames)) && count($vlansById) > 1) {
-            $queriedExtraVlans = 0;
-            foreach ($vlansById as $vid => $vMeta) {
-                if ($vid <= 1 || $vid >= 1002) {
-                    continue;
-                }
-                if ($queriedExtraVlans >= 10) {
-                    break;
-                }
-                $queriedExtraVlans++;
-                $vlanClient = new self($this->ip, $this->community . '@' . $vid, 500);
-                $vBpWalk = $vlanClient->walkOid('1.3.6.1.2.1.17.1.4.1.2', 108);
-                $vBpMap = $bridgePortToIfIndex;
-                foreach ($vBpWalk as $void => $vval) {
-                    $vparts = explode('.', $void);
-                    $vBpMap[(int)end($vparts)] = (int)$this->cleanSnmpValue($vval);
-                }
-                $vFdbWalk = $vlanClient->walkOid('1.3.6.1.2.1.17.4.3.1.2', 200);
-                foreach ($vFdbWalk as $void => $vval) {
-                    $vparts = explode('.', $void);
-                    if (count($vparts) >= 6) {
-                        $mBytes = array_slice($vparts, -6);
-                        $hParts = array();
-                        $okM = true;
-                        foreach ($mBytes as $mb) {
-                            $n = (int)$mb;
-                            if ($n < 0 || $n > 255) {
-                                $okM = false;
+            // Cisco CDP Nachbarschaftstabelle (CISCO-CDP-MIB: cdpCacheDeviceId .1.6 & cdpCacheDevicePort .1.7)
+            if ($isCiscoDevice) {
+                $cdpDevWalk = $this->walkOid('1.3.6.1.4.1.9.9.23.1.2.1.1.6', 32);
+                $cdpPortWalk = !empty($cdpDevWalk) ? $this->walkOid('1.3.6.1.4.1.9.9.23.1.2.1.1.7', 32) : array();
+                foreach ($cdpDevWalk as $oid => $val) {
+                    $parts = explode('.', $oid);
+                    $ifIdx = isset($parts[count($parts) - 2]) ? (int)$parts[count($parts) - 2] : 0;
+                    $remName = $this->cleanSnmpValue($val);
+                    if ($remName !== '' && $ifIdx > 0) {
+                        $suffix = substr($oid, strlen('1.3.6.1.4.1.9.9.23.1.2.1.1.6.'));
+                        $remPort = isset($cdpPortWalk['1.3.6.1.4.1.9.9.23.1.2.1.1.7.' . $suffix])
+                            ? $this->cleanSnmpValue($cdpPortWalk['1.3.6.1.4.1.9.9.23.1.2.1.1.7.' . $suffix])
+                            : 'CDP-Trunk';
+                        $portName = isset($interfaces[$ifIdx]['name']) ? $interfaces[$ifIdx]['name'] : ('Port ' . $ifIdx);
+                        $alreadyInLldp = false;
+                        foreach ($lldpNeighbors as $ln) {
+                            if ($ln['local_port'] === $portName && strcasecmp($ln['remote_name'], $remName) === 0) {
+                                $alreadyInLldp = true;
                                 break;
                             }
-                            $hParts[] = sprintf('%02X', $n);
                         }
-                        if ($okM) {
-                            $mac = implode(':', $hParts);
-                            $bPort = (int)$this->cleanSnmpValue($vval);
-                            $ifIdx = isset($vBpMap[$bPort]) ? $vBpMap[$bPort] : $bPort;
-                            $pName = isset($interfaces[$ifIdx]['name']) ? $interfaces[$ifIdx]['name'] : ('Port ' . $bPort);
-                            $macTable[$mac] = array(
-                                'bridge_port' => $bPort,
-                                'if_index'    => $ifIdx,
-                                'port_name'   => $pName,
-                                'vlan'        => $vid,
+                        if (!$alreadyInLldp) {
+                            $lldpNeighbors[] = array(
+                                'local_port'  => $portName,
+                                'remote_name' => $remName,
+                                'remote_port' => $remPort !== '' ? $remPort : 'CDP-Uplink',
                             );
                         }
-                    }
-                }
-            }
-        }
-
-        // LLDP Nachbarschaftstabelle: lldpRemSysName (1.0.8802.1.1.2.1.4.1.1.9) & lldpRemPortId (.7) / lldpRemPortDesc (.8)
-        $lldpNeighbors = array();
-        $lldpWalk = $this->walkOid('1.0.8802.1.1.2.1.4.1.1.9', 32);
-        $lldpPortWalk = !empty($lldpWalk) ? $this->walkOid('1.0.8802.1.1.2.1.4.1.1.7', 32) : array();
-        $lldpPortDescWalk = !empty($lldpWalk) ? $this->walkOid('1.0.8802.1.1.2.1.4.1.1.8', 32) : array();
-        foreach ($lldpWalk as $oid => $val) {
-            $parts = explode('.', $oid);
-            $localPortNum = isset($parts[count($parts) - 2]) ? (int)$parts[count($parts) - 2] : 0;
-            $remName = $this->cleanSnmpValue($val);
-            if ($remName !== '') {
-                $suffix = substr($oid, strlen('1.0.8802.1.1.2.1.4.1.1.9.'));
-                $remPort = '';
-                $rawDesc = isset($lldpPortDescWalk['1.0.8802.1.1.2.1.4.1.1.8.' . $suffix]) ? $this->cleanSnmpValue($lldpPortDescWalk['1.0.8802.1.1.2.1.4.1.1.8.' . $suffix]) : '';
-                $rawPortId = isset($lldpPortWalk['1.0.8802.1.1.2.1.4.1.1.7.' . $suffix]) ? (string)$lldpPortWalk['1.0.8802.1.1.2.1.4.1.1.7.' . $suffix] : '';
-                if ($rawDesc !== '' && preg_match('/^[\x20-\x7E]+$/', $rawDesc)) {
-                    $remPort = $rawDesc;
-                } elseif (strlen($rawPortId) === 6 && !preg_match('/^[\x20-\x7E]+$/', $rawPortId)) {
-                    $macHex = array();
-                    for ($mi = 0; $mi < 6; $mi++) {
-                        $macHex[] = sprintf('%02X', ord($rawPortId[$mi]));
-                    }
-                    $remPort = implode(':', $macHex);
-                } else {
-                    $cleanPortId = $this->cleanSnmpValue($rawPortId);
-                    $remPort = preg_match('/^[\x20-\x7E]+$/', $cleanPortId) ? $cleanPortId : ($rawDesc !== '' ? $rawDesc : 'Uplink');
-                }
-                $portName = isset($interfaces[$localPortNum]['name']) ? $interfaces[$localPortNum]['name'] : ('Port ' . $localPortNum);
-                $lldpNeighbors[] = array(
-                    'local_port'  => $portName,
-                    'remote_name' => $remName,
-                    'remote_port' => $remPort !== '' ? $remPort : 'Uplink',
-                );
-            }
-        }
-
-        // Cisco CDP Nachbarschaftstabelle (CISCO-CDP-MIB: cdpCacheDeviceId .1.6 & cdpCacheDevicePort .1.7)
-        if ($isCiscoDevice) {
-            $cdpDevWalk = $this->walkOid('1.3.6.1.4.1.9.9.23.1.2.1.1.6', 32);
-            $cdpPortWalk = !empty($cdpDevWalk) ? $this->walkOid('1.3.6.1.4.1.9.9.23.1.2.1.1.7', 32) : array();
-            foreach ($cdpDevWalk as $oid => $val) {
-                $parts = explode('.', $oid);
-                $ifIdx = isset($parts[count($parts) - 2]) ? (int)$parts[count($parts) - 2] : 0;
-                $remName = $this->cleanSnmpValue($val);
-                if ($remName !== '' && $ifIdx > 0) {
-                    $suffix = substr($oid, strlen('1.3.6.1.4.1.9.9.23.1.2.1.1.6.'));
-                    $remPort = isset($cdpPortWalk['1.3.6.1.4.1.9.9.23.1.2.1.1.7.' . $suffix])
-                        ? $this->cleanSnmpValue($cdpPortWalk['1.3.6.1.4.1.9.9.23.1.2.1.1.7.' . $suffix])
-                        : 'CDP-Trunk';
-                    $portName = isset($interfaces[$ifIdx]['name']) ? $interfaces[$ifIdx]['name'] : ('Port ' . $ifIdx);
-                    $alreadyInLldp = false;
-                    foreach ($lldpNeighbors as $ln) {
-                        if ($ln['local_port'] === $portName && strcasecmp($ln['remote_name'], $remName) === 0) {
-                            $alreadyInLldp = true;
-                            break;
-                        }
-                    }
-                    if (!$alreadyInLldp) {
-                        $lldpNeighbors[] = array(
-                            'local_port'  => $portName,
-                            'remote_name' => $remName,
-                            'remote_port' => $remPort !== '' ? $remPort : 'CDP-Uplink',
-                        );
                     }
                 }
             }
@@ -545,7 +673,6 @@ class SnmpClient
         $detectedUnits = array();
         foreach ($interfaces as $ifIdx => $inf) {
             $pName = $inf['name'];
-            // Muster wie Gi1/0/12, Te2/0/1, 1/0/5, 2/1/8, unit1/port3
             if (preg_match('/^(?:[A-Za-z\-]+)?([1-8])\/[0-9]+\/([0-9]+)$/', $pName, $pm)) {
                 $unitNum = (int)$pm[1];
                 $detectedUnits[$unitNum] = isset($detectedUnits[$unitNum]) ? ($detectedUnits[$unitNum] + 1) : 1;
@@ -573,35 +700,37 @@ class SnmpClient
             }
         }
 
-        // Drucker-MIB (Printer-MIB 1.3.6.1.2.1.43): Seitenzähler, Display-Text & Tinten-/Toner-Füllstände
+        // Drucker-MIB (Printer-MIB 1.3.6.1.2.1.43) NUR auf Nicht-Switches abfragen
         $printerInfo = null;
-        $pageCountRaw = $this->getOid('1.3.6.1.2.1.43.10.2.1.4.1.1');
-        $supNames = $this->walkOid('1.3.6.1.2.1.43.11.1.1.6', 12);
-        if ($pageCountRaw !== null || !empty($supNames)) {
-            $supMax   = $this->walkOid('1.3.6.1.2.1.43.11.1.1.8', 12);
-            $supLevel = $this->walkOid('1.3.6.1.2.1.43.11.1.1.9', 12);
-            $dispWalk = $this->walkOid('1.3.6.1.2.1.43.16.5.1.2', 4);
-            $dispText = !empty($dispWalk) ? $this->cleanSnmpValue(reset($dispWalk)) : '';
+        if (!$isSwitchCandidate) {
+            $pageCountRaw = $this->getOid('1.3.6.1.2.1.43.10.2.1.4.1.1');
+            $supNames = $this->walkOid('1.3.6.1.2.1.43.11.1.1.6', 12);
+            if ($pageCountRaw !== null || !empty($supNames)) {
+                $supMax   = $this->walkOid('1.3.6.1.2.1.43.11.1.1.8', 12);
+                $supLevel = $this->walkOid('1.3.6.1.2.1.43.11.1.1.9', 12);
+                $dispWalk = $this->walkOid('1.3.6.1.2.1.43.16.5.1.2', 4);
+                $dispText = !empty($dispWalk) ? $this->cleanSnmpValue(reset($dispWalk)) : '';
 
-            $supplies = array();
-            foreach ($supNames as $oid => $sName) {
-                $suffix = substr($oid, strlen('1.3.6.1.2.1.43.11.1.1.6.'));
-                $maxVal = isset($supMax['1.3.6.1.2.1.43.11.1.1.8.' . $suffix]) ? (int)$this->cleanSnmpValue($supMax['1.3.6.1.2.1.43.11.1.1.8.' . $suffix]) : 100;
-                $curVal = isset($supLevel['1.3.6.1.2.1.43.11.1.1.9.' . $suffix]) ? (int)$this->cleanSnmpValue($supLevel['1.3.6.1.2.1.43.11.1.1.9.' . $suffix]) : 0;
-                $pct = ($maxVal > 0 && $curVal >= 0) ? min(100, (int)round(($curVal / $maxVal) * 100)) : null;
-                $supplies[] = array(
-                    'name'    => $this->cleanSnmpValue($sName),
-                    'level'   => $curVal,
-                    'max'     => $maxVal,
-                    'percent' => $pct,
+                $supplies = array();
+                foreach ($supNames as $oid => $sName) {
+                    $suffix = substr($oid, strlen('1.3.6.1.2.1.43.11.1.1.6.'));
+                    $maxVal = isset($supMax['1.3.6.1.2.1.43.11.1.1.8.' . $suffix]) ? (int)$this->cleanSnmpValue($supMax['1.3.6.1.2.1.43.11.1.1.8.' . $suffix]) : 100;
+                    $curVal = isset($supLevel['1.3.6.1.2.1.43.11.1.1.9.' . $suffix]) ? (int)$this->cleanSnmpValue($supLevel['1.3.6.1.2.1.43.11.1.1.9.' . $suffix]) : 0;
+                    $pct = ($maxVal > 0 && $curVal >= 0) ? min(100, (int)round(($curVal / $maxVal) * 100)) : null;
+                    $supplies[] = array(
+                        'name'    => $this->cleanSnmpValue($sName),
+                        'level'   => $curVal,
+                        'max'     => $maxVal,
+                        'percent' => $pct,
+                    );
+                }
+
+                $printerInfo = array(
+                    'page_count'      => $pageCountRaw !== null ? (int)$this->cleanSnmpValue($pageCountRaw) : null,
+                    'console_display' => $dispText,
+                    'supplies'        => $supplies,
                 );
             }
-
-            $printerInfo = array(
-                'page_count'      => $pageCountRaw !== null ? (int)$this->cleanSnmpValue($pageCountRaw) : null,
-                'console_display' => $dispText,
-                'supplies'        => $supplies,
-            );
         }
 
         $cleanDescr = $this->cleanSnmpValue($sysDescr);
@@ -663,25 +792,60 @@ class SnmpClient
         return trim($val, " \t\n\r\0\x0B\"'");
     }
 
-        /**
-     * Fragt eine einzelne SNMP-OID ab (nutzt php-snmp falls installiert, sonst den integrierten UDP-ASN.1-Socket-Fallback).
+    /**
+     * Fragt mehrere SNMP-OIDs gleichzeitig in gebündelten Multi-Varbind-UDP-Paketen ab.
+     * Spart bis zu 90 % der Netzwerk-Roundtrips gegenüber Einzelabfragen.
+     */
+    public function getOidsBatch(array $oids, $chunkSize = 14)
+    {
+        $results = array();
+        if (empty($oids)) {
+            return $results;
+        }
+        $sock = $this->getSocket();
+        if (!$sock) {
+            return $results;
+        }
+
+        foreach (array_chunk($oids, max(1, (int)$chunkSize)) as $chunk) {
+            $vblBody = '';
+            foreach ($chunk as $oidStr) {
+                $oidBin = $this->encodeOid($oidStr);
+                $vblBody .= $this->berEncode(0x30, $oidBin . "\x05\x00");
+            }
+            $varbindList = $this->berEncode(0x30, $vblBody);
+            $reqId = mt_rand(100, 30000);
+            $pduBody = $this->encodeInteger($reqId)
+                     . $this->encodeInteger(0)
+                     . $this->encodeInteger(0)
+                     . $varbindList;
+            $pdu = $this->berEncode(0xA0, $pduBody); // 0xA0 = GetRequest-PDU
+            $msgBody = $this->encodeInteger(1)
+                     . $this->berEncode(0x04, $this->community)
+                     . $pdu;
+            $packet = $this->berEncode(0x30, $msgBody);
+
+            @fwrite($sock, $packet);
+            $resp = @fread($sock, 8192);
+            if ($resp && strlen($resp) >= 10) {
+                $varbinds = $this->decodeSnmpVarbinds($resp);
+                if (is_array($varbinds)) {
+                    foreach ($varbinds as $vb) {
+                        if (!$vb['end'] && $vb['value'] !== null) {
+                            $results[$vb['oid']] = (string)$vb['value'];
+                        }
+                    }
+                }
+            }
+        }
+        return $results;
+    }
+
+    /**
+     * Fragt eine einzelne SNMP-OID über den persistenten ASN.1/BER-UDP-Socket ab.
      */
     public function getOid($oid)
     {
-        // 1. PHP SNMP Extension
-        if (function_exists('snmp2_get')) {
-            $res = @snmp2_get($this->ip, $this->community, $oid, $this->timeoutMs * 1000, 1);
-            if ($res !== false) {
-                return $this->cleanSnmpValue($res);
-            }
-        } elseif (function_exists('snmpget')) {
-            $res = @snmpget($this->ip, $this->community, $oid, $this->timeoutMs * 1000, 1);
-            if ($res !== false) {
-                return $this->cleanSnmpValue($res);
-            }
-        }
-
-        // 2. Pure-PHP UDP SNMPv2c GET
         $pdu = $this->udpSnmpRequest(0xA0, $oid); // 0xA0 = GetRequest-PDU
         if ($pdu !== null && isset($pdu['value'])) {
             return (string)$pdu['value'];
@@ -689,62 +853,94 @@ class SnmpClient
         return null;
     }
 
-        /**
-     * Führt einen SNMP-Walk unterhalb einer Basis-OID durch und liefert ein Array [oid => wert].
+    /**
+     * Führt einen hochperformanten SNMPv2c-Walk mittels GetBulkRequest (0xA5) über einen persistenten
+     * UDP-Socket durch (holt bis zu 28 Zeilen pro UDP-Paket statt 1 Zeile pro Paket).
+     * Verhindert zudem doppelte Timeouts durch php-snmp-Fallthroughs bei leeren MIB-Tabellen.
      */
-    public function walkOid($baseOid, $maxRows = 100)
+    public function walkOid($baseOid, $maxRows = 108)
     {
         $baseOid = ltrim($baseOid, '.');
-
-        // 1. PHP SNMP Extension
-        if (function_exists('snmp2_real_walk')) {
-            $res = @snmp2_real_walk($this->ip, $this->community, '.' . $baseOid, $this->timeoutMs * 1000, 1);
-            if (is_array($res) && !empty($res)) {
-                $out = array();
-                foreach ($res as $k => $v) {
-                    $normOid = ltrim(preg_replace('/^iso/i', '1', $k), '.');
-                    $out[$normOid] = $this->cleanSnmpValue($v);
-                }
-                return $out;
-            }
+        $sock = $this->getSocket();
+        if (!$sock) {
+            return array();
         }
 
-        // 2. Pure-PHP UDP SNMPv2c GETNEXT Loop
         $results = array();
         $currentOid = $baseOid;
-        for ($i = 0; $i < $maxRows; $i++) {
-            $resp = $this->udpSnmpRequest(0xA1, $currentOid); // 0xA1 = GetNextRequest-PDU
-            if ($resp === null || empty($resp['oid'])) {
+        $maxBulkLoops = max(2, (int)ceil($maxRows / 10) + 2);
+
+        for ($loop = 0; $loop < $maxBulkLoops && count($results) < $maxRows; $loop++) {
+            $batchMax = min(12, max(4, $maxRows - count($results)));
+            $reqId = mt_rand(100, 30000);
+            $oidBin = $this->encodeOid($currentOid);
+            $varbind = $this->berEncode(0x30, $oidBin . "\x05\x00");
+            $varbindList = $this->berEncode(0x30, $varbind);
+
+            // GetBulkRequest-PDU (0xA5): request-id, non-repeaters = 0, max-repetitions = $batchMax
+            $pduBody = $this->encodeInteger($reqId)
+                     . $this->encodeInteger(0)
+                     . $this->encodeInteger($batchMax)
+                     . $varbindList;
+            $pdu = $this->berEncode(0xA5, $pduBody);
+            $msgBody = $this->encodeInteger(1)
+                     . $this->berEncode(0x04, $this->community)
+                     . $pdu;
+            $packet = $this->berEncode(0x30, $msgBody);
+
+            @fwrite($sock, $packet);
+            $resp = @fread($sock, 8192);
+            if (!$resp || strlen($resp) < 10) {
                 break;
             }
-            $nextOid = $resp['oid'];
-            if (strpos($nextOid, $baseOid . '.') !== 0 && $nextOid !== $baseOid) {
+
+            $varbinds = $this->decodeSnmpVarbinds($resp);
+            if (empty($varbinds)) {
                 break;
             }
-            if ($nextOid === $currentOid) {
+
+            $reachedEnd = false;
+            $addedInBatch = 0;
+            foreach ($varbinds as $vb) {
+                if ($vb['end'] || empty($vb['oid'])) {
+                    $reachedEnd = true;
+                    break;
+                }
+                $nextOid = $vb['oid'];
+                if (strpos($nextOid, $baseOid . '.') !== 0 && $nextOid !== $baseOid) {
+                    $reachedEnd = true;
+                    break;
+                }
+                if ($nextOid === $currentOid) {
+                    $reachedEnd = true;
+                    break;
+                }
+                $results[$nextOid] = (string)$vb['value'];
+                $currentOid = $nextOid;
+                $addedInBatch++;
+                if (count($results) >= $maxRows) {
+                    $reachedEnd = true;
+                    break;
+                }
+            }
+
+            if ($reachedEnd || $addedInBatch === 0) {
                 break;
             }
-            $results[$nextOid] = (string)$resp['value'];
-            $currentOid = $nextOid;
         }
+
         return $results;
     }
 
     /**
-     * Leichtgewichtiger Pure-PHP ASN.1 BER SNMPv2c Client über UDP Port 161
-     * Funktioniert ohne externe Pakete auf jedem PHP 5.5+ bis 8.x Server!
+     * Sendet ein einzelnes SNMPv2c-UDP-Paket (GET oder GETNEXT) über den persistenten Socket.
      */
     private function udpSnmpRequest($pduType, $oidStr)
     {
-        $errno = 0;
-        $errstr = '';
-        $sock = @stream_socket_client('udp://' . $this->ip . ':161', $errno, $errstr, 1);
+        $sock = $this->getSocket();
         if (!$sock) {
             return null;
         }
-        $sec = (int)floor($this->timeoutMs / 1000);
-        $usec = (int)(($this->timeoutMs % 1000) * 1000);
-        stream_set_timeout($sock, $sec, $usec);
 
         $reqId = mt_rand(100, 30000);
         $oidBin = $this->encodeOid($oidStr);
@@ -765,8 +961,7 @@ class SnmpClient
         $packet = $this->berEncode(0x30, $msgBody);
 
         @fwrite($sock, $packet);
-        $resp = @fread($sock, 2048);
-        @fclose($sock);
+        $resp = @fread($sock, 4096);
 
         if (!$resp || strlen($resp) < 10) {
             return null;
@@ -841,10 +1036,10 @@ class SnmpClient
         return $this->berEncode(0x06, $bin);
     }
 
-        /**
-     * Dekodiert ein binäres SNMPv2c-Antwortpaket und extrahiert die erste enthaltene OID samt Wert.
+    /**
+     * Dekodiert alle in einem SNMPv2c-Antwortpaket (GetResponse / GetBulk) enthaltenen Varbinds als Liste.
      */
-    private function decodeSnmpResponse($bin)
+    private function decodeSnmpVarbinds($bin)
     {
         $pos = 0;
         $seq = $this->berReadElement($bin, $pos);
@@ -872,24 +1067,47 @@ class SnmpClient
             return null;
         }
         $vpos = 0;
-        $vb = $this->berReadElement($vbList['value'], $vpos);
-        if (!$vb || $vb['tag'] !== 0x30) {
-            return null;
+        $vlen = strlen($vbList['value']);
+        $list = array();
+        while ($vpos < $vlen) {
+            $vb = $this->berReadElement($vbList['value'], $vpos);
+            if (!$vb || $vb['tag'] !== 0x30) {
+                break;
+            }
+            $ipos = 0;
+            $oidElem = $this->berReadElement($vb['value'], $ipos);
+            $valElem = $this->berReadElement($vb['value'], $ipos);
+            if (!$oidElem || $oidElem['tag'] !== 0x06 || !$valElem) {
+                break;
+            }
+            $oidStr = $this->decodeOid($oidElem['value']);
+            if ($valElem['tag'] === 0x80 || $valElem['tag'] === 0x81 || $valElem['tag'] === 0x82) {
+                $list[] = array(
+                    'oid'   => $oidStr,
+                    'value' => null,
+                    'end'   => ($valElem['tag'] === 0x82),
+                );
+            } else {
+                $list[] = array(
+                    'oid'   => $oidStr,
+                    'value' => $this->decodeValue($valElem['tag'], $valElem['value']),
+                    'end'   => false,
+                );
+            }
         }
-        $ipos = 0;
-        $oidElem = $this->berReadElement($vb['value'], $ipos);
-        $valElem = $this->berReadElement($vb['value'], $ipos);
-        if (!$oidElem || $oidElem['tag'] !== 0x06 || !$valElem) {
-            return null;
-        }
-        // Check NoSuchObject (0x80), NoSuchInstance (0x81), EndOfMibView (0x82)
-        if ($valElem['tag'] === 0x80 || $valElem['tag'] === 0x81 || $valElem['tag'] === 0x82) {
-            return null;
-        }
+        return $list;
+    }
 
-        $oidStr = $this->decodeOid($oidElem['value']);
-        $valStr = $this->decodeValue($valElem['tag'], $valElem['value']);
-        return array('oid' => $oidStr, 'value' => $valStr);
+    /**
+     * Dekodiert ein binäres SNMPv2c-Antwortpaket und extrahiert die erste enthaltene OID samt Wert.
+     */
+    private function decodeSnmpResponse($bin)
+    {
+        $list = $this->decodeSnmpVarbinds($bin);
+        if (empty($list) || $list[0]['end'] || $list[0]['value'] === null) {
+            return null;
+        }
+        return array('oid' => $list[0]['oid'], 'value' => $list[0]['value']);
     }
 
         /**

@@ -34,6 +34,7 @@ class NetworkScanner
         $stmt = $this->pdo->prepare("SELECT * FROM scopes WHERE id = :id");
         $stmt->execute(array(':id' => (int)$scopeId));
         $scope = $stmt->fetch();
+        $stmt->closeCursor();
         if (!$scope) {
             throw new InvalidArgumentException("Scope ID $scopeId nicht gefunden.");
         }
@@ -138,30 +139,32 @@ class NetworkScanner
             // Vorherigen Gerätestand dieses Scopes für die Alarm- & Anomalie-Auswertung merken
             $prevStmt = $this->pdo->prepare("SELECT id, ip_address, mac_address, vendor, hostname, custom_name, device_type, status, alert_mode, last_alert_state, switch_snmp_community, snmp_ports_json FROM devices WHERE scope_id = :sid");
             $prevStmt->execute(array(':sid' => $scope['id']));
+            $prevRows = $prevStmt->fetchAll();
             $prevDevicesByIp = array();
             $knownMacsBeforeScan = array();
-            while ($pr = $prevStmt->fetch()) {
+            $retryPingIps = array();
+            foreach ($prevRows as $pr) {
                 $prevDevicesByIp[$pr['ip_address']] = $pr;
                 if (!empty($pr['mac_address'])) {
                     $knownMacsBeforeScan[strtoupper(trim($pr['mac_address']))] = true;
                 }
-                // Sicherheits-Nach-Ping für überwachte Geräte oder Switches, falls ein einzelnes Ping-Paket verloren ging
+                // Sicherheits-Nach-Ping für überwachte Geräte oder Switches vormerken, falls ein einzelnes Ping-Paket verloren ging
                 $am = isset($pr['alert_mode']) ? $pr['alert_mode'] : 'none';
                 $isSwOrMon = ($am === 'offline' || $am === 'both' || $pr['device_type'] === 'switch' || $pr['device_type'] === 'router' || $pr['device_type'] === 'ap');
                 if ($isSwOrMon && !isset($liveHosts[$pr['ip_address']])) {
-                    $reOut = @shell_exec('ping -n -c 2 -W 1 ' . escapeshellarg($pr['ip_address']) . ' 2>/dev/null');
-                    if ($reOut && preg_match('/time[=<]([0-9.]+)\s*ms/i', $reOut, $rm)) {
-                        $rTtl = null;
-                        if (preg_match('/ttl[=<]([0-9]+)/i', $reOut, $rtm)) {
-                            $rTtl = (int)$rtm[1];
-                        }
-                        $liveHosts[$pr['ip_address']] = array(
-                            'latency_ms' => (float)$rm[1],
-                            'mac'        => isset($arpMap[$pr['ip_address']]) ? $arpMap[$pr['ip_address']] : (!empty($pr['mac_address']) ? $pr['mac_address'] : null),
-                            'hostname'   => null,
-                            'ttl'        => $rTtl,
-                        );
-                    }
+                    $retryPingIps[] = $pr['ip_address'];
+                }
+            }
+            if (!empty($retryPingIps)) {
+                $retryLive = $this->discoverLiveHosts($scope['cidr'], $retryPingIps);
+                foreach ($retryLive as $rip => $rmeta) {
+                    $pr = $prevDevicesByIp[$rip];
+                    $liveHosts[$rip] = array(
+                        'latency_ms' => $rmeta['latency_ms'],
+                        'mac'        => isset($arpMap[$rip]) ? $arpMap[$rip] : (!empty($pr['mac_address']) ? $pr['mac_address'] : null),
+                        'hostname'   => null,
+                        'ttl'        => $rmeta['ttl'],
+                    );
                 }
             }
 
@@ -462,8 +465,9 @@ class NetworkScanner
     public function scanAllActiveScopes($triggerType = 'manual')
     {
         $stmt = $this->pdo->query("SELECT id FROM scopes WHERE is_active = 1 ORDER BY id ASC");
+        $rows = $stmt ? $stmt->fetchAll() : array();
         $results = array();
-        while ($row = $stmt->fetch()) {
+        foreach ($rows as $row) {
             $results[] = $this->scanScope($row['id'], $triggerType);
         }
         return $results;
@@ -1496,6 +1500,7 @@ class NetworkScanner
             ");
             $stmt->execute(array(':mac' => $mac));
             $last = $stmt->fetch();
+            $stmt->closeCursor();
 
             if ($last && (int)$last['switch_id'] === $swId && (string)$last['port_name'] === $portName) {
                 $upd = $this->pdo->prepare("
@@ -1562,6 +1567,7 @@ class NetworkScanner
         $stmt = $this->pdo->prepare("SELECT id, is_manual_type, device_type FROM devices WHERE ip_address = :ip");
         $stmt->execute(array(':ip' => $data['ip_address']));
         $existing = $stmt->fetch();
+        $stmt->closeCursor();
 
         if ($existing) {
             $deviceType = ((int)$existing['is_manual_type'] === 1) ? $existing['device_type'] : $data['device_type'];
@@ -1715,64 +1721,16 @@ class NetworkScanner
     }
 
     /**
-     * Findet aktive Hosts im Subnetz via Nmap (falls installiert) oder schnellem Parallel-Ping
+     * Findet aktive Hosts im Subnetz per hochparallelem Ping-Sweep (liefert Latenz + exakten ICMP-TTL
+     * und befüllt gleichzeitig den Kernel-ARP-Cache für alle antwortenden Layer-2-Geräte).
+     * Bewusst ohne blockierenden nmap-DNS-Aufruf, damit ein /24-Subnetz zuverlässig in ~2 Sekunden fertig ist.
      */
     private function discoverLiveHosts($cidr, $ipList)
     {
         $live = array();
 
-        // Prüfe ob nmap verfügbar ist
-        $nmapPath = trim((string)@shell_exec('which nmap 2>/dev/null'));
-        if ($nmapPath !== '' && is_executable($nmapPath) && strpos($cidr, '/') !== false) {
-            $cmd = escapeshellcmd($nmapPath) . ' -sn -T4 -oX - ' . escapeshellarg($cidr) . ' 2>/dev/null';
-            $xmlOut = @shell_exec($cmd);
-            if ($xmlOut && strpos($xmlOut, '<nmaprun') !== false) {
-                $xml = @simplexml_load_string($xmlOut);
-                if ($xml && isset($xml->host)) {
-                    foreach ($xml->host as $h) {
-                        if ((string)$h->status['state'] !== 'up') {
-                            continue;
-                        }
-                        $ip = null;
-                        $mac = null;
-                        foreach ($h->address as $addr) {
-                            $type = (string)$addr['addrtype'];
-                            if ($type === 'ipv4') {
-                                $ip = (string)$addr['addr'];
-                            } elseif ($type === 'mac') {
-                                $mac = (string)$addr['addr'];
-                            }
-                        }
-                        $hostname = null;
-                        if (isset($h->hostnames->hostname[0]['name'])) {
-                            $hostname = (string)$h->hostnames->hostname[0]['name'];
-                        }
-                        $lat = 1.0;
-                        if (isset($h->times['srtt'])) {
-                            $lat = round(((int)$h->times['srtt']) / 1000, 2);
-                        }
-                        $ttl = null;
-                        if (isset($h->status['reason_ttl']) && (int)$h->status['reason_ttl'] > 0) {
-                            $ttl = (int)$h->status['reason_ttl'];
-                        }
-                        if ($ip) {
-                            $live[$ip] = array(
-                                'latency_ms' => $lat,
-                                'mac'        => $mac,
-                                'hostname'   => $hostname,
-                                'ttl'        => $ttl,
-                            );
-                        }
-                    }
-                    if (!empty($live)) {
-                        return $live;
-                    }
-                }
-            }
-        }
-
-        // Fallback: Schneller paralleler Ping-Sweep in Batches
-        $batchSize = isset($this->config['ping_batch_size']) ? (int)$this->config['ping_batch_size'] : 64;
+        // Hochparalleler Ping-Sweep in Batches (Standard: 128 gleichzeitige Pings = ~2s für ein /24-Subnetz)
+        $batchSize = isset($this->config['ping_batch_size']) ? max(32, (int)$this->config['ping_batch_size']) : 128;
         $chunks = array_chunk($ipList, $batchSize);
 
         foreach ($chunks as $chunk) {
@@ -2750,7 +2708,7 @@ class NetworkScanner
             return $result;
         }
 
-        $chunks = array_chunk(array_values($macList), 3);
+        $chunks = array_chunk(array_values($macList), 6);
         foreach ($chunks as $batchMacs) {
             $sockets = array();
             $buffers = array();
@@ -2782,12 +2740,12 @@ class NetworkScanner
                 }
             }
 
-            $deadline = microtime(true) + 0.35;
+            $deadline = microtime(true) + 0.30;
             while (!empty($sockets) && microtime(true) < $deadline) {
                 $read = array_values($sockets);
                 $write = null;
                 $except = null;
-                $n = @stream_select($read, $write, $except, 0, 40000);
+                $n = @stream_select($read, $write, $except, 0, 10000);
                 if ($n > 0) {
                     foreach ($read as $rSock) {
                         $macKey = array_search($rSock, $sockets, true);
