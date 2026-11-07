@@ -148,6 +148,45 @@ function normalizeMacHex(str) {
 }
 
 /**
+ * Ermittelt alle Upstream-Uplink-Ports eines Switches (Ports Richtung FRITZ!Box / Gateway-Router sowie internen Port 0),
+ * über die der Switch die MAC-Adressen sämtlicher WLAN- und Router-Clients sieht.
+ */
+function getSwitchUpstreamPortsMap(sw, snmp) {
+    var upMap = { 'port 0': true, '0': true };
+    if (!sw) return upMap;
+    var swId = parseInt(sw.id, 10);
+
+    // 1. Aus Topologie-Links, bei denen dieser Switch das Ziel (Child) eines Routers/Parent-Switches ist
+    for (var l = 0; l < AppState.links.length; l++) {
+        var lnk = AppState.links[l];
+        if (parseInt(lnk.target_device_id, 10) === swId && lnk.target_port && lnk.target_port !== 'eth0' && lnk.target_port !== 'Uplink') {
+            upMap[String(lnk.target_port).trim().toLowerCase()] = true;
+        }
+    }
+
+    // 2. Aus der SNMP MAC-Tabelle: Port, auf dem die MAC-Adresse eines Routers (z.B. FRITZ!Box) gesehen wird
+    if (snmp && snmp.mac_table) {
+        var routerMacHexMap = {};
+        for (var d = 0; d < AppState.devices.length; d++) {
+            if (AppState.devices[d].device_type === 'router' && AppState.devices[d].mac_address) {
+                routerMacHexMap[normalizeMacHex(AppState.devices[d].mac_address)] = true;
+            }
+        }
+        var mKeys = Object.keys(snmp.mac_table);
+        for (var mk = 0; mk < mKeys.length; mk++) {
+            var mHex = normalizeMacHex(mKeys[mk]);
+            if (routerMacHexMap[mHex]) {
+                var entry = snmp.mac_table[mKeys[mk]];
+                if (entry && entry.port_name) {
+                    upMap[String(entry.port_name).trim().toLowerCase()] = true;
+                }
+            }
+        }
+    }
+    return upMap;
+}
+
+/**
  * Ermittelt für ein Gerät (oder eine MAC-Adresse), an welchem Switch und genau welchem Port (+ VLAN) es gesteckt ist.
  * Kombiniert Topologie-Links und sämtliche gelernten SNMP Bridge-MIB MAC-Tabellen aller Switches.
  */
@@ -185,11 +224,16 @@ function getDeviceSwitchPortInfo(dev) {
             try { snmp = JSON.parse(sw.snmp_ports_json); } catch (e) {}
             if (!snmp || !snmp.mac_table) continue;
 
+            var upstreamPorts = getSwitchUpstreamPortsMap(sw, snmp);
             var mKeys = Object.keys(snmp.mac_table);
             for (var mk = 0; mk < mKeys.length; mk++) {
                 if (normalizeMacHex(mKeys[mk]) === targetMacHex) {
                     var mEntry = snmp.mac_table[mKeys[mk]];
                     var pName = mEntry.port_name || ('Port ' + mEntry.bridge_port);
+                    // Überspringe MAC-Sichtungen auf dem Upstream-Uplink-Port Richtung FRITZ!Box/Router (sowie internem Port 0)!
+                    if (upstreamPorts[String(pName).trim().toLowerCase()] && dev.device_type !== 'router') {
+                        continue;
+                    }
                     var pVlan = mEntry.vlan ? parseInt(mEntry.vlan, 10) : 1;
                     var pAlias = '';
                     var pMode = 'access';
@@ -348,6 +392,7 @@ function renderMacFinderResults() {
         if (!snmp || !snmp.mac_table) continue;
 
         var swName = sw.custom_name || sw.snmp_sysname || sw.hostname || sw.ip_address;
+        var upstreamPortsRaw = getSwitchUpstreamPortsMap(sw, snmp);
         var mKeys = Object.keys(snmp.mac_table);
         for (var mk = 0; mk < mKeys.length; mk++) {
             var rawMac = mKeys[mk];
@@ -356,6 +401,7 @@ function renderMacFinderResults() {
 
             var mEntry = snmp.mac_table[rawMac];
             var pName = mEntry.port_name || ('Port ' + mEntry.bridge_port);
+            if (upstreamPortsRaw[String(pName).trim().toLowerCase()]) continue; // Uplink Richtung Router/FRITZ!Box überspringen
             var pVlan = mEntry.vlan ? parseInt(mEntry.vlan, 10) : 1;
             var hayRaw = (rawMac + ' ' + swName + ' ' + sw.ip_address + ' ' + pName + ' vlan ' + pVlan).toLowerCase();
 
@@ -3634,8 +3680,9 @@ function buildRealSwitchGraphicModel(dev) {
         }
     }
 
-    // Ergänze außerdem Geräte aus der SNMP Bridge-MIB MAC-Tabelle
+    // Ergänze außerdem Geräte aus der SNMP Bridge-MIB MAC-Tabelle (ohne Upstream-Uplink-Port Richtung Router/FRITZ!Box)
     if (snmp.mac_table) {
+        var swUpstreamPorts = getSwitchUpstreamPortsMap(dev, snmp);
         var mKeys = Object.keys(snmp.mac_table);
         for (var mk = 0; mk < mKeys.length; mk++) {
             var macStr = mKeys[mk];
@@ -3643,6 +3690,9 @@ function buildRealSwitchGraphicModel(dev) {
             var pName = mEntry.port_name || ('Port ' + mEntry.bridge_port);
             var matchedDev = devByMac[macStr.toUpperCase()];
             if (matchedDev && parseInt(matchedDev.id, 10) !== parseInt(dev.id, 10)) {
+                if (swUpstreamPorts[String(pName).trim().toLowerCase()] && matchedDev.device_type !== 'router') {
+                    continue;
+                }
                 var isInfra = (matchedDev.device_type === 'switch' || matchedDev.device_type === 'router');
                 addDeviceToPortMap(pName, matchedDev, '', isInfra, isInfra ? 'downstream' : null);
             }

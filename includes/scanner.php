@@ -1122,6 +1122,13 @@ class NetworkScanner
         }
 
         $linkedTargets = array();
+        // Manuell verknüpfte Geräte (is_manual = 1) vorab als bereits verknüpft vormerken
+        $manStmt = $this->pdo->prepare("SELECT target_device_id FROM links WHERE scope_id = :sid AND is_manual = 1");
+        $manStmt->execute(array(':sid' => (int)$scopeId));
+        while ($mRow = $manStmt->fetch()) {
+            $linkedTargets[(int)$mRow['target_device_id']] = true;
+        }
+
         $scanStartMicro = microtime(true);
         $now = date('Y-m-d H:i:s');
         $insertLink = $this->pdo->prepare("
@@ -1140,16 +1147,35 @@ class NetworkScanner
                     $remKey = strtolower(trim($nbr['remote_name']));
                     if (isset($byName[$remKey]) && (int)$byName[$remKey]['id'] !== (int)$sw['id']) {
                         $targetDev = $byName[$remKey];
-                        $insertLink->execute(array(
-                            ':sid'   => $scopeId,
-                            ':src'   => $sw['id'],
-                            ':dst'   => $targetDev['id'],
-                            ':sport' => $nbr['local_port'],
-                            ':dport' => isset($nbr['remote_port']) ? $nbr['remote_port'] : 'Uplink',
-                            ':ltype' => 'lldp',
-                            ':now'   => $now,
-                        ));
-                        $linkedTargets[$targetDev['id']] = true;
+                        // Wichtig: Wenn der LLDP-Nachbar der Gateway-Router (z.B. FRITZ!Box) ist,
+                        // muss der Router die Quelle (Parent) und der Switch das Ziel (Child) sein!
+                        if ((int)$targetDev['id'] === (int)$routerDevice['id'] || $targetDev['device_type'] === 'router') {
+                            if (!isset($linkedTargets[$sw['id']])) {
+                                $insertLink->execute(array(
+                                    ':sid'   => $scopeId,
+                                    ':src'   => $targetDev['id'],
+                                    ':dst'   => $sw['id'],
+                                    ':sport' => !empty($nbr['remote_port']) ? $nbr['remote_port'] : 'LAN',
+                                    ':dport' => $nbr['local_port'],
+                                    ':ltype' => 'lldp',
+                                    ':now'   => $now,
+                                ));
+                                $linkedTargets[$sw['id']] = true;
+                            }
+                        } else {
+                            if (!isset($linkedTargets[$targetDev['id']])) {
+                                $insertLink->execute(array(
+                                    ':sid'   => $scopeId,
+                                    ':src'   => $sw['id'],
+                                    ':dst'   => $targetDev['id'],
+                                    ':sport' => $nbr['local_port'],
+                                    ':dport' => isset($nbr['remote_port']) ? $nbr['remote_port'] : 'Uplink',
+                                    ':ltype' => 'lldp',
+                                    ':now'   => $now,
+                                ));
+                                $linkedTargets[$targetDev['id']] = true;
+                            }
+                        }
                     }
                 }
             }
