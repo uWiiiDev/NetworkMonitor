@@ -640,7 +640,7 @@ class NetworkScanner
         // Aktuellen Switch-Port pro MAC aus mac_port_history nachschlagen (für präzise Ortsangabe in Alarmen)
         $latestPortByMac = array();
         try {
-            $histStmt = $this->pdo->query("SELECT mac_address, switch_name, switch_ip, port_name, vlan_id FROM mac_port_history ORDER BY id ASC");
+            $histStmt = $this->pdo->query("SELECT mac_address, switch_name, switch_ip, port_name, vlan_id, last_seen FROM mac_port_history ORDER BY id ASC");
             while ($hr = $histStmt->fetch()) {
                 $latestPortByMac[strtoupper(trim($hr['mac_address']))] = $hr;
             }
@@ -899,6 +899,72 @@ class NetworkScanner
                 }
             } catch (Exception $e) {}
         }
+
+        // 5. 🎯 Gezielte MAC-Überwachungsliste (mac_watchlist): Alarm & E-Mail sobald eine vorab hinterlegte MAC im Netz auftaucht
+        try {
+            $wStmt = $this->pdo->query("SELECT * FROM mac_watchlist WHERE is_active = 1");
+            $watchItems = $wStmt ? $wStmt->fetchAll() : array();
+            if (!empty($watchItems)) {
+                $recentCutoff = date('Y-m-d H:i:s', time() - 300);
+                foreach ($watchItems as $wi) {
+                    $wMac = strtoupper(trim($wi['mac_address']));
+                    $foundDev = (isset($devByMac[$wMac]) && $devByMac[$wMac]['status'] === 'online') ? $devByMac[$wMac] : null;
+                    $foundPort = null;
+                    if (isset($latestPortByMac[$wMac])) {
+                        $lp = $latestPortByMac[$wMac];
+                        if (!empty($lp['last_seen']) && $lp['last_seen'] >= $recentCutoff) {
+                            $foundPort = $lp;
+                        } elseif ($foundDev) {
+                            $foundPort = $lp;
+                        }
+                    }
+
+                    if ($foundDev || $foundPort) {
+                        $detIp = $foundDev ? $foundDev['ip_address'] : ($foundPort && !empty($foundPort['switch_ip']) ? $foundPort['switch_ip'] : $scope['cidr']);
+                        $detDevId = $foundDev ? (int)$foundDev['id'] : 0;
+                        $detName = !empty($wi['label']) ? $wi['label'] : ($foundDev ? (!empty($foundDev['custom_name']) ? $foundDev['custom_name'] : (!empty($foundDev['hostname']) ? $foundDev['hostname'] : $foundDev['ip_address'])) : $wMac);
+                        $detVendor = $foundDev && !empty($foundDev['vendor']) ? $foundDev['vendor'] : OuiLookup::lookupVendor($wMac);
+                        $swName = $foundPort && !empty($foundPort['switch_name']) ? $foundPort['switch_name'] : null;
+                        $swPort = $foundPort && !empty($foundPort['port_name']) ? $foundPort['port_name'] : null;
+                        $swVlan = $foundPort && !empty($foundPort['vlan_id']) ? (int)$foundPort['vlan_id'] : 1;
+
+                        $locStr = $swName
+                            ? sprintf('an Switch "%s" auf Port %s (VLAN %d)', $swName, $swPort, $swVlan)
+                            : sprintf('im Subnetz "%s" (%s)', $scope['name'], $scope['cidr']);
+
+                        $msg = sprintf(
+                            '🎯 GESUCHTE MAC-ADRESSE ENTDECKT: Die überwachte MAC %s ("%s", Hersteller: %s) ist jetzt im Netzwerk aktiv (IP: %s, %s)!',
+                            $wMac,
+                            !empty($wi['label']) ? $wi['label'] : 'MAC-Watchlist',
+                            $detVendor ? $detVendor : 'Unbekannt',
+                            $foundDev ? $foundDev['ip_address'] : 'Nur Layer-2 am Switch',
+                            $locStr
+                        );
+
+                        $this->insertAnomalyAlertIfNew($newAlerts, $detDevId, (int)$scope['id'], $detIp, $detName, 'mac_watchlist', 'critical', $msg, 'watch:' . $wMac, $now);
+
+                        $newActive = ($wi['notify_mode'] === 'once') ? 0 : 1;
+                        $updW = $this->pdo->prepare("
+                            UPDATE mac_watchlist
+                            SET last_triggered_at = :now,
+                                last_seen_ip = :ip,
+                                last_seen_switch = :sw,
+                                last_seen_port = :port,
+                                is_active = :act
+                            WHERE id = :id
+                        ");
+                        $updW->execute(array(
+                            ':now'  => $now,
+                            ':ip'   => $foundDev ? $foundDev['ip_address'] : null,
+                            ':sw'   => $swName,
+                            ':port' => $swPort,
+                            ':act'  => $newActive,
+                            ':id'   => (int)$wi['id'],
+                        ));
+                    }
+                }
+            }
+        } catch (Exception $e) {}
 
         if (!empty($newAlerts)) {
             $this->sendAlertEmailsIfConfigured($scope, $newAlerts);

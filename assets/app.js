@@ -452,7 +452,16 @@ function renderMacFinderResults() {
     });
 
     if (matchedItems.length === 0) {
-        container.innerHTML = '<div style="padding:24px;text-align:center;color:var(--text-secondary);background:rgba(15,23,42,0.5);border-radius:8px;border:1px solid var(--border-color);">Keine passende MAC-Adresse, IP oder Switch-Port (auch nicht in der Port-Historie) für <b>' + escapeHtml(inp.value) + '</b> gefunden.</div>';
+        var watchBtnHtml = '';
+        if (userCanEdit() && qHex.length === 12) {
+            watchBtnHtml = '<div style="margin-top:12px;">' +
+                '<button class="btn btn-sm btn-primary" onclick="closeMacFinderModal(); openAlertsModalWithWatchMac(\'' + escapeHtml(inp.value.trim()) + '\')">🎯 Alarm setzen, sobald diese MAC-Adresse (' + escapeHtml(inp.value.trim()) + ') im Netz auftaucht</button>' +
+            '</div>';
+        }
+        container.innerHTML = '<div style="padding:24px;text-align:center;color:var(--text-secondary);background:rgba(15,23,42,0.5);border-radius:8px;border:1px solid var(--border-color);">' +
+            'Keine passende MAC-Adresse, IP oder Switch-Port (auch nicht in der Port-Historie) für <b>' + escapeHtml(inp.value) + '</b> gefunden.' +
+            watchBtnHtml +
+        '</div>';
         return;
     }
 
@@ -581,6 +590,7 @@ function loadTopologyData(callback) {
             AppState.alerts = data.alerts || [];
             AppState.unackAlerts = parseInt(data.unack_alerts || 0, 10);
             AppState.macHistory = data.mac_history || [];
+            AppState.macWatchlist = data.mac_watchlist || [];
             AppState.system = data.system || {};
             AppState.admin = data.admin || null;
 
@@ -5445,6 +5455,66 @@ function openAlertsModal() {
     document.getElementById('alerts-modal').classList.add('open');
 }
 
+function openAlertsModalWithWatchMac(prefillMac) {
+    renderAlertsModal();
+    document.getElementById('alerts-modal').classList.add('open');
+    setTimeout(function () {
+        var inp = document.getElementById('watch-mac-input');
+        var lbl = document.getElementById('watch-mac-label');
+        if (inp) {
+            inp.value = prefillMac || '';
+            if (lbl) lbl.focus();
+        }
+    }, 60);
+}
+
+function saveMacWatchlistItem() {
+    var macEl = document.getElementById('watch-mac-input');
+    var lblEl = document.getElementById('watch-mac-label');
+    var modeEl = document.getElementById('watch-mac-mode');
+    if (!macEl || !macEl.value.trim()) {
+        showToast('Bitte eine gültige MAC-Adresse eingeben (z.B. AA:BB:CC:DD:EE:FF).');
+        return;
+    }
+    fetch('api.php?action=save_mac_watchlist', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            mac_address: macEl.value.trim(),
+            label: lblEl ? lblEl.value.trim() : '',
+            notify_mode: modeEl ? modeEl.value : 'always'
+        })
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (res) {
+        if (res.ok) {
+            showToast('🎯 MAC-Überwachung für ' + res.mac_address + ' aktiviert!');
+            loadTopologyData(function () {
+                renderAlertsModal();
+            });
+        } else {
+            showToast('Fehler: ' + (res.error || 'Unbekannt'));
+        }
+    });
+}
+
+function deleteMacWatchlistItem(id) {
+    fetch('api.php?action=delete_mac_watchlist', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: id })
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (res) {
+        if (res.ok) {
+            showToast('Eintrag aus der MAC-Überwachungsliste entfernt.');
+            loadTopologyData(function () {
+                renderAlertsModal();
+            });
+        }
+    });
+}
+
 function closeAlertsModal() {
     document.getElementById('alerts-modal').classList.remove('open');
 }
@@ -5514,6 +5584,65 @@ function renderAlertsModal() {
     }
     html += '</div>';
 
+    // 🎯 Gezielte MAC-Überwachungsliste (Alarm sobald eine bestimmte, noch unbekannte MAC-Adresse im Netz auftaucht)
+    var watchlist = AppState.macWatchlist || [];
+    html += '<div style="background:rgba(15,23,42,0.8);border:1px solid rgba(59,130,246,0.45);border-radius:8px;padding:12px;margin-top:8px;">' +
+        '<div style="font-size:12px;font-weight:700;color:#60a5fa;text-transform:uppercase;margin-bottom:4px;">🎯 Gezielte MAC-Überwachung / MAC-Fahndungsliste (' + watchlist.length + ')</div>' +
+        '<div style="font-size:12px;color:var(--text-secondary);margin-bottom:10px;">' +
+            'Hinterlege hier eine <b>bislang unbekannte oder noch nicht angesteckte MAC-Adresse</b>. Sobald diese MAC im ARP-Cache oder an irgendeinem Switch-Port auftaucht, wird sofort ein kritischer Alarm ausgelöst und (bei aktivem SMTP) eine E-Mail mit IP &amp; Switch-Port versendet:' +
+        '</div>';
+
+    if (userCanEdit()) {
+        html += '<div style="display:grid;grid-template-columns:minmax(170px,1.2fr) minmax(180px,1.5fr) minmax(170px,1fr) auto;gap:8px;align-items:end;margin-bottom:10px;">' +
+            '<div class="form-group" style="margin:0;">' +
+                '<label>Gesuchte MAC-Adresse *</label>' +
+                '<input type="text" id="watch-mac-input" class="form-input" placeholder="z.B. AA:BB:CC:DD:EE:FF" style="font-family:monospace;">' +
+            '</div>' +
+            '<div class="form-group" style="margin:0;">' +
+                '<label>Bezeichnung / Hinweis</label>' +
+                '<input type="text" id="watch-mac-label" class="form-input" placeholder="z.B. Vermisstes Notebook / Testgerät">' +
+            '</div>' +
+            '<div class="form-group" style="margin:0;">' +
+                '<label>Alarm-Modus</label>' +
+                '<select id="watch-mac-mode" class="select-input">' +
+                    '<option value="always">Bei jedem Auftauchen melden</option>' +
+                    '<option value="once">Nur 1× beim ersten Auftauchen</option>' +
+                '</select>' +
+            '</div>' +
+            '<button class="btn btn-primary btn-sm" style="height:34px;padding:0 12px;" onclick="saveMacWatchlistItem()">🎯 MAC überwachen</button>' +
+        '</div>';
+    }
+
+    if (watchlist.length > 0) {
+        html += '<div style="display:flex;flex-direction:column;gap:6px;">';
+        for (var w = 0; w < watchlist.length; w++) {
+            var wi = watchlist[w];
+            var wAct = parseInt(wi.is_active, 10) === 1;
+            var wStatusBadge = wi.last_triggered_at
+                ? '<span class="badge badge-online">🟢 ENTDECKT (' + escapeHtml(wi.last_triggered_at.substring(0, 16)) + ')</span>'
+                : (wAct ? '<span class="badge" style="background:rgba(245,158,11,0.2);border:1px solid #f59e0b;color:#fcd34d;">⏳ Lauert auf Auftauchen...</span>' : '<span class="badge" style="background:rgba(148,163,184,0.2);color:#94a3b8;">Erledigt</span>');
+            var locInfo = '';
+            if (wi.last_seen_switch || wi.last_seen_ip) {
+                locInfo = '<span style="font-size:11.5px;color:#34d399;margin-left:6px;">➔ ' +
+                    (wi.last_seen_ip ? ('IP: <b>' + escapeHtml(wi.last_seen_ip) + '</b> ') : '') +
+                    (wi.last_seen_switch ? ('an Switch <b>' + escapeHtml(wi.last_seen_switch) + '</b> Port <b>' + escapeHtml(wi.last_seen_port || '-') + '</b>') : '') +
+                '</span>';
+            }
+            html += '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;padding:6px 10px;background:var(--bg-panel);border:1px solid var(--border-color);border-radius:6px;font-size:12px;">' +
+                '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">' +
+                    wStatusBadge +
+                    renderCopyableValue(wi.mac_address, 'MAC-Adresse', 'font-family:monospace;font-weight:700;color:#93c5fd;') +
+                    '<b>' + escapeHtml(wi.label || 'Gezielter MAC-Alarm') + '</b>' +
+                    '<span style="color:var(--text-secondary);font-size:11px;">(' + (wi.notify_mode === 'once' ? 'Einmal-Alarm' : 'Dauer-Überwachung') + ')</span>' +
+                    locInfo +
+                '</div>' +
+                (userCanEdit() ? '<button class="btn btn-sm btn-danger" style="padding:2px 7px;font-size:11px;" onclick="deleteMacWatchlistItem(' + parseInt(wi.id, 10) + ')" title="Aus Überwachung entfernen">✕</button>' : '') +
+            '</div>';
+        }
+        html += '</div>';
+    }
+    html += '</div>';
+
     // Liste der ausgelösten Alarme & Anomalien
     var alerts = AppState.alerts || [];
     html += '<div style="font-size:12px;font-weight:700;color:var(--text-secondary);text-transform:uppercase;margin-top:8px;">Ausgelöste Alarm- &amp; Anomalie-Ereignisse (' + alerts.length + ')</div>';
@@ -5541,6 +5670,8 @@ function renderAlertsModal() {
                 evBadge = '<span class="badge" style="background:rgba(239,68,68,0.25);border:1px solid #ef4444;color:#fca5a5;">🌪️ MAC-FLAPPING / LOOP</span>';
             } else if (aType === 'port_errors') {
                 evBadge = '<span class="badge" style="background:rgba(245,158,11,0.22);border:1px solid #f59e0b;color:#fcd34d;">📉 PORT-FEHLER</span>';
+            } else if (aType === 'mac_watchlist') {
+                evBadge = '<span class="badge" style="background:rgba(16,185,129,0.25);border:1px solid #10b981;color:#6ee7b7;">🎯 GESUCHTE MAC ENTDECKT</span>';
             }
 
             var devClickAttr = parseInt(al.device_id, 10) > 0

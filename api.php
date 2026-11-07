@@ -125,6 +125,11 @@ try {
                 }
             } catch (Exception $e) {}
 
+            $macWatchlist = array();
+            try {
+                $macWatchlist = $pdo->query("SELECT * FROM mac_watchlist ORDER BY id DESC")->fetchAll();
+            } catch (Exception $e) {}
+
             $nmapPath = trim((string)@shell_exec('which nmap 2>/dev/null'));
             $snmpExt = extension_loaded('snmp');
 
@@ -209,10 +214,11 @@ try {
                 'devices'      => $devices,
                 'links'        => $links,
                 'logs'         => $logs,
-                'alerts'       => $alerts,
-                'unack_alerts' => $unackCount,
-                'mac_history'  => $macHistory,
-                'admin'        => $adminData,
+                'alerts'        => $alerts,
+                'unack_alerts'  => $unackCount,
+                'mac_history'   => $macHistory,
+                'mac_watchlist' => $macWatchlist,
+                'admin'         => $adminData,
                 'system'       => array(
                     'php_version'    => PHP_VERSION,
                     'db_driver'      => strtoupper($db->getActiveDriver()),
@@ -948,6 +954,40 @@ try {
         case 'admin_clear_scan_logs':
             Auth::requireRole(array('admin'));
             $pdo->exec("DELETE FROM scan_logs");
+            echo json_encode(array('ok' => true));
+            break;
+
+        case 'save_mac_watchlist':
+            Auth::requireRole(array('operator', 'netadmin', 'admin'));
+            $rawMac = isset($input['mac_address']) ? trim($input['mac_address']) : '';
+            $normMac = OuiLookup::normalizeMac($rawMac);
+            if (!$normMac) {
+                throw new InvalidArgumentException('Bitte eine gültige 12-stellige MAC-Adresse eingeben (z.B. AA:BB:CC:DD:EE:FF oder aabb.ccdd.eeff).');
+            }
+            $label = isset($input['label']) ? trim($input['label']) : '';
+            $mode = (isset($input['notify_mode']) && $input['notify_mode'] === 'once') ? 'once' : 'always';
+            $now = date('Y-m-d H:i:s');
+
+            $chkW = $pdo->prepare("SELECT id FROM mac_watchlist WHERE mac_address = :mac");
+            $chkW->execute(array(':mac' => $normMac));
+            $exW = $chkW->fetch();
+            if ($exW) {
+                $updW = $pdo->prepare("UPDATE mac_watchlist SET label = :lbl, notify_mode = :mode, is_active = 1 WHERE id = :id");
+                $updW->execute(array(':lbl' => $label, ':mode' => $mode, ':id' => (int)$exW['id']));
+            } else {
+                $insW = $pdo->prepare("INSERT INTO mac_watchlist (mac_address, label, notify_mode, is_active, created_at) VALUES (:mac, :lbl, :mode, 1, :now)");
+                $insW->execute(array(':mac' => $normMac, ':lbl' => $label, ':mode' => $mode, ':now' => $now));
+            }
+            echo json_encode(array('ok' => true, 'mac_address' => $normMac));
+            break;
+
+        case 'delete_mac_watchlist':
+            Auth::requireRole(array('operator', 'netadmin', 'admin'));
+            $wid = isset($input['id']) ? (int)$input['id'] : 0;
+            if ($wid <= 0) {
+                throw new InvalidArgumentException('Ungültige Watchlist-ID.');
+            }
+            $pdo->prepare("DELETE FROM mac_watchlist WHERE id = :id")->execute(array(':id' => $wid));
             echo json_encode(array('ok' => true));
             break;
 

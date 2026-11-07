@@ -151,4 +151,21 @@ CREATE TABLE IF NOT EXISTS `mac_port_history` (
   KEY `idx_switch_port` (`switch_id`, `port_name`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8;
 
+-- 8. Gezielte MAC-Überwachungsliste / MAC-Fahndungsliste (Alarm sobald eine bestimmte MAC im Netz auftaucht)
+CREATE TABLE IF NOT EXISTS `mac_watchlist` (
+  `id` INT(11) NOT NULL AUTO_INCREMENT,
+  `mac_address` VARCHAR(32) NOT NULL,
+  `label` VARCHAR(190) DEFAULT NULL,
+  `notify_mode` VARCHAR(20) NOT NULL DEFAULT 'always',
+  `is_active` TINYINT(1) NOT NULL DEFAULT 1,
+  `last_triggered_at` DATETIME DEFAULT NULL,
+  `last_seen_ip` VARCHAR(45) DEFAULT NULL,
+  `last_seen_switch` VARCHAR(190) DEFAULT NULL,
+  `last_seen_port` VARCHAR(64) DEFAULT NULL,
+  `created_at` DATETIME NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uniq_watch_mac` (`mac_address`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8;
+
+
 

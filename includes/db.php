@@ -343,6 +343,21 @@ class Database
         ");
         $this->pdo->exec("CREATE INDEX IF NOT EXISTS idx_mph_mac ON mac_port_history(mac_address)");
         $this->pdo->exec("CREATE INDEX IF NOT EXISTS idx_mph_sw_port ON mac_port_history(switch_id, port_name)");
+
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS mac_watchlist (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                mac_address TEXT NOT NULL UNIQUE,
+                label TEXT DEFAULT NULL,
+                notify_mode TEXT NOT NULL DEFAULT 'always',
+                is_active INTEGER NOT NULL DEFAULT 1,
+                last_triggered_at TEXT DEFAULT NULL,
+                last_seen_ip TEXT DEFAULT NULL,
+                last_seen_switch TEXT DEFAULT NULL,
+                last_seen_port TEXT DEFAULT NULL,
+                created_at TEXT NOT NULL
+            )
+        ");
     }
 
     private function ensureColumnExists($table, $column, $definition)
