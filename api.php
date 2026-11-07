@@ -34,8 +34,16 @@ try {
                 ORDER BY d.scope_id ASC, d.ip_address ASC
             ")->fetchAll();
             foreach ($devices as &$dRow) {
+                $profInfo = SnmpClient::detectSwitchCliProfile($dRow);
+                $dRow['cli_profile'] = $profInfo['profile'];
+                $dRow['cli_profile_label'] = $profInfo['label'];
+                $dRow['cli_profile_is_manual'] = !empty($profInfo['is_manual']) ? 1 : 0;
+                $rawWrite = isset($dRow['switch_snmp_write_community']) ? (string)$dRow['switch_snmp_write_community'] : '';
+                if (preg_match('/^profile:[a-z0-9_]+\|(.*)$/i', $rawWrite, $wm)) {
+                    $rawWrite = $wm[1];
+                }
                 $dRow['has_ssh_pass'] = !empty($dRow['switch_ssh_pass']) ? 1 : 0;
-                $dRow['has_snmp_write'] = !empty($dRow['switch_snmp_write_community']) ? 1 : 0;
+                $dRow['has_snmp_write'] = ($rawWrite !== '') ? 1 : 0;
                 unset($dRow['switch_ssh_pass']);
                 unset($dRow['switch_snmp_write_community']);
             }
@@ -285,10 +293,20 @@ try {
             $sshPass = isset($input['switch_ssh_pass']) ? (string)$input['switch_ssh_pass'] : '';
             $snmpComm = isset($input['switch_snmp_community']) ? trim($input['switch_snmp_community']) : '';
             $snmpWrite = isset($input['switch_snmp_write_community']) ? trim($input['switch_snmp_write_community']) : '';
+            $cliProfOverride = isset($input['cli_profile']) ? strtolower(trim($input['cli_profile'])) : 'auto';
 
-            // Bestehendes Passwort beibehalten, falls leer gelassen (und nicht explizit gelöscht)
+            // Bestehendes Passwort / Write-Community beibehalten, falls leer gelassen
             $finalSshPass = ($sshPass !== '') ? $sshPass : (isset($dev['switch_ssh_pass']) ? $dev['switch_ssh_pass'] : null);
-            $finalSnmpWrite = ($snmpWrite !== '') ? $snmpWrite : (isset($dev['switch_snmp_write_community']) ? $dev['switch_snmp_write_community'] : null);
+            $prevRawWrite = isset($dev['switch_snmp_write_community']) ? (string)$dev['switch_snmp_write_community'] : '';
+            if (preg_match('/^profile:[a-z0-9_]+\|(.*)$/i', $prevRawWrite, $pwm)) {
+                $prevRawWrite = $pwm[1];
+            }
+            $cleanWriteComm = ($snmpWrite !== '') ? $snmpWrite : $prevRawWrite;
+            if ($cliProfOverride !== '' && $cliProfOverride !== 'auto') {
+                $finalSnmpWrite = 'profile:' . $cliProfOverride . '|' . $cleanWriteComm;
+            } else {
+                $finalSnmpWrite = ($cleanWriteComm !== '') ? $cleanWriteComm : null;
+            }
 
             $upd = $pdo->prepare("
                 UPDATE devices
@@ -306,11 +324,15 @@ try {
                 ':id' => $id,
             ));
 
+            $dev['switch_snmp_write_community'] = $finalSnmpWrite;
+            $profInfo = SnmpClient::detectSwitchCliProfile($dev);
+
             $sshTestResult = null;
-            if (!empty($input['test_connection']) && $sshUser !== '' && !empty($finalSshPass)) {
+            if (!empty($input['test_connection']) && $profInfo['profile'] !== 'snmp_set' && $sshUser !== '' && !empty($finalSshPass)) {
                 @set_time_limit(45);
                 $sshTestResult = SnmpClient::configureSwitchViaSsh($dev['ip_address'], $sshUser, $finalSshPass, array(
-                    'action_type' => 'test'
+                    'action_type' => 'test',
+                    'cli_profile' => $profInfo['profile']
                 ));
             }
 
@@ -324,10 +346,14 @@ try {
             }
 
             echo json_encode(array(
-                'ok'           => true,
-                'has_ssh_pass' => !empty($finalSshPass) ? 1 : 0,
-                'ssh_test'     => $sshTestResult,
-                'snmp_data'    => $freshSnmp,
+                'ok'                    => true,
+                'has_ssh_pass'          => !empty($finalSshPass) ? 1 : 0,
+                'has_snmp_write'        => ($cleanWriteComm !== '') ? 1 : 0,
+                'cli_profile'           => $profInfo['profile'],
+                'cli_profile_label'     => $profInfo['label'],
+                'cli_profile_is_manual' => !empty($profInfo['is_manual']) ? 1 : 0,
+                'ssh_test'              => $sshTestResult,
+                'snmp_data'             => $freshSnmp,
             ));
             break;
 
@@ -345,12 +371,18 @@ try {
                 throw new InvalidArgumentException('Switch nicht gefunden.');
             }
 
+            $profInfo = SnmpClient::detectSwitchCliProfile($dev);
+            $activeProfile = !empty($input['cli_profile']) && $input['cli_profile'] !== 'auto'
+                ? strtolower(trim($input['cli_profile']))
+                : $profInfo['profile'];
+
+            $rawWriteComm = isset($dev['switch_snmp_write_community']) ? (string)$dev['switch_snmp_write_community'] : '';
+            if (preg_match('/^profile:[a-z0-9_]+\|(.*)$/i', $rawWriteComm, $rwm)) {
+                $rawWriteComm = $rwm[1];
+            }
+
             $sshUser = !empty($input['switch_ssh_user']) ? trim($input['switch_ssh_user']) : (!empty($dev['switch_ssh_user']) ? $dev['switch_ssh_user'] : '');
             $sshPass = !empty($input['switch_ssh_pass']) ? (string)$input['switch_ssh_pass'] : (!empty($dev['switch_ssh_pass']) ? $dev['switch_ssh_pass'] : '');
-
-            if ($sshUser === '' || $sshPass === '') {
-                throw new InvalidArgumentException('Für diesen Switch sind noch keine SSH-Zugangsdaten hinterlegt. Bitte zuerst über "🔑 Zugangsdaten" speichern.');
-            }
 
             $portName = isset($input['port_name']) ? trim($input['port_name']) : '';
             if ($portName === '') {
@@ -359,6 +391,7 @@ try {
 
             $params = array(
                 'action_type'      => 'configure_port',
+                'cli_profile'      => $activeProfile,
                 'port_name'        => $portName,
                 'vlan_id'          => isset($input['vlan_id']) ? (int)$input['vlan_id'] : 0,
                 'create_vlan_id'   => isset($input['create_vlan_id']) ? (int)$input['create_vlan_id'] : 0,
@@ -370,9 +403,19 @@ try {
                 $params['alias'] = trim((string)$input['alias']);
             }
 
-            $sshRes = SnmpClient::configureSwitchViaSsh($dev['ip_address'], $sshUser, $sshPass, $params);
-            if (empty($sshRes['success'])) {
-                throw new RuntimeException(isset($sshRes['message']) ? $sshRes['message'] : 'SSH-Konfiguration fehlgeschlagen.');
+            // Falls SNMP-SET Modus gewählt wurde oder kein SSH-Passwort vorhanden ist, aber eine SNMP-Write-Community existiert
+            if ($activeProfile === 'snmp_set' || (($sshUser === '' || $sshPass === '') && $rawWriteComm !== '')) {
+                $curSnmpData = !empty($dev['snmp_ports_json']) ? (@json_decode($dev['snmp_ports_json'], true) ?: array()) : array();
+                $execRes = SnmpClient::configureSwitchPortViaSnmpSet($dev['ip_address'], $rawWriteComm !== '' ? $rawWriteComm : 'private', $params, $curSnmpData);
+            } else {
+                if ($sshUser === '' || $sshPass === '') {
+                    throw new InvalidArgumentException('Für diesen Switch sind noch keine SSH-Zugangsdaten hinterlegt. Bitte zuerst über "🔑 Zugangsdaten" speichern.');
+                }
+                $execRes = SnmpClient::configureSwitchViaSsh($dev['ip_address'], $sshUser, $sshPass, $params);
+            }
+
+            if (empty($execRes['success'])) {
+                throw new RuntimeException(isset($execRes['message']) ? $execRes['message'] : 'Switch-Konfiguration fehlgeschlagen.');
             }
 
             // Sofortiger Live-Re-Probe per SNMP, damit VLANs, PVID, Alias und Port-Status in der Oberfläche aktualisiert sind
@@ -387,10 +430,11 @@ try {
             }
 
             echo json_encode(array(
-                'ok'        => true,
-                'message'   => $sshRes['message'],
-                'commands'  => isset($sshRes['commands']) ? $sshRes['commands'] : array(),
-                'snmp_data' => $freshSnmp,
+                'ok'          => true,
+                'message'     => $execRes['message'],
+                'cli_profile' => $activeProfile,
+                'commands'    => isset($execRes['commands']) ? $execRes['commands'] : array(),
+                'snmp_data'   => $freshSnmp,
             ));
             break;
 

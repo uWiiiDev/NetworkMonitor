@@ -3268,6 +3268,9 @@ function buildRealSwitchGraphicModel(dev) {
         hasSshPass: parseInt(dev.has_ssh_pass || 0, 10) === 1,
         snmpCommunity: dev.switch_snmp_community || 'public',
         hasSnmpWrite: parseInt(dev.has_snmp_write || 0, 10) === 1,
+        cliProfile: dev.cli_profile || 'cisco_smb',
+        cliProfileLabel: dev.cli_profile_label || 'Cisco Small Business CLI (SG/SF/CBS Serie)',
+        cliProfileIsManual: parseInt(dev.cli_profile_is_manual || 0, 10) === 1,
         upstreamLinks: upstreamLinks,
         downstreamSwitches: downstreamSwitches,
         units: units
@@ -3311,12 +3314,20 @@ function openSwitchGraphicModal(devId, isDemoPreview, keepSelectedPortName) {
     var html = '';
 
     // =========================================================================
-    // 0. SSH / SNMP ZUGANGSDATEN & KONFIGURATIONS-LEISTE (für Operator / Admin)
+    // 0. SSH / SNMP ZUGANGSDATEN & MULTI-VENDOR KONFIGURATIONS-LEISTE (für Operator / Admin)
     // =========================================================================
     if (!model.isDemo && userCanEdit()) {
-        var sshBadge = model.hasSshPass
-            ? '<span class="badge" style="background:rgba(16,185,129,0.22);border:1px solid #10b981;color:#34d399;">🟢 SSH-Zugang hinterlegt (' + escapeHtml(model.sshUser || 'admin') + ')</span>'
-            : '<span class="badge" style="background:rgba(245,158,11,0.22);border:1px solid #f59e0b;color:#fcd34d;">🟡 Noch kein SSH-Zugang für diesen Switch hinterlegt</span>';
+        var sshBadge = (model.cliProfile === 'snmp_set')
+            ? (model.hasSnmpWrite
+                ? '<span class="badge" style="background:rgba(16,185,129,0.22);border:1px solid #10b981;color:#34d399;">🟢 SNMPv2c-Write hinterlegt</span>'
+                : '<span class="badge" style="background:rgba(245,158,11,0.22);border:1px solid #f59e0b;color:#fcd34d;">🟡 SNMPv2c-Write Community fehlt</span>')
+            : (model.hasSshPass
+                ? '<span class="badge" style="background:rgba(16,185,129,0.22);border:1px solid #10b981;color:#34d399;">🟢 SSH-Zugang hinterlegt (' + escapeHtml(model.sshUser || 'admin') + ')</span>'
+                : '<span class="badge" style="background:rgba(245,158,11,0.22);border:1px solid #f59e0b;color:#fcd34d;">🟡 Noch kein SSH-Zugang für diesen Switch hinterlegt</span>');
+
+        var profileBadge = '<span class="badge" style="background:rgba(168,85,247,0.18);border:1px solid rgba(168,85,247,0.45);color:#e9d5ff;" title="Steuerungs-Treiber für VLAN- &amp; Port-Befehle">' +
+            (model.cliProfileIsManual ? '⚙️ ' : '🤖 ') + escapeHtml(model.cliProfileLabel) +
+        '</span>';
 
         var vlanCount = model.vlans ? Object.keys(model.vlans).length : 1;
         var vlanSummaryPills = '';
@@ -3328,33 +3339,60 @@ function openSwitchGraphicModal(devId, isDemoPreview, keepSelectedPortName) {
             }
         }
 
+        var profList = [
+            { k: 'auto',              l: '🤖 Automatisch erkennen (' + model.cliProfileLabel + ')' },
+            { k: 'cisco_smb',         l: 'Cisco Small Business CLI (SG200/250/300/350/500, SF, CBS)' },
+            { k: 'cisco_ios',         l: 'Cisco IOS / Catalyst & kompatible CLI (FS.com, Dell, Arista)' },
+            { k: 'hp_aruba',          l: 'HP ProCurve / ArubaOS-Switch CLI' },
+            { k: 'tplink_jetstream',  l: 'TP-Link JetStream / Omada CLI' },
+            { k: 'netgear_fastpath',  l: 'Netgear ProSAFE / Ubiquiti EdgeSwitch (FASTPATH CLI)' },
+            { k: 'mikrotik_routeros', l: 'MikroTik RouterOS CLI' },
+            { k: 'zyxel_gs',          l: 'Zyxel GS / XGS Enterprise CLI' },
+            { k: 'snmp_set',          l: 'Standard SNMPv2c-SET (Q-BRIDGE-MIB / IF-MIB ohne SSH)' }
+        ];
+        var curProfSel = model.cliProfileIsManual ? model.cliProfile : 'auto';
+        var profOptsHtml = '';
+        for (var pr = 0; pr < profList.length; pr++) {
+            var psel = (curProfSel === profList[pr].k) ? 'selected' : '';
+            profOptsHtml += '<option value="' + profList[pr].k + '" ' + psel + '>' + escapeHtml(profList[pr].l) + '</option>';
+        }
+
         html += '<div style="background:rgba(15,23,42,0.85);border:1px solid rgba(59,130,246,0.38);border-radius:10px;padding:10px 14px;display:flex;flex-direction:column;gap:10px;">' +
             '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">' +
                 '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">' +
-                    '<span style="font-size:12.5px;font-weight:700;color:#f8fafc;">🔑 Switch-Steuerung (Hybrid SNMP + SSH):</span>' +
+                    '<span style="font-size:12.5px;font-weight:700;color:#f8fafc;">🔑 Multi-Vendor Switch-Steuerung:</span>' +
                     sshBadge +
-                    '<span style="font-size:11.5px;color:var(--text-secondary);">Aktive VLANs (' + vlanCount + '):</span>' +
+                    profileBadge +
+                    '<span style="font-size:11.5px;color:var(--text-secondary);">VLANs (' + vlanCount + '):</span>' +
                     vlanSummaryPills +
                 '</div>' +
-                '<button class="btn btn-sm" style="border-color:#60a5fa;color:#93c5fd;" onclick="toggleSwitchCredsForm()">🔑 SSH- &amp; SNMP-Zugangsdaten ' + (model.hasSshPass ? 'ändern / testen' : 'jetzt hinterlegen') + '</button>' +
+                '<button class="btn btn-sm" style="border-color:#60a5fa;color:#93c5fd;" onclick="toggleSwitchCredsForm()">🔑 Zugangsdaten &amp; Hersteller-Profil ' + (model.hasSshPass ? 'ändern / testen' : 'einrichten') + '</button>' +
             '</div>' +
             '<div id="sw-creds-form-box" style="display:' + (model.hasSshPass ? 'none' : 'block') + ';border-top:1px dashed rgba(148,163,184,0.25);padding-top:10px;">' +
-                '<div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(190px, 1fr));gap:10px;align-items:end;">' +
+                '<div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(195px, 1fr));gap:10px;align-items:end;">' +
+                    '<div class="form-group" style="margin:0;">' +
+                        '<label>Hersteller / CLI-Befehlsprofil</label>' +
+                        '<select id="sw-cred-cli-profile" class="select-input">' + profOptsHtml + '</select>' +
+                    '</div>' +
                     '<div class="form-group" style="margin:0;">' +
                         '<label>SSH-Benutzername (Switch CLI)</label>' +
                         '<input type="text" id="sw-cred-ssh-user" class="form-input" value="' + escapeHtml(model.sshUser || 'cisco') + '" placeholder="z.B. cisco oder admin">' +
                     '</div>' +
                     '<div class="form-group" style="margin:0;">' +
-                        '<label>SSH-Passwort ' + (model.hasSshPass ? '<span style="color:#34d399;">(gespeichert – leer lassen zum Behalten)</span>' : '') + '</label>' +
-                        '<input type="password" id="sw-cred-ssh-pass" class="form-input" value="" placeholder="' + (model.hasSshPass ? '•••••••• (unverändert)' : 'SSH-Passwort eingeben') + '">' +
+                        '<label>SSH-Passwort ' + (model.hasSshPass ? '<span style="color:#34d399;">(gespeichert)</span>' : '') + '</label>' +
+                        '<input type="password" id="sw-cred-ssh-pass" class="form-input" value="" placeholder="' + (model.hasSshPass ? '•••••••• (leer = behalten)' : 'SSH-Passwort eingeben') + '">' +
                     '</div>' +
                     '<div class="form-group" style="margin:0;">' +
                         '<label>SNMPv2c Lese-Community</label>' +
                         '<input type="text" id="sw-cred-snmp-comm" class="form-input" value="' + escapeHtml(model.snmpCommunity || 'public') + '" placeholder="public">' +
                     '</div>' +
+                    '<div class="form-group" style="margin:0;">' +
+                        '<label>SNMP Write-Community (optional)</label>' +
+                        '<input type="password" id="sw-cred-snmp-write" class="form-input" value="" placeholder="' + (model.hasSnmpWrite ? '•••••••• (gespeichert)' : 'Optional für SNMP-SET') + '">' +
+                    '</div>' +
                     '<div style="display:flex;gap:8px;flex-wrap:wrap;">' +
-                        '<button id="btn-save-sw-creds" class="btn btn-primary btn-sm" style="padding:8px 12px;" onclick="saveSwitchCredentials(' + devId + ', true)">🔌 Speichern &amp; SSH/SNMP testen</button>' +
-                        '<button class="btn btn-sm" style="padding:8px 10px;" onclick="saveSwitchCredentials(' + devId + ', false)">💾 Nur speichern</button>' +
+                        '<button id="btn-save-sw-creds" class="btn btn-primary btn-sm" style="padding:8px 12px;" onclick="saveSwitchCredentials(' + devId + ', true)">🔌 Speichern &amp; testen</button>' +
+                        '<button class="btn btn-sm" style="padding:8px 10px;" onclick="saveSwitchCredentials(' + devId + ', false)">💾 Speichern</button>' +
                     '</div>' +
                 '</div>' +
                 '<div id="sw-creds-status-msg" style="margin-top:8px;font-size:12px;display:none;"></div>' +
@@ -3861,17 +3899,21 @@ function onSwitchVlanSelectChange() {
 }
 
 function saveSwitchCredentials(devId, testConn) {
+    var profEl = document.getElementById('sw-cred-cli-profile');
     var userEl = document.getElementById('sw-cred-ssh-user');
     var passEl = document.getElementById('sw-cred-ssh-pass');
     var commEl = document.getElementById('sw-cred-snmp-comm');
+    var writeEl = document.getElementById('sw-cred-snmp-write');
     var msgEl = document.getElementById('sw-creds-status-msg');
     var btnEl = document.getElementById('btn-save-sw-creds');
 
     var payload = {
         device_id: devId,
+        cli_profile: profEl ? profEl.value : 'auto',
         switch_ssh_user: userEl ? userEl.value : '',
         switch_ssh_pass: passEl ? passEl.value : '',
         switch_snmp_community: commEl ? commEl.value : 'public',
+        switch_snmp_write_community: writeEl ? writeEl.value : '',
         test_connection: testConn ? 1 : 0
     };
 
@@ -3906,6 +3948,12 @@ function saveSwitchCredentials(devId, testConn) {
                 AppState.devices[i].switch_ssh_user = payload.switch_ssh_user;
                 AppState.devices[i].switch_snmp_community = payload.switch_snmp_community;
                 AppState.devices[i].has_ssh_pass = res.has_ssh_pass ? 1 : 0;
+                AppState.devices[i].has_snmp_write = res.has_snmp_write ? 1 : 0;
+                if (res.cli_profile) {
+                    AppState.devices[i].cli_profile = res.cli_profile;
+                    AppState.devices[i].cli_profile_label = res.cli_profile_label;
+                    AppState.devices[i].cli_profile_is_manual = res.cli_profile_is_manual ? 1 : 0;
+                }
                 if (res.snmp_data) {
                     AppState.devices[i].snmp_enabled = 1;
                     AppState.devices[i].snmp_ports_json = JSON.stringify(res.snmp_data);

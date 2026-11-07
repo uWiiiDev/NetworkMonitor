@@ -849,7 +849,408 @@ class SnmpClient
     }
 
     /**
-     * Configure a managed switch (Cisco SG/SX series & compatible CLI switches) via SSH.
+     * Erkennt automatisch das passende Switch-CLI-Herstellerprofil anhand von SNMP sysDescr, sysObjectID, Hersteller & OS.
+     *
+     * Unterstützte Profile:
+     *  - cisco_smb         : Cisco Small Business (SG200/250/300/350/500, SF300/500, CBS250/350)
+     *  - cisco_ios         : Cisco Catalyst IOS / IOS-XE, Arista EOS, Dell OS, FS.com, Extreme IS-CLI
+     *  - hp_aruba          : HP ProCurve / ArubaOS-Switch / HPE OfficeConnect
+     *  - tplink_jetstream  : TP-Link JetStream / Omada Managed Switches
+     *  - netgear_fastpath  : Netgear ProSAFE (M4100/M4300/GS7xx), Ubiquiti EdgeSwitch, D-Link FASTPATH
+     *  - mikrotik_routeros : MikroTik RouterOS (CRS / CCR / CSS mit RouterOS)
+     *  - zyxel_gs          : Zyxel GS1920 / GS2210 / XGS Serie
+     *  - snmp_set          : Reines SNMPv2c-SET (Q-BRIDGE-MIB / IF-MIB ohne SSH)
+     *
+     * @param array $devRow Datenbankzeile aus `devices` (oder Array mit vendor/snmp_sysdescr/snmp_sysobjectid/os_guess)
+     * @return array array('profile' => string, 'label' => string)
+     */
+    public static function detectSwitchCliProfile(array $devRow = array())
+    {
+        $labels = array(
+            'cisco_smb'         => 'Cisco Small Business CLI (SG/SF/CBS Serie)',
+            'cisco_ios'         => 'Cisco IOS / Catalyst & kompatible Industry-CLI (FS/Dell/Arista)',
+            'hp_aruba'          => 'HP ProCurve / ArubaOS-Switch CLI',
+            'tplink_jetstream'  => 'TP-Link JetStream / Omada CLI',
+            'netgear_fastpath'  => 'Netgear ProSAFE / Ubiquiti EdgeSwitch (FASTPATH CLI)',
+            'mikrotik_routeros' => 'MikroTik RouterOS CLI',
+            'zyxel_gs'          => 'Zyxel GS/XGS Enterprise CLI',
+            'snmp_set'          => 'Standard SNMPv2c-SET (Q-BRIDGE-MIB / IF-MIB ohne SSH)',
+        );
+
+        // Falls in switch_snmp_write_community ein explizites Profil-Präfix gespeichert wurde (z.B. "profile:hp_aruba|private")
+        $rawWriteField = isset($devRow['switch_snmp_write_community']) ? (string)$devRow['switch_snmp_write_community'] : '';
+        if (preg_match('/^profile:([a-z0-9_]+)\|(.*)$/i', $rawWriteField, $pm)) {
+            $forced = strtolower($pm[1]);
+            if (isset($labels[$forced])) {
+                return array('profile' => $forced, 'label' => $labels[$forced], 'is_manual' => true);
+            }
+        }
+
+        $haystack = strtolower(
+            (isset($devRow['snmp_sysdescr']) ? $devRow['snmp_sysdescr'] : '') . ' ' .
+            (isset($devRow['snmp_sysobjectid']) ? $devRow['snmp_sysobjectid'] : '') . ' ' .
+            (isset($devRow['vendor']) ? $devRow['vendor'] : '') . ' ' .
+            (isset($devRow['os_guess']) ? $devRow['os_guess'] : '') . ' ' .
+            (isset($devRow['service_info']) ? $devRow['service_info'] : '') . ' ' .
+            (isset($devRow['hostname']) ? $devRow['hostname'] : '')
+        );
+
+        // 1. MikroTik RouterOS
+        if (strpos($haystack, 'mikrotik') !== false || strpos($haystack, 'routeros') !== false || strpos($haystack, '1.3.6.1.4.1.14988') !== false) {
+            return array('profile' => 'mikrotik_routeros', 'label' => $labels['mikrotik_routeros'], 'is_manual' => false);
+        }
+
+        // 2. HP ProCurve / ArubaOS-Switch
+        if (strpos($haystack, 'procurve') !== false || strpos($haystack, 'aruba') !== false || strpos($haystack, '1.3.6.1.4.1.11.2.3.7.11') !== false || strpos($haystack, 'hewlett') !== false || strpos($haystack, 'hpe ') !== false) {
+            return array('profile' => 'hp_aruba', 'label' => $labels['hp_aruba'], 'is_manual' => false);
+        }
+
+        // 3. TP-Link JetStream / Omada
+        if (strpos($haystack, 'tp-link') !== false || strpos($haystack, 'tplink') !== false || strpos($haystack, 'jetstream') !== false || strpos($haystack, '1.3.6.1.4.1.11863') !== false) {
+            return array('profile' => 'tplink_jetstream', 'label' => $labels['tplink_jetstream'], 'is_manual' => false);
+        }
+
+        // 4. Netgear / Ubiquiti EdgeSwitch
+        if (strpos($haystack, 'netgear') !== false || strpos($haystack, 'prosafe') !== false || strpos($haystack, 'edgeswitch') !== false || strpos($haystack, 'ubiquiti') !== false || strpos($haystack, '1.3.6.1.4.1.4526') !== false) {
+            return array('profile' => 'netgear_fastpath', 'label' => $labels['netgear_fastpath'], 'is_manual' => false);
+        }
+
+        // 5. Zyxel
+        if (strpos($haystack, 'zyxel') !== false || strpos($haystack, '1.3.6.1.4.1.890') !== false) {
+            return array('profile' => 'zyxel_gs', 'label' => $labels['zyxel_gs'], 'is_manual' => false);
+        }
+
+        // 6. Klassisches Cisco IOS / Catalyst / Dell / Arista
+        if (strpos($haystack, 'cisco ios') !== false || strpos($haystack, 'catalyst') !== false || strpos($haystack, 'arista') !== false || strpos($haystack, 'dell') !== false) {
+            return array('profile' => 'cisco_ios', 'label' => $labels['cisco_ios'], 'is_manual' => false);
+        }
+
+        // 7. Standard: Cisco Small Business (SG/SF/CBS) & kompatible CLI
+        return array('profile' => 'cisco_smb', 'label' => $labels['cisco_smb'], 'is_manual' => false);
+    }
+
+    /**
+     * Erzeugt die herstellerspezifischen SSH-CLI-Befehle für das gewählte Switch-Profil.
+     *
+     * @param string $profile
+     * @param array  $params
+     * @return array array('paging_cmd' => string, 'commands' => array)
+     */
+    public static function buildVendorCliCommands($profile, array $params)
+    {
+        $portName = isset($params['port_name']) ? trim((string)$params['port_name']) : '';
+        $createVlanId = isset($params['create_vlan_id']) ? (int)$params['create_vlan_id'] : 0;
+        $createVlanName = isset($params['create_vlan_name']) ? trim((string)$params['create_vlan_name']) : '';
+        $vlanId = isset($params['vlan_id']) ? (int)$params['vlan_id'] : 0;
+        if ($createVlanId >= 2 && $createVlanId <= 4094) {
+            $vlanId = $createVlanId;
+        }
+        $cleanVlanName = ($createVlanName !== '') ? substr(preg_replace('/[^a-zA-Z0-9_-]/', '_', $createVlanName), 0, 32) : '';
+
+        $hasAlias = array_key_exists('alias', $params);
+        $cleanAlias = $hasAlias ? substr(preg_replace('/[^a-zA-Z0-9 _.:\/-]/', '', trim((string)$params['alias'])), 0, 64) : '';
+        $admStatus = isset($params['admin_status']) ? strtolower(trim((string)$params['admin_status'])) : '';
+        $saveConfig = !isset($params['save_config']) || !empty($params['save_config']);
+
+        $commands = array();
+        $pagingCmd = 'terminal length 0';
+
+        switch ($profile) {
+            case 'hp_aruba':
+                // HP ProCurve / ArubaOS-Switch CLI
+                $pagingCmd = 'no page';
+                $commands[] = 'configure terminal';
+                if ($createVlanId >= 2 && $createVlanId <= 4094) {
+                    $commands[] = 'vlan ' . $createVlanId;
+                    if ($cleanVlanName !== '') {
+                        $commands[] = 'name "' . $cleanVlanName . '"';
+                    }
+                    $commands[] = 'exit';
+                }
+                if ($vlanId >= 1 && $vlanId <= 4094) {
+                    $commands[] = 'vlan ' . $vlanId;
+                    $commands[] = 'untagged ' . $portName;
+                    $commands[] = 'exit';
+                }
+                $commands[] = 'interface ' . $portName;
+                if ($hasAlias) {
+                    if ($cleanAlias === '') {
+                        $commands[] = 'no name';
+                    } else {
+                        $commands[] = 'name "' . $cleanAlias . '"';
+                    }
+                }
+                if ($admStatus === 'down') {
+                    $commands[] = 'disable';
+                } elseif ($admStatus === 'up') {
+                    $commands[] = 'enable';
+                }
+                $commands[] = 'exit';
+                $commands[] = 'exit';
+                if ($saveConfig) {
+                    $commands[] = 'write memory';
+                }
+                break;
+
+            case 'tplink_jetstream':
+                // TP-Link JetStream / Omada Managed Switch CLI
+                $pagingCmd = 'terminal length 0';
+                $commands[] = 'configure';
+                if ($createVlanId >= 2 && $createVlanId <= 4094) {
+                    $commands[] = 'vlan ' . $createVlanId;
+                    if ($cleanVlanName !== '') {
+                        $commands[] = 'name ' . $cleanVlanName;
+                    }
+                    $commands[] = 'exit';
+                }
+                $commands[] = 'interface ' . $portName;
+                if ($vlanId >= 1 && $vlanId <= 4094) {
+                    $commands[] = 'switchport general allowed vlan ' . $vlanId . ' untagged';
+                    $commands[] = 'switchport pvid ' . $vlanId;
+                }
+                if ($hasAlias) {
+                    $commands[] = ($cleanAlias === '') ? 'no description' : ('description ' . $cleanAlias);
+                }
+                if ($admStatus === 'down') {
+                    $commands[] = 'shutdown';
+                } elseif ($admStatus === 'up') {
+                    $commands[] = 'no shutdown';
+                }
+                $commands[] = 'end';
+                if ($saveConfig) {
+                    $commands[] = 'copy running-config startup-config';
+                }
+                break;
+
+            case 'netgear_fastpath':
+                // Netgear ProSAFE / Ubiquiti EdgeSwitch (Broadcom FASTPATH CLI)
+                $pagingCmd = 'terminal length 0';
+                if ($createVlanId >= 2 && $createVlanId <= 4094) {
+                    $commands[] = 'vlan database';
+                    $commands[] = 'vlan ' . $createVlanId;
+                    if ($cleanVlanName !== '') {
+                        $commands[] = 'vlan name ' . $createVlanId . ' "' . $cleanVlanName . '"';
+                    }
+                    $commands[] = 'exit';
+                }
+                $commands[] = 'configure';
+                $commands[] = 'interface ' . $portName;
+                if ($vlanId >= 1 && $vlanId <= 4094) {
+                    $commands[] = 'vlan pvid ' . $vlanId;
+                    $commands[] = 'vlan participation include ' . $vlanId;
+                }
+                if ($hasAlias) {
+                    $commands[] = ($cleanAlias === '') ? 'no description' : ('description "' . $cleanAlias . '"');
+                }
+                if ($admStatus === 'down') {
+                    $commands[] = 'shutdown';
+                } elseif ($admStatus === 'up') {
+                    $commands[] = 'no shutdown';
+                }
+                $commands[] = 'exit';
+                $commands[] = 'exit';
+                if ($saveConfig) {
+                    $commands[] = 'write memory';
+                }
+                break;
+
+            case 'mikrotik_routeros':
+                // MikroTik RouterOS CLI
+                $pagingCmd = '';
+                if ($vlanId >= 1 && $vlanId <= 4094) {
+                    $commands[] = '/interface bridge port set [find interface="' . $portName . '"] pvid=' . $vlanId;
+                }
+                if ($hasAlias) {
+                    $commands[] = '/interface ethernet set [find name="' . $portName . '"] comment="' . $cleanAlias . '"';
+                }
+                if ($admStatus === 'down') {
+                    $commands[] = '/interface ethernet disable [find name="' . $portName . '"]';
+                } elseif ($admStatus === 'up') {
+                    $commands[] = '/interface ethernet enable [find name="' . $portName . '"]';
+                }
+                break;
+
+            case 'zyxel_gs':
+                // Zyxel GS/XGS Enterprise CLI
+                $pagingCmd = 'terminal length 0';
+                $commands[] = 'configure terminal';
+                if ($vlanId >= 1 && $vlanId <= 4094) {
+                    $commands[] = 'vlan ' . $vlanId;
+                    if ($createVlanId >= 2 && $cleanVlanName !== '') {
+                        $commands[] = 'name ' . $cleanVlanName;
+                    }
+                    $commands[] = 'normal ' . $portName;
+                    $commands[] = 'untagged ' . $portName;
+                    $commands[] = 'exit';
+                }
+                $commands[] = 'interface port-channel ' . $portName;
+                if ($vlanId >= 1 && $vlanId <= 4094) {
+                    $commands[] = 'pvid ' . $vlanId;
+                }
+                if ($hasAlias && $cleanAlias !== '') {
+                    $commands[] = 'name ' . $cleanAlias;
+                }
+                if ($admStatus === 'down') {
+                    $commands[] = 'inactive';
+                } elseif ($admStatus === 'up') {
+                    $commands[] = 'no inactive';
+                }
+                $commands[] = 'exit';
+                $commands[] = 'exit';
+                if ($saveConfig) {
+                    $commands[] = 'write memory';
+                }
+                break;
+
+            case 'cisco_ios':
+                // Klassisches Cisco IOS / Catalyst / Arista / Dell / FS.com
+                $pagingCmd = 'terminal length 0';
+                $commands[] = 'configure terminal';
+                if ($createVlanId >= 2 && $createVlanId <= 4094) {
+                    $commands[] = 'vlan ' . $createVlanId;
+                    if ($cleanVlanName !== '') {
+                        $commands[] = 'name ' . $cleanVlanName;
+                    }
+                    $commands[] = 'exit';
+                }
+                $commands[] = 'interface ' . $portName;
+                if ($vlanId >= 1 && $vlanId <= 4094) {
+                    $commands[] = 'switchport mode access';
+                    $commands[] = 'switchport access vlan ' . $vlanId;
+                }
+                if ($hasAlias) {
+                    $commands[] = ($cleanAlias === '') ? 'no description' : ('description ' . $cleanAlias);
+                }
+                if ($admStatus === 'down') {
+                    $commands[] = 'shutdown';
+                } elseif ($admStatus === 'up') {
+                    $commands[] = 'no shutdown';
+                }
+                $commands[] = 'end';
+                if ($saveConfig) {
+                    $commands[] = 'write memory';
+                }
+                break;
+
+            case 'cisco_smb':
+            default:
+                // Cisco Small Business (SG200/250/300/350/500, SF, CBS)
+                $pagingCmd = 'terminal datadump';
+                $commands[] = 'configure terminal';
+                if ($createVlanId >= 2 && $createVlanId <= 4094) {
+                    $commands[] = 'vlan database';
+                    $commands[] = 'vlan ' . $createVlanId;
+                    $commands[] = 'exit';
+                    if ($cleanVlanName !== '') {
+                        $commands[] = 'interface vlan ' . $createVlanId;
+                        $commands[] = 'name ' . $cleanVlanName;
+                        $commands[] = 'exit';
+                    }
+                }
+                $commands[] = 'interface ' . $portName;
+                if ($vlanId >= 1 && $vlanId <= 4094) {
+                    $commands[] = 'switchport mode access';
+                    $commands[] = 'switchport access vlan ' . $vlanId;
+                }
+                if ($hasAlias) {
+                    $commands[] = ($cleanAlias === '') ? 'no description' : ('description ' . $cleanAlias);
+                }
+                if ($admStatus === 'down') {
+                    $commands[] = 'shutdown';
+                } elseif ($admStatus === 'up') {
+                    $commands[] = 'no shutdown';
+                }
+                $commands[] = 'exit';
+                $commands[] = 'exit';
+                if ($saveConfig) {
+                    $commands[] = 'copy running-config startup-config';
+                }
+                break;
+        }
+
+        return array(
+            'paging_cmd' => $pagingCmd,
+            'commands'   => $commands,
+        );
+    }
+
+    /**
+     * Herstellerunabhängiger SNMPv2c-SET Fallback (über Q-BRIDGE-MIB dot1qPvid & IF-MIB ifAlias / ifAdminStatus)
+     * für Web-Smart-Switche ohne SSH-Server.
+     */
+    public static function configureSwitchPortViaSnmpSet($ip, $writeCommunity, array $params, array $snmpData = array())
+    {
+        $portName = isset($params['port_name']) ? trim((string)$params['port_name']) : '';
+        $vlanId = isset($params['vlan_id']) ? (int)$params['vlan_id'] : 0;
+        if (!empty($params['create_vlan_id']) && (int)$params['create_vlan_id'] >= 2) {
+            $vlanId = (int)$params['create_vlan_id'];
+        }
+
+        $ifIndex = 0;
+        if (!empty($snmpData['interfaces']) && is_array($snmpData['interfaces'])) {
+            foreach ($snmpData['interfaces'] as $inf) {
+                if (isset($inf['name']) && strcasecmp(trim($inf['name']), $portName) === 0) {
+                    $ifIndex = (int)$inf['ifIndex'];
+                    break;
+                }
+            }
+        }
+        if ($ifIndex <= 0 && preg_match('/(\d+)$/', $portName, $m)) {
+            $ifIndex = (int)$m[1];
+        }
+        if ($ifIndex <= 0) {
+            return array('success' => false, 'message' => 'ifIndex für Port ' . $portName . ' konnte nicht ermittelt werden.');
+        }
+
+        $client = new self($ip, $writeCommunity !== '' ? $writeCommunity : 'private', 1500);
+        $executed = array();
+        $okCount = 0;
+
+        // 1. PVID (dot1qPvid = 1.3.6.1.2.1.17.7.1.4.5.1.1.<port>)
+        if ($vlanId >= 1 && $vlanId <= 4094) {
+            $oidPvid = '1.3.6.1.2.1.17.7.1.4.5.1.1.' . $ifIndex;
+            if ($client->setOid($oidPvid, 'i', $vlanId)) {
+                $okCount++;
+            }
+            $executed[] = 'SNMP-SET dot1qPvid.' . $ifIndex . ' = ' . $vlanId;
+        }
+
+        // 2. Port-Alias (ifAlias = 1.3.6.1.2.1.31.1.1.1.18.<ifIndex>)
+        if (array_key_exists('alias', $params)) {
+            $oidAlias = '1.3.6.1.2.1.31.1.1.1.18.' . $ifIndex;
+            if ($client->setOid($oidAlias, 's', trim((string)$params['alias']))) {
+                $okCount++;
+            }
+            $executed[] = 'SNMP-SET ifAlias.' . $ifIndex . ' = "' . trim((string)$params['alias']) . '"';
+        }
+
+        // 3. Admin-Status (ifAdminStatus = 1.3.6.1.2.1.2.2.1.7.<ifIndex>: 1=up, 2=down)
+        if (!empty($params['admin_status'])) {
+            $admInt = (strtolower($params['admin_status']) === 'down') ? 2 : 1;
+            $oidAdm = '1.3.6.1.2.1.2.2.1.7.' . $ifIndex;
+            if ($client->setOid($oidAdm, 'i', $admInt)) {
+                $okCount++;
+            }
+            $executed[] = 'SNMP-SET ifAdminStatus.' . $ifIndex . ' = ' . $admInt;
+        }
+
+        if ($okCount === 0) {
+            return array(
+                'success'  => false,
+                'message'  => 'Switch hat das SNMPv2c-SET Paket abgelehnt (bitte prüfen, ob SNMP Read-Write Community auf dem Switch aktiviert ist).',
+                'commands' => $executed,
+            );
+        }
+
+        return array(
+            'success'  => true,
+            'message'  => 'Port ' . $portName . ' erfolgreich per SNMPv2c-SET umgestellt.',
+            'commands' => $executed,
+        );
+    }
+
+    /**
+     * Configure a managed switch (Multi-Vendor: Cisco SMB, Cisco IOS, HP/Aruba, TP-Link, Netgear/Ubiquiti, MikroTik, Zyxel) via SSH.
      * Supports:
      *  - action_type = 'test' (test SSH login and return hostname/prompt)
      *  - action_type = 'configure_port' (set access VLAN, create VLAN if needed, set description, set admin UP/DOWN, save config)
@@ -858,7 +1259,7 @@ class SnmpClient
      * @param string $user
      * @param string $pass
      * @param array  $params
-     * @return array array('success' => bool, 'message' => string, 'output' => string, 'commands' => array)
+     * @return array array('success' => bool, 'message' => string, 'output' => string, 'commands' => array, 'profile' => string)
      */
     public static function configureSwitchViaSsh($ip, $user, $pass, array $params = array())
     {
@@ -874,80 +1275,26 @@ class SnmpClient
         }
 
         $actionType = isset($params['action_type']) ? $params['action_type'] : 'configure_port';
+        $profile = isset($params['cli_profile']) && $params['cli_profile'] !== '' ? $params['cli_profile'] : 'cisco_smb';
         $commands = array();
+        $pagingCmd = 'terminal datadump';
 
         if ($actionType === 'configure_port') {
             $portName = isset($params['port_name']) ? trim((string)$params['port_name']) : '';
             if ($portName === '' || !preg_match('/^[a-zA-Z0-9\/._-]+$/', $portName)) {
                 return array('success' => false, 'message' => 'Ungültiger Port-Name: ' . $portName);
             }
-
-            $createVlanId = isset($params['create_vlan_id']) ? (int)$params['create_vlan_id'] : 0;
-            $createVlanName = isset($params['create_vlan_name']) ? trim((string)$params['create_vlan_name']) : '';
-            $vlanId = isset($params['vlan_id']) ? (int)$params['vlan_id'] : 0;
-            if ($createVlanId >= 2 && $createVlanId <= 4094) {
-                $vlanId = $createVlanId;
-            }
-
-            $commands[] = 'configure terminal';
-
-            // 1. Optional: Create new VLAN in VLAN database and name it
-            if ($createVlanId >= 2 && $createVlanId <= 4094) {
-                $commands[] = 'vlan database';
-                $commands[] = 'vlan ' . $createVlanId;
-                $commands[] = 'exit';
-                if ($createVlanName !== '') {
-                    $cleanVlanName = preg_replace('/[^a-zA-Z0-9_-]/', '_', $createVlanName);
-                    $commands[] = 'interface vlan ' . $createVlanId;
-                    $commands[] = 'name ' . substr($cleanVlanName, 0, 32);
-                    $commands[] = 'exit';
-                }
-            }
-
-            // 2. Enter interface configuration
-            $commands[] = 'interface ' . $portName;
-
-            // 3. Set Access VLAN
-            if ($vlanId >= 1 && $vlanId <= 4094) {
-                $commands[] = 'switchport mode access';
-                $commands[] = 'switchport access vlan ' . $vlanId;
-            }
-
-            // 4. Set Port Description / Alias
-            if (array_key_exists('alias', $params)) {
-                $alias = trim((string)$params['alias']);
-                $cleanAlias = preg_replace('/[^a-zA-Z0-9 _.:\/-]/', '', $alias);
-                if ($cleanAlias === '') {
-                    $commands[] = 'no description';
-                } else {
-                    $commands[] = 'description ' . substr($cleanAlias, 0, 64);
-                }
-            }
-
-            // 5. Set Port Admin Status (up / down)
-            if (isset($params['admin_status']) && $params['admin_status'] !== '') {
-                if (strtolower($params['admin_status']) === 'down') {
-                    $commands[] = 'shutdown';
-                } elseif (strtolower($params['admin_status']) === 'up') {
-                    $commands[] = 'no shutdown';
-                }
-            }
-
-            $commands[] = 'exit';
-            $commands[] = 'exit';
-
-            // 6. Save running-config to startup-config unless skipped
-            $saveConfig = !isset($params['save_config']) || !empty($params['save_config']);
-            if ($saveConfig) {
-                $commands[] = 'copy running-config startup-config';
-            }
+            $built = self::buildVendorCliCommands($profile, $params);
+            $pagingCmd = $built['paging_cmd'];
+            $commands = $built['commands'];
         }
 
         $payload = base64_encode(json_encode(array(
-            'ip'       => $ip,
-            'user'     => $user,
-            'pass'     => $pass,
-            'commands' => $commands
+            'ip'         => $ip,
+            'user'       => $user,
+            'pass'       => $pass,
+            'paging_cmd' => $pagingCmd,
+            'commands'   => $commands
         )));
 
         $pyScript = <<<'PY'
@@ -957,6 +1304,7 @@ data = json.loads(base64.b64decode(sys.argv[1]).decode('utf-8'))
 ip = data['ip']
 user = data['user']
 pw = data['pass']
+paging_cmd = data.get('paging_cmd', '')
 commands = data['commands']
 
 pid, fd = pty.fork()
@@ -991,7 +1339,7 @@ def read_until(patterns, timeout=10.0):
                 break
     return None
 
-matched = read_until([b'Password:', b'password:', b'User Name:', b'Username:', b'#', b'>'], 12.0)
+matched = read_until([b'Password:', b'password:', b'User Name:', b'Username:', b'Press any key to continue', b'#', b'>'], 12.0)
 if matched in [b'User Name:', b'Username:']:
     os.write(fd, (user + '\r').encode('utf-8'))
     buf = b''
@@ -1000,14 +1348,19 @@ if matched in [b'User Name:', b'Username:']:
 if matched in [b'Password:', b'password:']:
     os.write(fd, (pw + '\r').encode('utf-8'))
     buf = b''
-    matched = read_until([b'#', b'>', b'Password:', b'password:', b'Permission denied', b'Authentication failed'], 10.0)
+    matched = read_until([b'Press any key to continue', b'#', b'>', b'Password:', b'password:', b'Permission denied', b'Authentication failed'], 10.0)
+
+if matched == b'Press any key to continue':
+    os.write(fd, b'\r')
+    buf = b''
+    matched = read_until([b'#', b'>'], 5.0)
 
 if matched not in [b'#', b'>']:
     out_str = buf.decode('utf-8', 'ignore')
     print(json.dumps({'success': False, 'message': 'SSH-Authentifizierung fehlgeschlagen oder Timeout beim Verbindungsaufbau.', 'output': out_str}))
     sys.exit(0)
 
-if matched == b'>':
+if matched == b'>' and b'] >' not in buf:
     os.write(fd, b'enable\r')
     buf = b''
     m2 = read_until([b'#', b'Password:', b'password:'], 5.0)
@@ -1019,18 +1372,19 @@ if matched == b'>':
 full_log = buf.decode('utf-8', 'ignore')
 buf = b''
 
-os.write(fd, b'terminal datadump\r')
-read_until([b'#'], 3.0)
-buf = b''
+if paging_cmd:
+    os.write(fd, (paging_cmd + '\r').encode('utf-8'))
+    read_until([b'#', b'>'], 3.0)
+    buf = b''
 
 for cmd in commands:
     os.write(fd, (cmd + '\r').encode('utf-8'))
-    m = read_until([b'(Y/N)', b'[Y/N]', b'Overwrite file', b'#'], 12.0)
+    m = read_until([b'(Y/N)', b'[Y/N]', b'(y/n)', b'[y/n]', b'Overwrite file', b'[confirm]', b'Are you sure', b'#', b'>'], 12.0)
     full_log += buf.decode('utf-8', 'ignore')
     buf = b''
-    if m in [b'(Y/N)', b'[Y/N]', b'Overwrite file']:
+    if m in [b'(Y/N)', b'[Y/N]', b'(y/n)', b'[y/n]', b'Overwrite file', b'[confirm]', b'Are you sure']:
         os.write(fd, b'Y\r')
-        read_until([b'#'], 20.0)
+        read_until([b'#', b'>'], 20.0)
         full_log += buf.decode('utf-8', 'ignore')
         buf = b''
 
@@ -1056,7 +1410,7 @@ PY;
         @unlink($tmpFile);
 
         if (!$rawOut) {
-            return array('success' => false, 'message' => 'Fehler beim Starten des SSH-Clients.', 'commands' => $commands);
+            return array('success' => false, 'message' => 'Fehler beim Starten des SSH-Clients.', 'commands' => $commands, 'profile' => $profile);
         }
 
         // Find the last JSON line in output
@@ -1068,10 +1422,12 @@ PY;
                 'success'  => false,
                 'message'  => 'Unerwartete SSH-Antwort vom Switch.',
                 'output'   => $rawOut,
-                'commands' => $commands
+                'commands' => $commands,
+                'profile'  => $profile
             );
         }
         $res['commands'] = $commands;
+        $res['profile'] = $profile;
         return $res;
     }
 }
