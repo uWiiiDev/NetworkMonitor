@@ -78,15 +78,24 @@ class Database
         $this->pdo = new PDO('sqlite:' . $sqlitePath, null, null, array(
             PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
             PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+            PDO::ATTR_TIMEOUT => 15,
         ));
+        $this->pdo->exec('PRAGMA busy_timeout = 15000');
         $this->pdo->exec('PRAGMA journal_mode = WAL');
         $this->pdo->exec('PRAGMA synchronous = NORMAL');
         $this->pdo->exec('PRAGMA temp_store = MEMORY');
         $this->pdo->exec('PRAGMA cache_size = -8000');
-        $this->pdo->exec('PRAGMA busy_timeout = 5000');
         $this->activeDriver = 'sqlite';
-        $this->initSqliteSchema();
-        $this->seedInitialDataIfEmpty();
+
+        // Schema-Initialisierung nur einmalig pro Datenbank-Version ausführen,
+        // um unnötige DDL-Schema-Locks bei parallelen Lese-/Schreibzugriffen zu vermeiden!
+        $targetSchemaVer = 1123;
+        $curSchemaVer = (int)$this->pdo->query('PRAGMA user_version')->fetchColumn();
+        if ($curSchemaVer < $targetSchemaVer) {
+            $this->initSqliteSchema();
+            $this->seedInitialDataIfEmpty();
+            $this->pdo->exec('PRAGMA user_version = ' . $targetSchemaVer);
+        }
     }
 
     public static function protectDataDirectory($dataDir)
@@ -483,7 +492,7 @@ class Database
     {
         $now = date('Y-m-d H:i:s');
 
-        // 1. Standard-Benutzer für die 3 Berechtigungsstufen anlegen, falls noch keine Benutzer existieren
+        // 1. Standard-Admin-Konto anlegen, falls noch keine Benutzer existieren (ohne Demo-/Test-Accounts)
         $userCount = (int)$this->pdo->query("SELECT COUNT(*) FROM users")->fetchColumn();
         if ($userCount === 0) {
             $insUser = $this->pdo->prepare("
@@ -496,30 +505,6 @@ class Database
                 ':p'   => password_hash('admin123', PASSWORD_DEFAULT),
                 ':n'   => 'System-Administrator',
                 ':r'   => 'admin',
-                ':now' => $now,
-            ));
-            // Netzwerkexperte-Konto (Core-Switches, VLANs, Trunks & Switch-Zugangsdaten)
-            $insUser->execute(array(
-                ':u'   => 'netadmin',
-                ':p'   => password_hash('netadmin123', PASSWORD_DEFAULT),
-                ':n'   => 'Netzwerkexperte (Core & Switch Admin)',
-                ':r'   => 'netadmin',
-                ':now' => $now,
-            ));
-            // Operator-Konto (Scans starten, Scopes & Access-Ports bearbeiten)
-            $insUser->execute(array(
-                ':u'   => 'operator',
-                ':p'   => password_hash('operator123', PASSWORD_DEFAULT),
-                ':n'   => 'Netzwerk-Techniker (Operator)',
-                ':r'   => 'operator',
-                ':now' => $now,
-            ));
-            // Viewer-Konto (Nur Lesen & Exportieren)
-            $insUser->execute(array(
-                ':u'   => 'gast',
-                ':p'   => password_hash('gast123', PASSWORD_DEFAULT),
-                ':n'   => 'Betrachter (Nur Lesen)',
-                ':r'   => 'viewer',
                 ':now' => $now,
             ));
 
@@ -560,65 +545,6 @@ class Database
                     ':now'  => $now,
                 ));
             }
-        } else {
-            // Stelle bei bestehenden Datenbanken sicher, dass das Standard-Konto für die neue Rolle 'netadmin' vorhanden ist
-            $netAdminCount = (int)$this->pdo->query("SELECT COUNT(*) FROM users WHERE role = 'netadmin'")->fetchColumn();
-            if ($netAdminCount === 0) {
-                $chkName = $this->pdo->prepare("SELECT id FROM users WHERE username = 'netadmin' LIMIT 1");
-                $chkName->execute();
-                if (!$chkName->fetchColumn()) {
-                    $insNet = $this->pdo->prepare("
-                        INSERT INTO users (username, password_hash, full_name, role, is_active, created_at)
-                        VALUES (:u, :p, :n, :r, 1, :now)
-                    ");
-                    $insNet->execute(array(
-                        ':u'   => 'netadmin',
-                        ':p'   => password_hash('netadmin123', PASSWORD_DEFAULT),
-                        ':n'   => 'Netzwerkexperte (Core & Switch Admin)',
-                        ':r'   => 'netadmin',
-                        ':now' => $now,
-                    ));
-                }
-            }
-
-            // Einmaliges Backfill für mac_port_history aus bereits vorhandenen Switch-Port-Links, falls Tabelle noch leer ist
-            try {
-                $histCount = (int)$this->pdo->query("SELECT COUNT(*) FROM mac_port_history")->fetchColumn();
-                if ($histCount === 0) {
-                    $existingLinks = $this->pdo->query("
-                        SELECT l.source_device_id, l.source_port, l.updated_at,
-                               d.mac_address, d.ip_address, d.custom_name, d.hostname, d.vendor, d.first_seen, d.last_seen,
-                               sw.custom_name AS sw_custom, sw.hostname AS sw_host, sw.snmp_sysname AS sw_sysname, sw.ip_address AS sw_ip
-                        FROM links l
-                        INNER JOIN devices d ON l.target_device_id = d.id
-                        INNER JOIN devices sw ON l.source_device_id = sw.id
-                        WHERE l.source_port IS NOT NULL AND l.source_port != '' AND l.source_port != 'Trunk' AND l.source_port != 'Uplink'
-                          AND d.mac_address IS NOT NULL AND d.mac_address != ''
-                    ")->fetchAll();
-                    if (!empty($existingLinks)) {
-                        $insH = $this->pdo->prepare("
-                            INSERT INTO mac_port_history (mac_address, ip_address, device_name, vendor, switch_id, switch_name, switch_ip, port_name, vlan_id, first_seen, last_seen, sightings_count)
-                            VALUES (:mac, :ip, :dname, :vend, :swid, :swname, :swip, :pname, 1, :fseen, :lseen, 1)
-                        ");
-                        foreach ($existingLinks as $el) {
-                            $swLabel = !empty($el['sw_custom']) ? $el['sw_custom'] : (!empty($el['sw_sysname']) ? $el['sw_sysname'] : (!empty($el['sw_host']) ? $el['sw_host'] : $el['sw_ip']));
-                            $devLabel = !empty($el['custom_name']) ? $el['custom_name'] : (!empty($el['hostname']) ? $el['hostname'] : $el['ip_address']);
-                            $insH->execute(array(
-                                ':mac'    => strtoupper($el['mac_address']),
-                                ':ip'     => $el['ip_address'],
-                                ':dname'  => $devLabel,
-                                ':vend'   => $el['vendor'],
-                                ':swid'   => (int)$el['source_device_id'],
-                                ':swname' => $swLabel,
-                                ':swip'   => $el['sw_ip'],
-                                ':pname'  => $el['source_port'],
-                                ':fseen'  => !empty($el['first_seen']) ? $el['first_seen'] : $now,
-                                ':lseen'  => !empty($el['last_seen']) ? $el['last_seen'] : $now,
-                            ));
-                        }
-                    }
-                }
-            } catch (Exception $e) {}
         }
     }
 }

@@ -310,38 +310,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     Anmelden
                 </button>
             </form>
-
-            <div class="role-hint-box">
-                <div style="font-weight:600;color:var(--text-primary);margin-bottom:4px;">Vorab angelegte Zugänge zum Testen der 4 Rollen:</div>
-                <button type="button" class="quick-role-btn" onclick="fillLogin('admin','admin123')">
-                    <span><b>admin</b> / admin123</span>
-                    <span style="color:#34d399;">Administrator (Vollzugriff + DB)</span>
-                </button>
-                <button type="button" class="quick-role-btn" onclick="fillLogin('netadmin','netadmin123')">
-                    <span><b>netadmin</b> / netadmin123</span>
-                    <span style="color:#c084fc;">Netzwerkexperte (Core-Switches &amp; VLANs)</span>
-                </button>
-                <button type="button" class="quick-role-btn" onclick="fillLogin('operator','operator123')">
-                    <span><b>operator</b> / operator123</span>
-                    <span style="color:#60a5fa;">Operator (Scans &amp; Access-Ports, ohne Core)</span>
-                </button>
-                <button type="button" class="quick-role-btn" onclick="fillLogin('gast','gast123')">
-                    <span><b>gast</b> / gast123</span>
-                    <span style="color:#94a3b8;">Viewer (Nur Lesen, ohne Core)</span>
-                </button>
-            </div>
         <?php endif; ?>
     </div>
-
-    <script>
-        function fillLogin(u, p) {
-            var uEl = document.getElementById('login-user');
-            var pEl = document.getElementById('login-pass');
-            if (uEl && pEl) {
-                uEl.value = u;
-                pEl.value = p;
-            }
-        }
-    </script>
 </body>
 </html>

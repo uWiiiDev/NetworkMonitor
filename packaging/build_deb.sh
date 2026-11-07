@@ -17,6 +17,7 @@ OUTPUT_DEB="${PROJECT_ROOT}/${PKG_NAME}_${VERSION}_${ARCH}.deb"
 echo "==> Baue Debian-Paket: ${PKG_NAME}_${VERSION}_${ARCH}.deb ..."
 
 rm -rf "${PROJECT_ROOT}/packaging/build"
+rm -f "${PROJECT_ROOT}/${PKG_NAME}_"*_"${ARCH}.deb"
 mkdir -p "${BUILD_ROOT}/DEBIAN"
 mkdir -p "${BUILD_ROOT}/opt/network-monitor/includes"
 mkdir -p "${BUILD_ROOT}/opt/network-monitor/assets"
@@ -235,23 +236,6 @@ set -e
 mkdir -p /var/lib/network-monitor/data
 chmod 0750 /var/lib/network-monitor/data
 
-# Falls noch keine Datenbank in /var/lib/network-monitor/data existiert, aber im lokalen
-# Entwicklungsordner eine vorhanden ist, einmalig als Startbestand übernehmen:
-if [ ! -f /var/lib/network-monitor/data/network_monitor.sqlite ]; then
-    for CANDIDATE in /home/*/Dokumente/Antigravity/NetworkMonitor/data/network_monitor.sqlite; do
-        if [ -f "$CANDIDATE" ]; then
-            cp "$CANDIDATE" /var/lib/network-monitor/data/network_monitor.sqlite
-            CAND_DIR="$(dirname "$CANDIDATE")"
-            if [ -f "${CAND_DIR}/custom_config.json" ]; then
-                cp "${CAND_DIR}/custom_config.json" /var/lib/network-monitor/data/custom_config.json
-                chmod 0600 /var/lib/network-monitor/data/custom_config.json
-            fi
-            echo "NetworkMonitor: Bestehende Datenbank aus ${CAND_DIR} übernommen."
-            break
-        fi
-    done
-fi
-
 if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload >/dev/null 2>&1 || true
     systemctl enable network-monitor.service >/dev/null 2>&1 || true
@@ -270,6 +254,7 @@ fi
 echo "======================================================================"
 echo " NetworkMonitor wurde erfolgreich installiert!"
 echo " -> Weboberfläche: http://127.0.0.1:8085"
+echo " -> Standard-Login bei Neuinstallation: admin / admin123"
 echo " -> Start über das Anwendungsmenü ('NetworkMonitor') oder im Terminal"
 echo "    mit dem Befehl: network-monitor"
 echo "======================================================================"
@@ -277,7 +262,7 @@ exit 0
 EOF
 chmod 0755 "${BUILD_ROOT}/DEBIAN/postinst"
 
-# 11. DEBIAN/prerm
+# 11. DEBIAN/prerm & postrm
 cat << 'EOF' > "${BUILD_ROOT}/DEBIAN/prerm"
 #!/bin/sh
 set -e
@@ -290,6 +275,16 @@ fi
 exit 0
 EOF
 chmod 0755 "${BUILD_ROOT}/DEBIAN/prerm"
+
+cat << 'EOF' > "${BUILD_ROOT}/DEBIAN/postrm"
+#!/bin/sh
+set -e
+if [ "$1" = "purge" ]; then
+    rm -rf /var/lib/network-monitor
+fi
+exit 0
+EOF
+chmod 0755 "${BUILD_ROOT}/DEBIAN/postrm"
 
 # 12. Paket bauen
 dpkg-deb --root-owner-group --build "${BUILD_ROOT}" "${OUTPUT_DEB}"

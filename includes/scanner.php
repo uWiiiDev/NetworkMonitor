@@ -175,10 +175,6 @@ class NetworkScanner
                 }
             } catch (Exception $e) {}
 
-            // Alle bisherigen Geräte dieses Scopes zunächst als offline markieren (sofern nicht manuell)
-            $this->pdo->prepare("UPDATE devices SET status = 'offline' WHERE scope_id = :sid")
-                      ->execute(array(':sid' => $scope['id']));
-
             // 2a. FRITZ!Box TR-064 Host-Informationen (Ethernet vs. WLAN 802.11 & hinterlegte FRITZ!Box-Gerätenamen)
             // Auch bekannte Geräte prüfen, die evtl. ICMP-Ping blockieren/drosseln, aber laut FRITZ!Box aktiv sind
             $trCheckHosts = $liveHosts;
@@ -237,145 +233,154 @@ class NetworkScanner
                 $snmpBatchSize
             );
 
-            // 7. Alle gefundenen Geräte innerhalb einer schnellen Datenbank-Transaktion speichern
+            // 7a. Alle Netzwerk-Abfragen (inkl. SNMP-Switch-Abfragen) ZUERST im RAM abschließen,
+            // damit während Netzwerk-Timeouts KEINE Datenbank-Transaktion (SQLite Write-Lock) offen gehalten wird!
+            $rowsToUpsert = array();
+            foreach ($liveHosts as $ip => $hostMeta) {
+                $isProxyArp = !empty($hostMeta['is_proxy_arp']);
+                $mac = (!$isProxyArp && !empty($hostMeta['mac'])) ? OuiLookup::normalizeMac($hostMeta['mac']) : null;
+                $vendor = $isProxyArp
+                    ? ('VPN-Fernzugang / Proxy-ARP (via ' . $gatewayIp . ')')
+                    : ($mac ? OuiLookup::lookupVendor($mac) : null);
+                $ttl = isset($hostMeta['ttl']) ? $hostMeta['ttl'] : null;
+
+                $hostname = !empty($hostMeta['hostname'])
+                    ? $hostMeta['hostname']
+                    : (isset($batchHostnames[$ip]) ? $batchHostnames[$ip] : null);
+
+                // Falls kein DNS-Hostname vorhanden, nutze Windows NetBIOS-Namen als Fallback
+                $nbInfo = isset($batchNetbios[$ip]) ? $batchNetbios[$ip] : null;
+                if (empty($hostname) && !empty($nbInfo['name'])) {
+                    $hostname = $nbInfo['name'];
+                }
+
+                // FRITZ!Box TR-064 & Netgear NSDP Zusatzinfos auswerten
+                $trInfo = ($mac && isset($batchTr064[$mac])) ? $batchTr064[$mac] : null;
+                $nsdpInfo = isset($batchNsdp[$ip]) ? $batchNsdp[$ip] : null;
+                if ($trInfo && !empty($trInfo['hostname'])) {
+                    $trName = $trInfo['hostname'];
+                    $isGenericDns = empty($hostname) || preg_match('/^(wlan\d+|none|pc-[0-9a-f-]+)(\.fritz\.box)?$/i', $hostname);
+                    $isGenericTr = preg_match('/^(wlan\d+|none|pc-[0-9a-f-]+)$/i', $trName);
+                    if ($isGenericDns && !$isGenericTr) {
+                        $hostname = $trName . '.fritz.box';
+                    } elseif (empty($hostname) && strpos((string)$vendor, 'Netgear') !== false) {
+                        $hostname = 'Netgear-Switch-' . substr(str_replace(':', '', (string)$mac), -6);
+                    }
+                } elseif (empty($hostname) && strpos((string)$vendor, 'Netgear') !== false && $mac) {
+                    $hostname = 'Netgear-Switch-' . substr(str_replace(':', '', $mac), -6);
+                }
+                if ($nsdpInfo && !empty($nsdpInfo['hostname']) && empty($hostname)) {
+                    $hostname = $nsdpInfo['hostname'];
+                }
+
+                $openPorts = isset($batchOpenPorts[$ip]) ? $batchOpenPorts[$ip] : array();
+                $bannerInfo = isset($batchBanners[$ip]) ? $batchBanners[$ip] : array();
+
+                $snmpEnabled = 0;
+                $snmpSysName = null;
+                $snmpSysDescr = null;
+                $snmpSysObjectId = null;
+                $snmpLocation = null;
+                $snmpPortsJson = null;
+                $hasBridgeTable = false;
+
+                // Detail-SNMP-Abfrage (Interfaces, Bridge-MIB MAC-Tabelle, LLDP) NUR für Geräte,
+                // die beim schnellen Multi-Host-UDP-Check geantwortet haben oder eine eigene Switch-SNMP-Community besitzen!
+                $customSnmpComm = (isset($prevDevicesByIp[$ip]) && !empty($prevDevicesByIp[$ip]['switch_snmp_community']))
+                    ? trim($prevDevicesByIp[$ip]['switch_snmp_community'])
+                    : '';
+                if (isset($responsiveSnmpIps[$ip]) || $customSnmpComm !== '') {
+                    $devComm = ($customSnmpComm !== '') ? $customSnmpComm : $community;
+                    $snmpClient = new SnmpClient($ip, $devComm, $this->config['snmp_timeout_ms']);
+                    $snmpData = $snmpClient->probeDevice();
+                    if ($snmpData !== null) {
+                        $snmpEnabled = 1;
+                        $snmpSysName = $snmpData['sysName'];
+                        $snmpSysDescr = $snmpData['sysDescr'];
+                        $snmpSysObjectId = $snmpData['sysObjectID'];
+                        $snmpLocation = $snmpData['sysLocation'];
+                        $snmpPortsJson = json_encode($snmpData);
+                        if (!empty($snmpData['mac_table']) || !empty($snmpData['lldp_neighbors'])) {
+                            $hasBridgeTable = true;
+                        }
+                        if (empty($hostname) && !empty($snmpSysName)) {
+                            $hostname = $snmpSysName;
+                        }
+                    }
+                }
+
+                // Baue kompakten Service-/Fingerprint-String zusammen
+                $infoParts = array();
+                if ($trInfo && !empty($trInfo['interface_type'])) {
+                    $ifLabel = (stripos($trInfo['interface_type'], '802.11') !== false)
+                        ? 'WLAN (802.11)'
+                        : ((stripos($trInfo['interface_type'], 'Ethernet') !== false) ? 'Ethernet (LAN)' : $trInfo['interface_type']);
+                    $infoParts[] = 'Via: ' . $ifLabel;
+                }
+                if ($nsdpInfo && !empty($nsdpInfo['model'])) {
+                    $infoParts[] = 'NSDP: ' . $nsdpInfo['model'] . (!empty($nsdpInfo['firmware']) ? (' (' . $nsdpInfo['firmware'] . ')') : '');
+                }
+                if ($ttl !== null) {
+                    $infoParts[] = 'TTL: ' . (int)$ttl;
+                }
+                if (!empty($bannerInfo['http_title'])) {
+                    $infoParts[] = 'Web: ' . $bannerInfo['http_title'];
+                }
+                if (!empty($bannerInfo['http_server'])) {
+                    $infoParts[] = 'Server: ' . $bannerInfo['http_server'];
+                }
+                if (!empty($bannerInfo['ssh_banner'])) {
+                    $infoParts[] = 'SSH: ' . $bannerInfo['ssh_banner'];
+                }
+                if (!empty($nbInfo['workgroup'])) {
+                    $infoParts[] = 'Workgroup: ' . $nbInfo['workgroup'];
+                }
+                if ($isProxyArp) {
+                    $infoParts[] = 'Proxy-ARP via ' . $gatewayIp;
+                }
+                $serviceInfo = !empty($infoParts) ? implode(' | ', $infoParts) : null;
+
+                $autoType = $isProxyArp
+                    ? 'workstation'
+                    : OuiLookup::classifyDevice($ip, $gatewayIp, $vendor, $hostname, $openPorts, $snmpSysDescr, $hasBridgeTable, $serviceInfo);
+                if ($autoType === 'switch') {
+                    $switchesFound++;
+                }
+
+                $osGuess = $this->guessOs($openPorts, $vendor, $snmpSysDescr, $autoType, $ttl, $hostname, $serviceInfo);
+                if ($isProxyArp && ($osGuess === 'Embedded / Unbekannt' || strpos($osGuess, 'FRITZ!OS') !== false)) {
+                    $osGuess = 'VPN-Client (WireGuard / IPSec Fernzugang)';
+                }
+                $portsFormatted = $this->formatOpenPorts($openPorts);
+
+                $rowsToUpsert[] = array(
+                    'scope_id'        => $scope['id'],
+                    'ip_address'      => $ip,
+                    'mac_address'     => $mac,
+                    'vendor'          => $vendor,
+                    'hostname'        => $hostname,
+                    'device_type'     => $autoType,
+                    'os_guess'        => $osGuess,
+                    'open_ports'      => $portsFormatted,
+                    'service_info'    => $serviceInfo,
+                    'snmp_enabled'    => $snmpEnabled,
+                    'snmp_sysname'    => $snmpSysName,
+                    'snmp_sysdescr'   => $snmpSysDescr,
+                    'snmp_sysobjectid'=> $snmpSysObjectId,
+                    'snmp_location'   => $snmpLocation,
+                    'snmp_ports_json' => $snmpPortsJson,
+                    'status'          => 'online',
+                    'latency_ms'      => isset($hostMeta['latency_ms']) ? $hostMeta['latency_ms'] : 1.0,
+                );
+            }
+
+            // 7b. Ultrakurze Datenbank-Transaktion (< 5 ms) ohne jedes Netzwerk-I/O:
             $this->pdo->beginTransaction();
             try {
-                foreach ($liveHosts as $ip => $hostMeta) {
-                    $isProxyArp = !empty($hostMeta['is_proxy_arp']);
-                    $mac = (!$isProxyArp && !empty($hostMeta['mac'])) ? OuiLookup::normalizeMac($hostMeta['mac']) : null;
-                    $vendor = $isProxyArp
-                        ? ('VPN-Fernzugang / Proxy-ARP (via ' . $gatewayIp . ')')
-                        : ($mac ? OuiLookup::lookupVendor($mac) : null);
-                    $ttl = isset($hostMeta['ttl']) ? $hostMeta['ttl'] : null;
-
-                    $hostname = !empty($hostMeta['hostname'])
-                        ? $hostMeta['hostname']
-                        : (isset($batchHostnames[$ip]) ? $batchHostnames[$ip] : null);
-
-                    // Falls kein DNS-Hostname vorhanden, nutze Windows NetBIOS-Namen als Fallback
-                    $nbInfo = isset($batchNetbios[$ip]) ? $batchNetbios[$ip] : null;
-                    if (empty($hostname) && !empty($nbInfo['name'])) {
-                        $hostname = $nbInfo['name'];
-                    }
-
-                    // FRITZ!Box TR-064 & Netgear NSDP Zusatzinfos auswerten
-                    $trInfo = ($mac && isset($batchTr064[$mac])) ? $batchTr064[$mac] : null;
-                    $nsdpInfo = isset($batchNsdp[$ip]) ? $batchNsdp[$ip] : null;
-                    if ($trInfo && !empty($trInfo['hostname'])) {
-                        $trName = $trInfo['hostname'];
-                        $isGenericDns = empty($hostname) || preg_match('/^(wlan\d+|none|pc-[0-9a-f-]+)(\.fritz\.box)?$/i', $hostname);
-                        $isGenericTr = preg_match('/^(wlan\d+|none|pc-[0-9a-f-]+)$/i', $trName);
-                        if ($isGenericDns && !$isGenericTr) {
-                            $hostname = $trName . '.fritz.box';
-                        } elseif (empty($hostname) && strpos((string)$vendor, 'Netgear') !== false) {
-                            $hostname = 'Netgear-Switch-' . substr(str_replace(':', '', (string)$mac), -6);
-                        }
-                    } elseif (empty($hostname) && strpos((string)$vendor, 'Netgear') !== false && $mac) {
-                        $hostname = 'Netgear-Switch-' . substr(str_replace(':', '', $mac), -6);
-                    }
-                    if ($nsdpInfo && !empty($nsdpInfo['hostname']) && empty($hostname)) {
-                        $hostname = $nsdpInfo['hostname'];
-                    }
-
-                    $openPorts = isset($batchOpenPorts[$ip]) ? $batchOpenPorts[$ip] : array();
-                    $bannerInfo = isset($batchBanners[$ip]) ? $batchBanners[$ip] : array();
-
-                    $snmpEnabled = 0;
-                    $snmpSysName = null;
-                    $snmpSysDescr = null;
-                    $snmpSysObjectId = null;
-                    $snmpLocation = null;
-                    $snmpPortsJson = null;
-                    $hasBridgeTable = false;
-
-                    // Detail-SNMP-Abfrage (Interfaces, Bridge-MIB MAC-Tabelle, LLDP) NUR für Geräte,
-                    // die beim schnellen Multi-Host-UDP-Check geantwortet haben oder eine eigene Switch-SNMP-Community besitzen!
-                    $customSnmpComm = (isset($prevDevicesByIp[$ip]) && !empty($prevDevicesByIp[$ip]['switch_snmp_community']))
-                        ? trim($prevDevicesByIp[$ip]['switch_snmp_community'])
-                        : '';
-                    if (isset($responsiveSnmpIps[$ip]) || $customSnmpComm !== '') {
-                        $devComm = ($customSnmpComm !== '') ? $customSnmpComm : $community;
-                        $snmpClient = new SnmpClient($ip, $devComm, $this->config['snmp_timeout_ms']);
-                        $snmpData = $snmpClient->probeDevice();
-                        if ($snmpData !== null) {
-                            $snmpEnabled = 1;
-                            $snmpSysName = $snmpData['sysName'];
-                            $snmpSysDescr = $snmpData['sysDescr'];
-                            $snmpSysObjectId = $snmpData['sysObjectID'];
-                            $snmpLocation = $snmpData['sysLocation'];
-                            $snmpPortsJson = json_encode($snmpData);
-                            if (!empty($snmpData['mac_table']) || !empty($snmpData['lldp_neighbors'])) {
-                                $hasBridgeTable = true;
-                            }
-                            if (empty($hostname) && !empty($snmpSysName)) {
-                                $hostname = $snmpSysName;
-                            }
-                        }
-                    }
-
-                    // Baue kompakten Service-/Fingerprint-String zusammen
-                    $infoParts = array();
-                    if ($trInfo && !empty($trInfo['interface_type'])) {
-                        $ifLabel = (stripos($trInfo['interface_type'], '802.11') !== false)
-                            ? 'WLAN (802.11)'
-                            : ((stripos($trInfo['interface_type'], 'Ethernet') !== false) ? 'Ethernet (LAN)' : $trInfo['interface_type']);
-                        $infoParts[] = 'Via: ' . $ifLabel;
-                    }
-                    if ($nsdpInfo && !empty($nsdpInfo['model'])) {
-                        $infoParts[] = 'NSDP: ' . $nsdpInfo['model'] . (!empty($nsdpInfo['firmware']) ? (' (' . $nsdpInfo['firmware'] . ')') : '');
-                    }
-                    if ($ttl !== null) {
-                        $infoParts[] = 'TTL: ' . (int)$ttl;
-                    }
-                    if (!empty($bannerInfo['http_title'])) {
-                        $infoParts[] = 'Web: ' . $bannerInfo['http_title'];
-                    }
-                    if (!empty($bannerInfo['http_server'])) {
-                        $infoParts[] = 'Server: ' . $bannerInfo['http_server'];
-                    }
-                    if (!empty($bannerInfo['ssh_banner'])) {
-                        $infoParts[] = 'SSH: ' . $bannerInfo['ssh_banner'];
-                    }
-                    if (!empty($nbInfo['workgroup'])) {
-                        $infoParts[] = 'Workgroup: ' . $nbInfo['workgroup'];
-                    }
-                    if ($isProxyArp) {
-                        $infoParts[] = 'Proxy-ARP via ' . $gatewayIp;
-                    }
-                    $serviceInfo = !empty($infoParts) ? implode(' | ', $infoParts) : null;
-
-                    $autoType = $isProxyArp
-                        ? 'workstation'
-                        : OuiLookup::classifyDevice($ip, $gatewayIp, $vendor, $hostname, $openPorts, $snmpSysDescr, $hasBridgeTable, $serviceInfo);
-                    if ($autoType === 'switch') {
-                        $switchesFound++;
-                    }
-
-                    $osGuess = $this->guessOs($openPorts, $vendor, $snmpSysDescr, $autoType, $ttl, $hostname, $serviceInfo);
-                    if ($isProxyArp && ($osGuess === 'Embedded / Unbekannt' || strpos($osGuess, 'FRITZ!OS') !== false)) {
-                        $osGuess = 'VPN-Client (WireGuard / IPSec Fernzugang)';
-                    }
-                    $portsFormatted = $this->formatOpenPorts($openPorts);
-
-                    $this->upsertDevice(array(
-                        'scope_id'        => $scope['id'],
-                        'ip_address'      => $ip,
-                        'mac_address'     => $mac,
-                        'vendor'          => $vendor,
-                        'hostname'        => $hostname,
-                        'device_type'     => $autoType,
-                        'os_guess'        => $osGuess,
-                        'open_ports'      => $portsFormatted,
-                        'service_info'    => $serviceInfo,
-                        'snmp_enabled'    => $snmpEnabled,
-                        'snmp_sysname'    => $snmpSysName,
-                        'snmp_sysdescr'   => $snmpSysDescr,
-                        'snmp_sysobjectid'=> $snmpSysObjectId,
-                        'snmp_location'   => $snmpLocation,
-                        'snmp_ports_json' => $snmpPortsJson,
-                        'status'          => 'online',
-                        'latency_ms'      => isset($hostMeta['latency_ms']) ? $hostMeta['latency_ms'] : 1.0,
-                    ));
+                $this->pdo->prepare("UPDATE devices SET status = 'offline' WHERE scope_id = :sid")
+                          ->execute(array(':sid' => $scope['id']));
+                foreach ($rowsToUpsert as $rowData) {
+                    $this->upsertDevice($rowData);
                 }
                 $this->pdo->commit();
             } catch (Exception $txEx) {
