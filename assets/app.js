@@ -2980,8 +2980,8 @@ function buildRealSwitchGraphicModel(dev) {
         if (dstId === myId && devById[srcId]) {
             // Dieser Switch ist Ziel -> srcId ist der übergeordnete Switch/Router (Upstream)
             var parentDev = devById[srcId];
-            var myUplinkPort = (lnk.target_port && lnk.target_port !== 'eth0') ? lnk.target_port : 'Uplink';
-            var parentDownPort = lnk.source_port || 'Port';
+            var myUplinkPort = (lnk.target_port && lnk.target_port !== 'eth0' && lnk.target_port !== 'Uplink') ? lnk.target_port : 'Port 1 (Uplink)';
+            var parentDownPort = lnk.source_port || 'LAN-Port';
             upstreamLinks.push({
                 localPort: myUplinkPort,
                 remotePort: parentDownPort,
@@ -2991,11 +2991,14 @@ function buildRealSwitchGraphicModel(dev) {
                 remoteId: parentDev.id,
                 linkType: (lnk.link_type || 'uplink').toUpperCase()
             });
-            if (myUplinkPort !== 'Uplink') {
-                addDeviceToPortMap(myUplinkPort, parentDev, parentDownPort, true, 'upstream');
-            }
+            addDeviceToPortMap(myUplinkPort, parentDev, parentDownPort, true, 'upstream');
         } else if (srcId === myId && devById[dstId]) {
             // Dieser Switch ist Quelle -> dstId hängt an diesem Switch
+            // Wichtig: Bei einem Switch nur echte Port-Zuordnungen (SNMP Bridge-MIB, LLDP, Trunk oder Manuell) anzeigen,
+            // niemals pauschale Subnetz/WLAN-Geräte ohne Port-Nachweis!
+            if (dev.device_type === 'switch' && lnk.link_type === 'subnet' && !lnk.source_port) {
+                continue;
+            }
             var childDev = devById[dstId];
             var localPort = lnk.source_port || ('Port #' + (l + 1));
             var childPort = (lnk.target_port && lnk.target_port !== 'eth0') ? lnk.target_port : '';
@@ -3177,6 +3180,8 @@ function buildRealSwitchGraphicModel(dev) {
 
     return {
         isDemo: false,
+        snmpEnabled: parseInt(dev.snmp_enabled || 0, 10) === 1,
+        deviceType: dev.device_type,
         switchName: swName,
         switchIp: dev.ip_address,
         vendor: dev.vendor || 'Managed Switch',
@@ -3226,6 +3231,11 @@ function openSwitchGraphicModal(devId, isDemoPreview) {
         html += '<div style="background:rgba(168,85,247,0.12);border:1px solid rgba(168,85,247,0.45);border-radius:8px;padding:10px 14px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">' +
             '<div style="font-size:12.5px;color:#e9d5ff;"><b>👁 Vorschau-Modus (Demo-Stack &amp; Kaskade):</b> Zeigt exemplarisch einen <b>2x gestackten Core-Switch</b> (Unit #1 + Unit #2 über StackWise-Backplane) sowie dessen <b>Upstream-Gateway</b> und <b>2 kaskadierte Unterverteiler-Switche</b>.</div>' +
             (SwitchGraphicState.currentDevId ? '<button class="btn btn-sm" onclick="openSwitchGraphicModal(' + SwitchGraphicState.currentDevId + ', false)">↩ Zurück zum ausgewählten Gerät</button>' : '') +
+        '</div>';
+    } else if (!model.snmpEnabled) {
+        html += '<div style="background:rgba(245,158,11,0.12);border:1px solid rgba(245,158,11,0.45);border-radius:8px;padding:10px 14px;font-size:12.5px;color:#fde68a;line-height:1.5;">' +
+            '💡 <b>Hinweis – SNMP v2c ist auf diesem Gerät (' + escapeHtml(model.switchIp) + ') noch nicht aktiv:</b> ' +
+            'Daher ist aktuell nur der <b>Uplink zur FRITZ!Box / Gateway</b> bekannt. Welche Geräte physisch an den einzelnen Ports dieses Switches stecken, kann erst automatisch ausgelesen werden, sobald <b>SNMP v2c</b> im Webinterface des Switches eingeschaltet wurde (siehe <a href="hilfe.php" style="color:#60a5fa;text-decoration:underline;">❓ Hilfe</a>) oder wenn du einem Gerät im Detailfenster manuell einen Switch-Port zuordnest.' +
         '</div>';
     }
 

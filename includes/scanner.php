@@ -667,11 +667,33 @@ class NetworkScanner
             if (empty($snmp['mac_table']) || !is_array($snmp['mac_table'])) {
                 continue;
             }
+
+            // Ermittle den Uplink-Port dieses Switches (Port, auf dem die MAC des Gateway-Routers gesehen wird).
+            // Über diesen Uplink-Port sieht der Switch auch alle WLAN-Geräte und anderen FRITZ!Boxen –
+            // diese dürfen NICHT als am Switch angeschlossene Endgeräte gewertet werden!
+            $uplinkBridgePort = null;
+            $uplinkPortName = null;
+            if (!empty($routerDevice['mac_address'])) {
+                $gwMac = strtoupper($routerDevice['mac_address']);
+                if (isset($snmp['mac_table'][$gwMac])) {
+                    $uplinkBridgePort = isset($snmp['mac_table'][$gwMac]['bridge_port']) ? (int)$snmp['mac_table'][$gwMac]['bridge_port'] : null;
+                    $uplinkPortName = isset($snmp['mac_table'][$gwMac]['port_name']) ? $snmp['mac_table'][$gwMac]['port_name'] : null;
+                }
+            }
+
             foreach ($snmp['mac_table'] as $macAddr => $portInfo) {
                 $macKey = strtoupper($macAddr);
                 if (!isset($byMac[$macKey])) {
                     continue;
                 }
+                // Überspringe MAC-Einträge, die auf dem Uplink-Port Richtung FRITZ!Box / Gateway liegen
+                if ($uplinkBridgePort !== null && isset($portInfo['bridge_port']) && (int)$portInfo['bridge_port'] === $uplinkBridgePort) {
+                    continue;
+                }
+                if ($uplinkPortName !== null && isset($portInfo['port_name']) && $portInfo['port_name'] === $uplinkPortName) {
+                    continue;
+                }
+
                 $targetDev = $byMac[$macKey];
                 if ((int)$targetDev['id'] === (int)$sw['id'] || (int)$targetDev['id'] === (int)$routerDevice['id']) {
                     continue;
@@ -696,8 +718,10 @@ class NetworkScanner
             }
         }
 
-        // 4. Alle übrigen Geräte im Scope an den Haupt-Switch (falls vorhanden) oder an den Gateway-Router hängen
-        $defaultParent = $primarySwitch ? $primarySwitch : $routerDevice;
+        // 4. Alle übrigen Geräte im Scope (WLAN-Clients, weitere FRITZ!Boxen/APs, Geräte ohne SNMP-Switch-Zuordnung)
+        // hängen am Gateway-Router (Haupt-FRITZ!Box) und NICHT pauschal an einem Switch!
+        // Am Switch hängen nur Geräte, die per SNMP Bridge-MIB (Schritt 3), LLDP (Schritt 1) oder manuell (Schritt 0) dort nachgewiesen wurden.
+        $defaultParent = $routerDevice ? $routerDevice : ($primarySwitch ? $primarySwitch : $devices[0]);
         foreach ($devices as $dev) {
             if ((int)$dev['id'] === (int)$routerDevice['id'] || isset($linkedTargets[$dev['id']])) {
                 continue;
