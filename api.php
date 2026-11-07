@@ -12,7 +12,8 @@ require_once __DIR__ . '/includes/scanner.php';
 
 $db = Database::getInstance();
 $pdo = $db->getPdo();
-$currentUser = Auth::requireRole(array('viewer', 'operator', 'admin'));
+$currentUser = Auth::requireRole(array('viewer', 'operator', 'netadmin', 'admin'));
+$isNetExpert = in_array($currentUser['role'], array('netadmin', 'admin'), true);
 
 $action = isset($_GET['action']) ? $_GET['action'] : (isset($_POST['action']) ? $_POST['action'] : 'topology');
 
@@ -27,13 +28,30 @@ try {
     switch ($action) {
         case 'topology':
             $scopes = $pdo->query("SELECT * FROM scopes ORDER BY id ASC")->fetchAll();
-            $devices = $pdo->query("
+            $rawDevices = $pdo->query("
                 SELECT d.*, s.name AS scope_name, s.cidr AS scope_cidr, s.color AS scope_color, s.vlan_id
                 FROM devices d
                 LEFT JOIN scopes s ON d.scope_id = s.id
                 ORDER BY d.scope_id ASC, d.ip_address ASC
             ")->fetchAll();
-            foreach ($devices as &$dRow) {
+
+            // Ermittle Core-Switches & filtere sie für Nicht-Netzwerkexperten ('viewer' & 'operator') vollständig aus!
+            $hiddenCoreIds = array();
+            $gatewayIdByScope = array();
+            foreach ($rawDevices as $rd) {
+                $sid = (int)$rd['scope_id'];
+                if ($rd['device_type'] === 'router' && (int)$rd['is_core'] === 0 && !isset($gatewayIdByScope[$sid])) {
+                    $gatewayIdByScope[$sid] = (int)$rd['id'];
+                }
+            }
+
+            $devices = array();
+            foreach ($rawDevices as $dRow) {
+                $dRow['is_core'] = !empty($dRow['is_core']) ? 1 : 0;
+                if ($dRow['is_core'] === 1 && !$isNetExpert) {
+                    $hiddenCoreIds[(int)$dRow['id']] = (int)$dRow['scope_id'];
+                    continue;
+                }
                 $profInfo = SnmpClient::detectSwitchCliProfile($dRow);
                 $dRow['cli_profile'] = $profInfo['profile'];
                 $dRow['cli_profile_label'] = $profInfo['label'];
@@ -48,9 +66,34 @@ try {
                 $dRow['has_snmp_write'] = ($rawWrite !== '') ? 1 : 0;
                 unset($dRow['switch_ssh_pass']);
                 unset($dRow['switch_snmp_write_community']);
+                $devices[] = $dRow;
             }
-            unset($dRow);
-            $links = $pdo->query("SELECT * FROM links ORDER BY id ASC")->fetchAll();
+
+            $rawLinks = $pdo->query("SELECT * FROM links ORDER BY id ASC")->fetchAll();
+            $links = array();
+            if (empty($hiddenCoreIds)) {
+                $links = $rawLinks;
+            } else {
+                foreach ($rawLinks as $lnk) {
+                    $srcId = (int)$lnk['source_device_id'];
+                    $dstId = (int)$lnk['target_device_id'];
+                    if (isset($hiddenCoreIds[$dstId])) {
+                        continue;
+                    }
+                    if (isset($hiddenCoreIds[$srcId])) {
+                        $scId = $hiddenCoreIds[$srcId];
+                        if (isset($gatewayIdByScope[$scId]) && $gatewayIdByScope[$scId] !== $dstId) {
+                            $lnk['source_device_id'] = $gatewayIdByScope[$scId];
+                            $lnk['source_port'] = 'Uplink';
+                            $lnk['link_type'] = 'subnet';
+                            $links[] = $lnk;
+                        }
+                        continue;
+                    }
+                    $links[] = $lnk;
+                }
+            }
+
             $logs = $pdo->query("
                 SELECT l.*, s.name AS scope_name, s.cidr AS scope_cidr
                 FROM scan_logs l
@@ -58,12 +101,18 @@ try {
                 ORDER BY l.id DESC LIMIT 20
             ")->fetchAll();
 
-            $alerts = $pdo->query("
+            $rawAlerts = $pdo->query("
                 SELECT a.*, s.name AS scope_name
                 FROM device_alerts a
                 LEFT JOIN scopes s ON a.scope_id = s.id
                 ORDER BY a.id DESC LIMIT 50
             ")->fetchAll();
+            $alerts = array();
+            foreach ($rawAlerts as $alRow) {
+                if (!isset($hiddenCoreIds[(int)$alRow['device_id']])) {
+                    $alerts[] = $alRow;
+                }
+            }
             $unackCount = (int)$pdo->query("SELECT COUNT(*) FROM device_alerts WHERE is_acknowledged = 0")->fetchColumn();
 
             $nmapPath = trim((string)@shell_exec('which nmap 2>/dev/null'));
@@ -128,7 +177,7 @@ try {
             break;
 
         case 'scan':
-            Auth::requireRole(array('operator', 'admin'));
+            Auth::requireRole(array('operator', 'netadmin', 'admin'));
             @set_time_limit(300);
             $scanner = new NetworkScanner();
             $scopeId = isset($input['scope_id']) ? $input['scope_id'] : 'all';
@@ -144,7 +193,7 @@ try {
             break;
 
         case 'save_scope':
-            Auth::requireRole(array('operator', 'admin'));
+            Auth::requireRole(array('operator', 'netadmin', 'admin'));
             $id = isset($input['id']) ? (int)$input['id'] : 0;
             $name = isset($input['name']) ? trim($input['name']) : '';
             $cidr = isset($input['cidr']) ? trim($input['cidr']) : '';
@@ -213,7 +262,7 @@ try {
             break;
 
         case 'delete_scope':
-            Auth::requireRole(array('operator', 'admin'));
+            Auth::requireRole(array('netadmin', 'admin'));
             $id = isset($input['id']) ? (int)$input['id'] : 0;
             if ($id <= 0) {
                 throw new InvalidArgumentException('Ungültige Scope-ID.');
@@ -227,11 +276,22 @@ try {
             break;
 
         case 'save_device':
-            Auth::requireRole(array('operator', 'admin'));
+            Auth::requireRole(array('operator', 'netadmin', 'admin'));
             $id = isset($input['id']) ? (int)$input['id'] : 0;
             if ($id <= 0) {
                 throw new InvalidArgumentException('Ungültige Geräte-ID.');
             }
+            $chkStmt = $pdo->prepare("SELECT * FROM devices WHERE id = :id");
+            $chkStmt->execute(array(':id' => $id));
+            $existingDev = $chkStmt->fetch();
+            if (!$existingDev) {
+                throw new InvalidArgumentException('Gerät nicht gefunden.');
+            }
+            if (!empty($existingDev['is_core']) && !$isNetExpert) {
+                http_response_code(403);
+                throw new RuntimeException('Zugriff verweigert: Core-Switches dürfen nur von Netzwerkexperten (netadmin) oder Administratoren bearbeitet werden.');
+            }
+
             $customName = isset($input['custom_name']) ? trim($input['custom_name']) : null;
             $customGroup = isset($input['custom_group']) ? trim($input['custom_group']) : null;
             $deviceType = isset($input['device_type']) ? trim($input['device_type']) : 'workstation';
@@ -241,11 +301,14 @@ try {
             $notes = isset($input['notes']) ? trim($input['notes']) : null;
             $parentDeviceId = isset($input['parent_device_id']) ? (int)$input['parent_device_id'] : 0;
             $parentPort = isset($input['parent_port']) ? trim($input['parent_port']) : null;
+            $isCore = $isNetExpert && isset($input['is_core'])
+                ? ((int)$input['is_core'] ? 1 : 0)
+                : (!empty($existingDev['is_core']) ? 1 : 0);
 
             $stmt = $pdo->prepare("
                 UPDATE devices
                 SET custom_name = :cname, custom_group = :cgroup, device_type = :dtype,
-                    alert_mode = :amode, last_alert_state = status, notes = :notes, is_manual_type = 1
+                    alert_mode = :amode, last_alert_state = status, notes = :notes, is_core = :iscore, is_manual_type = 1
                 WHERE id = :id
             ");
             $stmt->execute(array(
@@ -254,13 +317,13 @@ try {
                 ':dtype'  => $deviceType,
                 ':amode'  => $alertMode,
                 ':notes'  => $notes,
+                ':iscore' => $isCore,
                 ':id'     => $id,
             ));
 
             // Falls eine manuelle Uplink-/Switch-Port-Zuordnung angegeben wurde
             if ($parentDeviceId > 0 && $parentDeviceId !== $id) {
-                $devRow = $pdo->query("SELECT scope_id FROM devices WHERE id = " . (int)$id)->fetch();
-                $scopeId = $devRow ? (int)$devRow['scope_id'] : null;
+                $scopeId = (int)$existingDev['scope_id'];
                 $pdo->prepare("DELETE FROM links WHERE target_device_id = :tid")->execute(array(':tid' => $id));
                 $ins = $pdo->prepare("
                     INSERT INTO links (scope_id, source_device_id, target_device_id, source_port, target_port, link_type, is_manual, updated_at)
@@ -275,11 +338,11 @@ try {
                 ));
             }
 
-            echo json_encode(array('ok' => true));
+            echo json_encode(array('ok' => true, 'is_core' => $isCore));
             break;
 
         case 'save_switch_credentials':
-            Auth::requireRole(array('operator', 'admin'));
+            Auth::requireRole(array('netadmin', 'admin'));
             $id = isset($input['device_id']) ? (int)$input['device_id'] : 0;
             if ($id <= 0) {
                 throw new InvalidArgumentException('Ungültige Switch-Geräte-ID.');
@@ -297,6 +360,7 @@ try {
             $snmpComm = isset($input['switch_snmp_community']) ? trim($input['switch_snmp_community']) : '';
             $snmpWrite = isset($input['switch_snmp_write_community']) ? trim($input['switch_snmp_write_community']) : '';
             $cliProfOverride = isset($input['cli_profile']) ? strtolower(trim($input['cli_profile'])) : 'auto';
+            $isCoreVal = isset($input['is_core']) ? ((int)$input['is_core'] ? 1 : 0) : (!empty($dev['is_core']) ? 1 : 0);
 
             // Bestehendes SSH-Passwort & optionales Enable-Secret auspacken
             $prevCombinedPass = isset($dev['switch_ssh_pass']) ? (string)$dev['switch_ssh_pass'] : '';
@@ -333,15 +397,17 @@ try {
                 SET switch_ssh_user = :u,
                     switch_ssh_pass = :p,
                     switch_snmp_community = :sc,
-                    switch_snmp_write_community = :sw
+                    switch_snmp_write_community = :sw,
+                    is_core = :iscore
                 WHERE id = :id
             ");
             $upd->execute(array(
-                ':u'  => $sshUser !== '' ? $sshUser : null,
-                ':p'  => $finalSshPass,
-                ':sc' => $snmpComm !== '' ? $snmpComm : null,
-                ':sw' => $finalSnmpWrite,
-                ':id' => $id,
+                ':u'      => $sshUser !== '' ? $sshUser : null,
+                ':p'      => $finalSshPass,
+                ':sc'     => $snmpComm !== '' ? $snmpComm : null,
+                ':sw'     => $finalSnmpWrite,
+                ':iscore' => $isCoreVal,
+                ':id'     => $id,
             ));
 
             $dev['switch_snmp_write_community'] = $finalSnmpWrite;
@@ -368,6 +434,7 @@ try {
 
             echo json_encode(array(
                 'ok'                    => true,
+                'is_core'               => $isCoreVal,
                 'has_ssh_pass'          => ($cleanSshPass !== '') ? 1 : 0,
                 'has_enable_pass'       => ($cleanEnablePass !== '') ? 1 : 0,
                 'has_snmp_write'        => ($cleanWriteComm !== '') ? 1 : 0,
@@ -380,7 +447,7 @@ try {
             break;
 
         case 'configure_switch_port':
-            Auth::requireRole(array('operator', 'admin'));
+            Auth::requireRole(array('operator', 'netadmin', 'admin'));
             @set_time_limit(60);
             $id = isset($input['device_id']) ? (int)$input['device_id'] : 0;
             if ($id <= 0) {
@@ -391,6 +458,18 @@ try {
             $dev = $devStmt->fetch();
             if (!$dev) {
                 throw new InvalidArgumentException('Switch nicht gefunden.');
+            }
+
+            if (!empty($dev['is_core']) && !$isNetExpert) {
+                http_response_code(403);
+                throw new RuntimeException('Zugriff verweigert: Dieser Core-Switch darf ausschließlich von Netzwerkexperten (netadmin) oder Administratoren konfiguriert werden!');
+            }
+
+            $reqPortMode = isset($input['port_mode']) ? trim($input['port_mode']) : 'access';
+            $reqCreateVlanId = isset($input['create_vlan_id']) ? (int)$input['create_vlan_id'] : 0;
+            if (!$isNetExpert && ($reqPortMode === 'trunk' || $reqCreateVlanId > 0)) {
+                http_response_code(403);
+                throw new RuntimeException('Zugriff verweigert: Das Konfigurieren von 802.1Q Trunk-Ports sowie das Anlegen neuer VLANs ist Netzwerkexperten (netadmin) und Administratoren vorbehalten.');
             }
 
             $profInfo = SnmpClient::detectSwitchCliProfile($dev);
@@ -426,10 +505,10 @@ try {
                 'cli_profile'         => $activeProfile,
                 'enable_pass'         => $enablePass,
                 'port_name'           => $portName,
-                'port_mode'           => isset($input['port_mode']) ? trim($input['port_mode']) : 'access',
+                'port_mode'           => $reqPortMode,
                 'trunk_allowed_vlans' => isset($input['trunk_allowed_vlans']) ? trim($input['trunk_allowed_vlans']) : 'all',
                 'vlan_id'             => isset($input['vlan_id']) ? (int)$input['vlan_id'] : 0,
-                'create_vlan_id'      => isset($input['create_vlan_id']) ? (int)$input['create_vlan_id'] : 0,
+                'create_vlan_id'      => $reqCreateVlanId,
                 'create_vlan_name'    => isset($input['create_vlan_name']) ? trim($input['create_vlan_name']) : '',
                 'admin_status'        => isset($input['admin_status']) ? trim($input['admin_status']) : '',
                 'save_config'         => isset($input['save_config']) ? (bool)$input['save_config'] : true,
@@ -444,7 +523,7 @@ try {
                 $execRes = SnmpClient::configureSwitchPortViaSnmpSet($dev['ip_address'], $rawWriteComm !== '' ? $rawWriteComm : 'private', $params, $curSnmpData);
             } else {
                 if ($sshUser === '' || $sshPass === '') {
-                    throw new InvalidArgumentException('Für diesen Switch sind noch keine SSH-Zugangsdaten hinterlegt. Bitte zuerst über "🔑 Zugangsdaten" speichern.');
+                    throw new InvalidArgumentException('Für diesen Switch sind noch keine SSH-Zugangsdaten hinterlegt. Bitte durch einen Netzwerkexperten (netadmin) über "🔑 Zugangsdaten" hinterlegen lassen.');
                 }
                 $execRes = SnmpClient::configureSwitchViaSsh($dev['ip_address'], $sshUser, $sshPass, $params);
             }
@@ -474,8 +553,15 @@ try {
             break;
 
         case 'delete_device':
-            Auth::requireRole(array('operator', 'admin'));
+            Auth::requireRole(array('operator', 'netadmin', 'admin'));
             $id = isset($input['id']) ? (int)$input['id'] : 0;
+            $chkStmt = $pdo->prepare("SELECT is_core FROM devices WHERE id = :id");
+            $chkStmt->execute(array(':id' => $id));
+            $devCore = (int)$chkStmt->fetchColumn();
+            if ($devCore === 1 && !$isNetExpert) {
+                http_response_code(403);
+                throw new RuntimeException('Zugriff verweigert: Core-Switches dürfen nur von Netzwerkexperten oder Administratoren gelöscht werden.');
+            }
             $pdo->prepare("DELETE FROM device_alerts WHERE device_id = :id")->execute(array(':id' => $id));
             $pdo->prepare("DELETE FROM links WHERE source_device_id = :id OR target_device_id = :id")->execute(array(':id' => $id));
             $pdo->prepare("DELETE FROM devices WHERE id = :id")->execute(array(':id' => $id));
@@ -483,11 +569,17 @@ try {
             break;
 
         case 'toggle_device_visibility':
-            Auth::requireRole(array('operator', 'admin'));
+            Auth::requireRole(array('operator', 'netadmin', 'admin'));
             $id = isset($input['id']) ? (int)$input['id'] : 0;
             $isHidden = isset($input['is_hidden']) ? ((int)$input['is_hidden'] ? 1 : 0) : 0;
             if ($id <= 0) {
                 throw new InvalidArgumentException('Ungültige Geräte-ID.');
+            }
+            $chkStmt = $pdo->prepare("SELECT is_core FROM devices WHERE id = :id");
+            $chkStmt->execute(array(':id' => $id));
+            if ((int)$chkStmt->fetchColumn() === 1 && !$isNetExpert) {
+                http_response_code(403);
+                throw new RuntimeException('Zugriff verweigert: Core-Switches dürfen nur von Netzwerkexperten verwaltet werden.');
             }
             $stmt = $pdo->prepare("UPDATE devices SET is_hidden = :hid WHERE id = :id");
             $stmt->execute(array(':hid' => $isHidden, ':id' => $id));
@@ -495,7 +587,7 @@ try {
             break;
 
         case 'bulk_device_visibility':
-            Auth::requireRole(array('operator', 'admin'));
+            Auth::requireRole(array('operator', 'netadmin', 'admin'));
             $mode = isset($input['mode']) ? $input['mode'] : 'show_all';
             $scopeId = isset($input['scope_id']) && $input['scope_id'] !== 'all' ? (int)$input['scope_id'] : 0;
             $scopeWhere = $scopeId > 0 ? " WHERE scope_id = " . $scopeId : "";
@@ -517,7 +609,7 @@ try {
             break;
 
         case 'toggle_group_visibility':
-            Auth::requireRole(array('operator', 'admin'));
+            Auth::requireRole(array('operator', 'netadmin', 'admin'));
             $groupKind = isset($input['group_kind']) ? $input['group_kind'] : 'device_type';
             $groupVal = isset($input['group_val']) ? trim($input['group_val']) : '';
             $isHidden = isset($input['is_hidden']) ? ((int)$input['is_hidden'] ? 1 : 0) : 0;
@@ -539,7 +631,7 @@ try {
             break;
 
         case 'seed_demo':
-            Auth::requireRole(array('operator', 'admin'));
+            Auth::requireRole(array('operator', 'netadmin', 'admin'));
             seedManagedSwitchDemo($pdo);
             echo json_encode(array('ok' => true));
             break;
@@ -603,7 +695,7 @@ try {
             $pass = isset($input['password']) ? $input['password'] : '';
             $active = isset($input['is_active']) ? ((int)$input['is_active'] ? 1 : 0) : 1;
 
-            if ($uname === '' || !in_array($role, array('viewer', 'operator', 'admin'), true)) {
+            if ($uname === '' || !in_array($role, array('viewer', 'operator', 'netadmin', 'admin'), true)) {
                 throw new InvalidArgumentException('Bitte gültigen Benutzernamen und Rolle angeben.');
             }
             if ($uid === (int)$currentUser['id'] && ($active === 0 || $role !== 'admin')) {
@@ -749,13 +841,13 @@ try {
             break;
 
         case 'clear_alerts':
-            Auth::requireRole(array('operator', 'admin'));
+            Auth::requireRole(array('operator', 'netadmin', 'admin'));
             $pdo->exec("DELETE FROM device_alerts");
             echo json_encode(array('ok' => true));
             break;
 
         case 'save_layout_positions':
-            Auth::requireRole(array('operator', 'admin'));
+            Auth::requireRole(array('operator', 'netadmin', 'admin'));
             if (!isset($input['positions']) || !is_array($input['positions'])) {
                 throw new InvalidArgumentException('Keine Positionsdaten übergeben.');
             }
@@ -776,7 +868,7 @@ try {
             break;
 
         case 'reset_layout_positions':
-            Auth::requireRole(array('operator', 'admin'));
+            Auth::requireRole(array('operator', 'netadmin', 'admin'));
             $scopeId = isset($input['scope_id']) && $input['scope_id'] !== 'all' ? (int)$input['scope_id'] : 0;
             if ($scopeId > 0) {
                 $pdo->prepare("UPDATE devices SET pos_x = NULL, pos_y = NULL WHERE scope_id = :sid")
@@ -893,6 +985,7 @@ function seedManagedSwitchDemo(PDO $pdo)
             ':sloc' => $d[12], ':sjson' => $d[13], ':lat' => $d[14], ':now' => $now,
         ));
     }
+    $pdo->exec("UPDATE devices SET is_core = 1 WHERE ip_address = '10.20.10.2'");
 
     // Geräte in VLAN 20 (Managed Switch HP Aruba)
     $officeSnmp = json_encode(array(

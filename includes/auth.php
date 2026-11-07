@@ -2,9 +2,10 @@
 /**
  * Authentifizierung & Rollen-/Rechte-Verwaltung (RBAC)
  * Rollen:
- *   - 'viewer'   : Nur Lesen (Netzwerkplan ansehen, filtern, exportieren)
- *   - 'operator' : Lesen + Scans starten, Scopes & Geräte bearbeiten
- *   - 'admin'    : Vollzugriff inkl. Adminbereich (Datenbank-Konfiguration & Benutzerverwaltung)
+ *   - 'viewer'   : Nur Lesen (Netzwerkplan ansehen, filtern, exportieren – KEINE Core-Switches sichtbar)
+ *   - 'operator' : Techniker (Scans starten, Standard-Geräte & Access-Switch-Ports bearbeiten – KEINE Core-Switches sichtbar/administrierbar)
+ *   - 'netadmin' : Netzwerkexperte (Vollzugriff auf alle Switches inkl. Core-Switches, Trunk-Ports, VLANs & Switch-Credentials)
+ *   - 'admin'    : System-Administrator (Vollzugriff inkl. Core-Switches, Datenbank-Konfiguration, SMTP & Benutzerverwaltung)
  *
  * Kompatibel mit PHP 5.5+ (Ubuntu 14.04) bis PHP 8.x
  */

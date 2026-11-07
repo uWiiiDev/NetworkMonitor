@@ -12,8 +12,9 @@ if (!$currentUser) {
     header('Location: login.php');
     exit;
 }
-$userRole = $currentUser['role']; // 'viewer', 'operator', 'admin'
-$canEdit = ($userRole === 'operator' || $userRole === 'admin');
+$userRole = $currentUser['role']; // 'viewer', 'operator', 'netadmin', 'admin'
+$canEdit = ($userRole === 'operator' || $userRole === 'netadmin' || $userRole === 'admin');
+$isNetExpert = ($userRole === 'netadmin' || $userRole === 'admin');
 $isAdmin = ($userRole === 'admin');
 ?>
 <!DOCTYPE html>
@@ -136,6 +137,9 @@ $isAdmin = ($userRole === 'admin');
                         </select>
 
                         <input type="text" id="map-search" class="search-input" placeholder="Suche IP, Name, MAC..." oninput="renderCurrentView()" style="width:175px;">
+                        <button class="btn btn-sm" style="border-color:#3b82f6;background:rgba(59,130,246,0.16);color:#93c5fd;font-weight:600;" onclick="openMacFinderModal(document.getElementById('map-search').value)" title="MAC-Adresse oder Gerät suchen und sofort sehen, an welchem Switch-Port es gesteckt ist">
+                            🔍 MAC / Port-Finder
+                        </button>
 
                         <!-- Gruppen & Geräte-Filter Dropdown -->
                         <div class="dropdown">
@@ -267,7 +271,10 @@ $isAdmin = ($userRole === 'admin');
                 <div class="map-toolbar">
                     <div class="toolbar-group">
                         <div class="panel-title">Gefundene Hosts &amp; Managed Switches</div>
-                        <input type="text" id="inv-search" class="search-input" placeholder="In Tabelle filtern..." oninput="renderInventoryTable()" style="width:190px;">
+                        <input type="text" id="inv-search" class="search-input" placeholder="In Tabelle filtern (IP, MAC, Port)..." oninput="renderInventoryTable()" style="width:210px;">
+                        <button class="btn btn-sm" style="border-color:#3b82f6;background:rgba(59,130,246,0.16);color:#93c5fd;font-weight:600;" onclick="openMacFinderModal(document.getElementById('inv-search').value)" title="Gezielte MAC-Adress- &amp; Switch-Port-Suche öffnen">
+                            🔍 MAC / Port-Finder
+                        </button>
                     </div>
                     <div class="toolbar-group">
                         <div class="dropdown">
@@ -379,10 +386,11 @@ $isAdmin = ($userRole === 'admin');
                                 </div>
                             </div>
                             <div style="background:var(--bg-card);border:1px solid var(--border-color);border-radius:8px;padding:12px;font-size:12px;color:var(--text-secondary);margin-top:auto;">
-                                <b style="color:var(--text-primary);">Übersicht der 3 Berechtigungs-Rollen:</b><br>
-                                • <b>ADMIN (Administrator):</b> Vollzugriff inkl. Datenbank-Konfiguration, Benutzerverwaltung, Scans &amp; Bearbeitung.<br>
-                                • <b>OPERATOR (Techniker):</b> Darf Scans starten, Scopes anlegen sowie Geräte, Switch-Ports und Gruppen bearbeiten.<br>
-                                • <b>VIEWER (Betrachter):</b> Darf sich anmelden, alle 6 Netzwerkplan-Ansichten nutzen, filtern und Pläne (SVG/Draw.io/PDF/CSV) exportieren, aber nichts verändern.
+                                <b style="color:var(--text-primary);">Übersicht der 4 Berechtigungs-Rollen:</b><br>
+                                • <b>ADMIN (Administrator):</b> Vollzugriff inkl. Core-Switches, Datenbank-Konfiguration, SMTP &amp; Benutzerverwaltung.<br>
+                                • <b style="color:#c084fc;">NETADMIN (Netzwerkexperte):</b> Sieht und administriert <b>alle Switches inkl. Core-Switches</b>, 802.1Q Trunks, VLANs &amp; Switch-Zugangsdaten.<br>
+                                • <b>OPERATOR (Techniker):</b> Darf Scans starten und normale Access-Switch-Ports patchen, sieht und verwaltet aber <b>keine Core-Switches</b>.<br>
+                                • <b>VIEWER (Betrachter):</b> Nur Lesen &amp; Exportieren (keine Core-Switches sichtbar, keine Änderungen).
                             </div>
                         </div>
                     </div>
@@ -686,9 +694,10 @@ $isAdmin = ($userRole === 'admin');
                 <div class="form-group">
                     <label>Rolle / Berechtigungsstufe *</label>
                     <select id="usr-role" class="select-input">
-                        <option value="viewer">VIEWER – Betrachter (Nur Lesen &amp; Export)</option>
-                        <option value="operator">OPERATOR – Techniker (Scans starten &amp; Geräte/Scopes bearbeiten)</option>
-                        <option value="admin">ADMIN – Administrator (Vollzugriff inkl. DB &amp; Benutzer)</option>
+                        <option value="viewer">VIEWER – Betrachter (Nur Lesen &amp; Export, ohne Core-Switches)</option>
+                        <option value="operator">OPERATOR – Techniker (Scans &amp; Access-Ports, ohne Core-Switches)</option>
+                        <option value="netadmin">NETADMIN – Netzwerkexperte (Vollzugriff auf Core-Switches, Trunks &amp; VLANs)</option>
+                        <option value="admin">ADMIN – Administrator (Vollzugriff inkl. Core-Switches, DB &amp; Benutzer)</option>
                     </select>
                 </div>
                 <div class="form-group">
@@ -788,6 +797,36 @@ $isAdmin = ($userRole === 'admin');
                     <?php endif; ?>
                 </div>
                 <button class="btn btn-primary" onclick="closeAlertsModal()">Schließen</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal: MAC-Adress- & Switch-Port-Finder ("Wo steckt welches Gerät?") -->
+    <div id="mac-finder-modal" class="modal-backdrop">
+        <div class="modal" style="width:940px;max-width:96vw;max-height:90vh;display:flex;flex-direction:column;">
+            <div class="panel-header" style="flex-shrink:0;">
+                <span class="panel-title">🔍 MAC-Adress- &amp; Switch-Port-Finder („Auf welchem Port steckt das Gerät?“)</span>
+                <button class="btn btn-sm" onclick="closeMacFinderModal()">×</button>
+            </div>
+            <div class="modal-body" style="overflow-y:auto;flex:1;display:flex;flex-direction:column;gap:14px;">
+                <div style="background:rgba(59,130,246,0.1);border:1px solid rgba(59,130,246,0.35);border-radius:8px;padding:12px;">
+                    <div style="font-size:12.5px;color:#bfdbfe;margin-bottom:8px;">
+                        Gib eine <b>MAC-Adresse</b> (beliebiges Format: <code>00:25:90:8A:11:01</code>, <code>00-25-90...</code>, Cisco <code>0025.908a.1101</code> oder Teil-MAC), eine <b>IP-Adresse</b>, einen <b>Hostnamen</b> oder eine <b>Port-Bezeichnung</b> ein:
+                    </div>
+                    <div style="display:flex;gap:8px;align-items:center;">
+                        <input type="text" id="mac-finder-input" class="form-input" placeholder="MAC-Adresse, IP, Hostname oder Switch-Port eingeben..." oninput="renderMacFinderResults()" style="font-family:monospace;font-size:14px;flex:1;">
+                        <button class="btn btn-sm" onclick="document.getElementById('mac-finder-input').value=''; renderMacFinderResults();">Leeren</button>
+                    </div>
+                </div>
+                <div id="mac-finder-results" style="display:flex;flex-direction:column;gap:10px;">
+                    <!-- Dynamisch per JS gefüllt -->
+                </div>
+            </div>
+            <div class="modal-footer" style="justify-content:space-between;flex-shrink:0;">
+                <div style="font-size:12px;color:var(--text-secondary);">
+                    💡 Durchsucht alle erkannten Endgeräte sowie sämtliche gelernten SNMP Bridge-MIB MAC-Tabellen deiner Switches in Echtzeit.
+                </div>
+                <button class="btn btn-primary" onclick="closeMacFinderModal()">Schließen</button>
             </div>
         </div>
     </div>

@@ -129,12 +129,353 @@ function showToast(msg) {
 
 function userCanEdit() {
     var u = AppState.currentUser || window.CURRENT_USER || {};
-    return (u.role === 'operator' || u.role === 'admin');
+    return (u.role === 'operator' || u.role === 'netadmin' || u.role === 'admin');
+}
+
+function userIsNetExpert() {
+    var u = AppState.currentUser || window.CURRENT_USER || {};
+    return (u.role === 'netadmin' || u.role === 'admin');
 }
 
 function userIsAdmin() {
     var u = AppState.currentUser || window.CURRENT_USER || {};
     return (u.role === 'admin');
+}
+
+function normalizeMacHex(str) {
+    if (!str) return '';
+    return String(str).replace(/[^0-9a-fA-F]/g, '').toLowerCase();
+}
+
+/**
+ * Ermittelt für ein Gerät (oder eine MAC-Adresse), an welchem Switch und genau welchem Port (+ VLAN) es gesteckt ist.
+ * Kombiniert Topologie-Links und sämtliche gelernten SNMP Bridge-MIB MAC-Tabellen aller Switches.
+ */
+function getDeviceSwitchPortInfo(dev) {
+    if (!dev) return null;
+    var devById = {};
+    for (var i = 0; i < AppState.devices.length; i++) {
+        devById[AppState.devices[i].id] = AppState.devices[i];
+    }
+
+    var primarySwitch = null;
+    var primaryPort = '';
+    var primaryLinkType = '';
+
+    for (var l = 0; l < AppState.links.length; l++) {
+        var lnk = AppState.links[l];
+        if (parseInt(lnk.target_device_id, 10) === parseInt(dev.id, 10) && devById[lnk.source_device_id]) {
+            var pDev = devById[lnk.source_device_id];
+            primarySwitch = pDev;
+            primaryPort = lnk.source_port || '';
+            primaryLinkType = lnk.link_type || 'subnet';
+            break;
+        }
+    }
+
+    // Prüfe zusätzlich in allen Switch-MAC-Tabellen nach der MAC-Adresse des Geräts
+    var targetMacHex = normalizeMacHex(dev.mac_address);
+    var sightings = [];
+
+    if (targetMacHex.length === 12) {
+        for (var s = 0; s < AppState.devices.length; s++) {
+            var sw = AppState.devices[s];
+            if (!sw.snmp_ports_json || parseInt(sw.id, 10) === parseInt(dev.id, 10)) continue;
+            var snmp = null;
+            try { snmp = JSON.parse(sw.snmp_ports_json); } catch (e) {}
+            if (!snmp || !snmp.mac_table) continue;
+
+            var mKeys = Object.keys(snmp.mac_table);
+            for (var mk = 0; mk < mKeys.length; mk++) {
+                if (normalizeMacHex(mKeys[mk]) === targetMacHex) {
+                    var mEntry = snmp.mac_table[mKeys[mk]];
+                    var pName = mEntry.port_name || ('Port ' + mEntry.bridge_port);
+                    var pVlan = mEntry.vlan ? parseInt(mEntry.vlan, 10) : 1;
+                    var pAlias = '';
+                    var pMode = 'access';
+                    if (snmp.interfaces) {
+                        for (var infIdx = 0; infIdx < snmp.interfaces.length; infIdx++) {
+                            var inf = snmp.interfaces[infIdx];
+                            if (inf.name === pName || parseInt(inf.ifIndex, 10) === parseInt(mEntry.if_index, 10)) {
+                                if (inf.vlan) pVlan = parseInt(inf.vlan, 10);
+                                if (inf.alias) pAlias = inf.alias;
+                                if (inf.port_mode === 'trunk') pMode = 'trunk';
+                                break;
+                            }
+                        }
+                    }
+                    // Prüfe ob dieser Port ein Uplink zu einem anderen Switch/Router ist
+                    var isUplinkPort = (pMode === 'trunk');
+                    for (var ul = 0; ul < AppState.links.length; ul++) {
+                        var uLnk = AppState.links[ul];
+                        if (parseInt(uLnk.source_device_id, 10) === parseInt(sw.id, 10) && uLnk.source_port === pName) {
+                            var childD = devById[uLnk.target_device_id];
+                            if (childD && (childD.device_type === 'switch' || childD.device_type === 'router')) {
+                                isUplinkPort = true;
+                            }
+                        }
+                    }
+                    sightings.push({
+                        switchId: sw.id,
+                        switchName: sw.custom_name || sw.snmp_sysname || sw.hostname || sw.ip_address,
+                        switchIp: sw.ip_address,
+                        portName: pName,
+                        vlan: pVlan,
+                        alias: pAlias,
+                        isUplink: isUplinkPort
+                    });
+                    if (!primarySwitch || (primarySwitch.device_type !== 'switch' && !isUplinkPort)) {
+                        primarySwitch = sw;
+                        primaryPort = pName;
+                        primaryLinkType = 'snmp_l2';
+                    }
+                }
+            }
+        }
+    }
+
+    if (!primarySwitch) {
+        return null;
+    }
+
+    var swName = primarySwitch.custom_name || primarySwitch.snmp_sysname || primarySwitch.hostname || primarySwitch.ip_address;
+    var vlanId = null;
+    var portAlias = '';
+    if (primarySwitch.snmp_ports_json && primaryPort) {
+        try {
+            var pSnmp = JSON.parse(primarySwitch.snmp_ports_json);
+            if (pSnmp && pSnmp.interfaces) {
+                for (var pi = 0; pi < pSnmp.interfaces.length; pi++) {
+                    if (pSnmp.interfaces[pi].name === primaryPort) {
+                        vlanId = pSnmp.interfaces[pi].vlan ? parseInt(pSnmp.interfaces[pi].vlan, 10) : 1;
+                        portAlias = pSnmp.interfaces[pi].alias || '';
+                        break;
+                    }
+                }
+            }
+        } catch (e) {}
+    }
+
+    var isSwitchPort = (primarySwitch.device_type === 'switch' || parseInt(primarySwitch.snmp_enabled || 0, 10) === 1) && primaryPort && primaryPort !== 'Uplink' && primaryLinkType !== 'subnet';
+
+    return {
+        switchId: primarySwitch.id,
+        switchName: swName,
+        switchIp: primarySwitch.ip_address,
+        switchType: primarySwitch.device_type,
+        portName: primaryPort || (primarySwitch.device_type === 'router' ? 'Gateway / WLAN' : ''),
+        vlan: vlanId,
+        alias: portAlias,
+        isSwitchPort: isSwitchPort,
+        sightings: sightings,
+        searchString: (swName + ' ' + primarySwitch.ip_address + ' ' + (primaryPort || '') + (vlanId ? (' vlan' + vlanId + ' vlan ' + vlanId) : '')).toLowerCase()
+    };
+}
+
+function openMacFinderModal(initialQuery) {
+    var modal = document.getElementById('mac-finder-modal');
+    var inp = document.getElementById('mac-finder-input');
+    if (!modal || !inp) return;
+    if (initialQuery !== undefined && initialQuery !== null && String(initialQuery).trim() !== '') {
+        inp.value = String(initialQuery).trim();
+    }
+    renderMacFinderResults();
+    modal.classList.add('open');
+    setTimeout(function () { inp.focus(); }, 60);
+}
+
+function closeMacFinderModal() {
+    var modal = document.getElementById('mac-finder-modal');
+    if (modal) modal.classList.remove('open');
+}
+
+function renderMacFinderResults() {
+    var container = document.getElementById('mac-finder-results');
+    var inp = document.getElementById('mac-finder-input');
+    if (!container || !inp) return;
+
+    var qRaw = (inp.value || '').trim().toLowerCase();
+    var qHex = normalizeMacHex(qRaw);
+    var isMacQuery = (qHex.length >= 3 && /^[0-9a-f:.\-\s]+$/i.test(qRaw));
+
+    var devByMacHex = {};
+    var matchedItems = [];
+
+    for (var i = 0; i < AppState.devices.length; i++) {
+        var d = AppState.devices[i];
+        var dMacHex = normalizeMacHex(d.mac_address);
+        if (dMacHex.length === 12) {
+            devByMacHex[dMacHex] = d;
+        }
+
+        var spInfo = getDeviceSwitchPortInfo(d);
+        var hay = (
+            (d.ip_address || '') + ' ' +
+            (d.custom_name || '') + ' ' +
+            (d.hostname || '') + ' ' +
+            (d.mac_address || '') + ' ' +
+            (d.vendor || '') + ' ' +
+            (d.custom_group || '') + ' ' +
+            (spInfo ? spInfo.searchString : '')
+        ).toLowerCase();
+
+        var match = false;
+        if (qRaw === '') {
+            // Ohne Suchbegriff: Zeige alle Geräte, die an einem Switch-Port hängen oder eine bekannte MAC haben
+            match = !!(spInfo && spInfo.isSwitchPort) || (d.mac_address && d.device_type !== 'router');
+        } else if (hay.indexOf(qRaw) !== -1) {
+            match = true;
+        } else if (isMacQuery && dMacHex.indexOf(qHex) !== -1) {
+            match = true;
+        }
+
+        if (match) {
+            matchedItems.push({
+                kind: 'device',
+                dev: d,
+                mac: d.mac_address || '-',
+                spInfo: spInfo
+            });
+        }
+    }
+
+    // Durchsuche zusätzlich alle Switch-MAC-Tabellen nach gelernten MAC-Adressen, die noch keinem IP-Host zugeordnet sind
+    for (var s = 0; s < AppState.devices.length; s++) {
+        var sw = AppState.devices[s];
+        if (!sw.snmp_ports_json) continue;
+        var snmp = null;
+        try { snmp = JSON.parse(sw.snmp_ports_json); } catch (e) {}
+        if (!snmp || !snmp.mac_table) continue;
+
+        var swName = sw.custom_name || sw.snmp_sysname || sw.hostname || sw.ip_address;
+        var mKeys = Object.keys(snmp.mac_table);
+        for (var mk = 0; mk < mKeys.length; mk++) {
+            var rawMac = mKeys[mk];
+            var mHex = normalizeMacHex(rawMac);
+            if (devByMacHex[mHex]) continue; // Bereits über das bekannte Gerät erfasst
+
+            var mEntry = snmp.mac_table[rawMac];
+            var pName = mEntry.port_name || ('Port ' + mEntry.bridge_port);
+            var pVlan = mEntry.vlan ? parseInt(mEntry.vlan, 10) : 1;
+            var hayRaw = (rawMac + ' ' + swName + ' ' + sw.ip_address + ' ' + pName + ' vlan ' + pVlan).toLowerCase();
+
+            var rawMatch = false;
+            if (qRaw === '') {
+                rawMatch = true;
+            } else if (hayRaw.indexOf(qRaw) !== -1) {
+                rawMatch = true;
+            } else if (isMacQuery && mHex.indexOf(qHex) !== -1) {
+                rawMatch = true;
+            }
+
+            if (rawMatch) {
+                matchedItems.push({
+                    kind: 'raw_mac',
+                    dev: null,
+                    mac: rawMac,
+                    spInfo: {
+                        switchId: sw.id,
+                        switchName: swName,
+                        switchIp: sw.ip_address,
+                        switchType: 'switch',
+                        portName: pName,
+                        vlan: pVlan,
+                        alias: '',
+                        isSwitchPort: true,
+                        sightings: [{
+                            switchId: sw.id,
+                            switchName: swName,
+                            switchIp: sw.ip_address,
+                            portName: pName,
+                            vlan: pVlan,
+                            alias: '',
+                            isUplink: false
+                        }]
+                    }
+                });
+            }
+        }
+    }
+
+    // Sortiere Treffer mit echtem Switch-Port zuerst
+    matchedItems.sort(function (a, b) {
+        var aSw = (a.spInfo && a.spInfo.isSwitchPort) ? 1 : 0;
+        var bSw = (b.spInfo && b.spInfo.isSwitchPort) ? 1 : 0;
+        if (aSw !== bSw) return bSw - aSw;
+        var aIp = a.dev ? ipToNumeric(a.dev.ip_address) : 9999999999;
+        var bIp = b.dev ? ipToNumeric(b.dev.ip_address) : 9999999999;
+        return aIp - bIp;
+    });
+
+    if (matchedItems.length === 0) {
+        container.innerHTML = '<div style="padding:24px;text-align:center;color:var(--text-secondary);background:rgba(15,23,42,0.5);border-radius:8px;border:1px solid var(--border-color);">Keine passende MAC-Adresse, IP oder Switch-Port für <b>' + escapeHtml(inp.value) + '</b> gefunden.</div>';
+        return;
+    }
+
+    var html = '<div style="font-size:12px;color:var(--text-secondary);font-weight:600;">' + matchedItems.length + ' Treffer gefunden' + (qRaw === '' ? ' (Übersicht aller bekannten MAC-Adressen &amp; Switch-Port-Zuordnungen)' : '') + ':</div>';
+
+    for (var r = 0; r < matchedItems.length; r++) {
+        var item = matchedItems[r];
+        var dObj = item.dev;
+        var sp = item.spInfo;
+        var dTitle = dObj ? (dObj.custom_name || dObj.hostname || dObj.snmp_sysname || dObj.ip_address) : 'Unbekanntes Layer-2 Gerät (Nur MAC in Switch-Tabelle)';
+        var dIp = dObj ? dObj.ip_address : 'Keine IP im ARP';
+        var dVendor = dObj ? (dObj.vendor || 'Unbekannt') : 'Über Switch Bridge-MIB gelernt';
+        var stBadge = dObj
+            ? ('<span class="badge badge-' + dObj.status + '">' + escapeHtml(dObj.status.toUpperCase()) + '</span>')
+            : '<span class="badge badge-snmp">L2 MAC AKTIV</span>';
+        var coreTag = (dObj && parseInt(dObj.is_core || 0, 10) === 1)
+            ? ' <span class="badge" style="background:rgba(168,85,247,0.25);border:1px solid #a855f7;color:#e9d5ff;">🔒 CORE-SWITCH</span>'
+            : '';
+
+        var portSectionHtml = '';
+        if (sp && sp.isSwitchPort) {
+            var vlanTxt = sp.vlan ? (' • <b style="color:#fde68a;">VLAN ' + sp.vlan + '</b>') : '';
+            var aliasTxt = sp.alias ? (' <span style="color:#cbd5e1;">(' + escapeHtml(sp.alias) + ')</span>') : '';
+            portSectionHtml += '<div style="background:rgba(16,185,129,0.14);border:1px solid rgba(16,185,129,0.45);border-radius:6px;padding:7px 11px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-top:6px;">' +
+                '<div style="font-size:12.5px;">' +
+                    '<span style="color:#34d399;font-weight:700;">🟢 Gesteckt auf Switch:</span> ' +
+                    '<b style="color:#f8fafc;">' + escapeHtml(sp.switchName) + '</b> <span style="font-family:monospace;color:#93c5fd;">(' + escapeHtml(sp.switchIp) + ')</span> ' +
+                    '➔ <span class="badge" style="background:#065f46;border:1px solid #10b981;color:#a7f3d0;font-family:monospace;font-size:12.5px;padding:3px 8px;">Port ' + escapeHtml(sp.portName) + '</span>' +
+                    vlanTxt + aliasTxt +
+                '</div>' +
+                '<button class="btn btn-sm btn-primary" onclick="closeMacFinderModal(); openSwitchGraphicModal(' + sp.switchId + ', false, \'' + escapeHtml(sp.portName) + '\');">🎛 Port am Switch öffnen / VLAN ändern</button>' +
+            '</div>';
+
+            if (sp.sightings && sp.sightings.length > 1) {
+                for (var sg = 0; sg < sp.sightings.length; sg++) {
+                    var sItem = sp.sightings[sg];
+                    if (sItem.switchId === sp.switchId && sItem.portName === sp.portName) continue;
+                    portSectionHtml += '<div style="font-size:11.5px;color:var(--text-secondary);margin-top:4px;padding-left:6px;">' +
+                        '🔗 Zusätzlich gesehen auf <b>' + escapeHtml(sItem.switchName) + '</b> an Port <code>' + escapeHtml(sItem.portName) + '</code> (VLAN ' + sItem.vlan + (sItem.isUplink ? ' – Uplink/Trunk' : '') + ')' +
+                    '</div>';
+                }
+            }
+        } else if (sp) {
+            portSectionHtml += '<div style="font-size:12px;color:var(--text-secondary);margin-top:6px;">' +
+                '🌐 Verbunden über Gateway / Subnetz: <b>' + escapeHtml(sp.switchName) + '</b> (' + escapeHtml(sp.switchIp) + ')' +
+            '</div>';
+        } else {
+            portSectionHtml += '<div style="font-size:12px;color:var(--text-secondary);margin-top:6px;">Kein untergeordneter Switch-Port (Root-/Infrastruktur-Knoten).</div>';
+        }
+
+        html += '<div style="background:var(--bg-panel);border:1px solid var(--border-color);border-radius:8px;padding:12px;">' +
+            '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">' +
+                '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">' +
+                    stBadge +
+                    '<span style="font-weight:700;font-size:14px;color:#f8fafc;">' + escapeHtml(dTitle) + '</span>' +
+                    coreTag +
+                    '<span style="font-family:monospace;font-weight:700;color:#93c5fd;">IP: ' + escapeHtml(dIp) + '</span>' +
+                    '<span class="badge" style="background:rgba(59,130,246,0.18);border:1px solid rgba(59,130,246,0.4);color:#bfdbfe;font-family:monospace;font-size:12px;">MAC: ' + escapeHtml(item.mac) + '</span>' +
+                    '<span style="font-size:12px;color:var(--text-secondary);">(' + escapeHtml(dVendor) + ')</span>' +
+                '</div>' +
+                (dObj ? ('<button class="btn btn-sm" onclick="closeMacFinderModal(); selectDevice(' + dObj.id + ');">📍 Im Plan zeigen</button>') : '') +
+            '</div>' +
+            portSectionHtml +
+        '</div>';
+    }
+
+    container.innerHTML = html;
 }
 
 function loadTopologyData(callback) {
@@ -689,8 +1030,15 @@ function getFilteredDevicesAndLinks() {
             continue;
         }
         if (searchVal !== '') {
-            var hay = ((d.ip_address || '') + ' ' + (d.hostname || '') + ' ' + (d.custom_name || '') + ' ' + (d.custom_group || '') + ' ' + (d.mac_address || '') + ' ' + (d.vendor || '')).toLowerCase();
-            if (hay.indexOf(searchVal) === -1) {
+            var spInfoMap = getDeviceSwitchPortInfo(d);
+            var hay = ((d.ip_address || '') + ' ' + (d.hostname || '') + ' ' + (d.custom_name || '') + ' ' + (d.custom_group || '') + ' ' + (d.mac_address || '') + ' ' + (d.vendor || '') + ' ' + (spInfoMap ? spInfoMap.searchString : '')).toLowerCase();
+            var sHex = normalizeMacHex(searchVal);
+            var dHex = normalizeMacHex(d.mac_address);
+            var macMatch = (sHex.length >= 3 && /^[0-9a-f:.\-\s]+$/i.test(searchVal) && dHex.indexOf(sHex) !== -1);
+            if (!macMatch && sHex.length >= 4 && d.snmp_ports_json && normalizeMacHex(d.snmp_ports_json).indexOf(sHex) !== -1) {
+                macMatch = true;
+            }
+            if (hay.indexOf(searchVal) === -1 && !macMatch) {
                 continue;
             }
         }
@@ -2013,11 +2361,34 @@ function selectDevice(deviceId) {
         alertBadgeHtml = '<span class="badge" style="background:rgba(59,130,246,0.2);color:#93c5fd;">🔔 Online &amp; Offline</span>';
     }
 
+    var isCoreDev = parseInt(dev.is_core || 0, 10) === 1;
+    var coreCheckboxHtml = '';
+    if (userIsNetExpert()) {
+        coreCheckboxHtml =
+            '<label style="display:flex;align-items:center;gap:8px;background:rgba(168,85,247,0.12);border:1px solid rgba(168,85,247,0.45);border-radius:6px;padding:8px 10px;cursor:pointer;font-size:12px;color:#e9d5ff;">' +
+                '<input type="checkbox" id="edit-dev-iscore" ' + (isCoreDev ? 'checked' : '') + '>' +
+                '<span><b>🔒 Als Core-Switch / Kritische Infrastruktur schützen</b> (Wird vor <i>Viewer</i> &amp; <i>Operator</i> komplett ausgeblendet &amp; gesperrt)</span>' +
+            '</label>';
+    }
+
+    var spInfo = getDeviceSwitchPortInfo(dev);
+    var switchPortInspectorHtml = '<span style="color:var(--text-secondary);">Kein Switch-Port zugeordnet</span>';
+    if (spInfo && spInfo.switchId) {
+        switchPortInspectorHtml =
+            '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">' +
+                '<span style="font-weight:700;color:#f8fafc;">' + escapeHtml(spInfo.switchName) + '</span>' +
+                '<span class="badge" style="background:rgba(16,185,129,0.2);border:1px solid #10b981;color:#34d399;font-family:monospace;">Port ' + escapeHtml(spInfo.portName || '-') + '</span>' +
+                (spInfo.vlan ? '<span class="badge" style="background:rgba(245,158,11,0.22);border:1px solid #f59e0b;color:#fcd34d;font-family:monospace;">VLAN ' + spInfo.vlan + '</span>' : '') +
+                '<button class="btn btn-sm" style="padding:2px 7px;font-size:11px;border-color:#10b981;color:#6ee7b7;" onclick="openSwitchGraphicModal(' + spInfo.switchId + ', false, \'' + escapeHtml(spInfo.portName || '') + '\')">🎛 Port öffnen</button>' +
+            '</div>';
+    }
+
     var editFormHtml = '';
     if (userCanEdit()) {
         editFormHtml =
             '<div style="border-top:1px solid var(--border-color);padding-top:12px;display:flex;flex-direction:column;gap:10px;">' +
                 '<div class="panel-title">Gerät, Alarm &amp; Switch-Port anpassen</div>' +
+                coreCheckboxHtml +
                 '<div class="form-group">' +
                     '<label style="color:#fcd34d;font-weight:700;">🔔 Alarm-Überwachung (Online / Offline)</label>' +
                     '<select id="edit-dev-alert" class="select-input" style="border-color:rgba(245,158,11,0.45);">' + alertOpts + '</select>' +
@@ -2059,7 +2430,7 @@ function selectDevice(deviceId) {
     } else {
         editFormHtml =
             '<div style="border-top:1px solid var(--border-color);padding-top:10px;font-size:12px;color:var(--text-secondary);">' +
-                'Angemeldet als <b>Betrachter (Nur Lesen)</b>. Zum Bearbeiten von Geräten ist die Rolle <i>Operator</i> oder <i>Administrator</i> erforderlich.' +
+                'Angemeldet als <b>Betrachter (Nur Lesen)</b>. Zum Bearbeiten von Geräten ist die Rolle <i>Operator</i>, <i>Netzwerkexperte</i> oder <i>Administrator</i> erforderlich.' +
             '</div>';
     }
 
@@ -2068,8 +2439,15 @@ function selectDevice(deviceId) {
         ? '<button class="btn btn-sm" style="width:100%;justify-content:center;border-color:#10b981;background:linear-gradient(90deg, rgba(16,185,129,0.22), rgba(59,130,246,0.22));color:#a7f3d0;font-weight:700;padding:8px 10px;margin-bottom:4px;" onclick="openSwitchGraphicModal(' + dev.id + ', false)">🎛 Grafische Switch-Belegung, Uplinks &amp; Stacking öffnen</button>'
         : '';
 
+    var coreBannerHtml = isCoreDev
+        ? '<div style="background:rgba(168,85,247,0.18);border:1px solid #a855f7;border-radius:6px;padding:6px 10px;margin-bottom:6px;font-size:11.5px;color:#e9d5ff;font-weight:700;display:flex;align-items:center;justify-content:space-between;">' +
+            '<span>🔒 CORE-SWITCH / KRITISCHE INFRASTRUKTUR</span>' +
+            '<span class="badge" style="background:#a855f7;color:#0f172a;font-size:10px;">NUR NETADMIN / ADMIN</span>' +
+          '</div>'
+        : '';
+
     var isFocused = (AppState.focusDeviceId === parseInt(dev.id, 10));
-    var focusBtnHtml = switchGraphicBtnHtml + '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:4px;">' +
+    var focusBtnHtml = coreBannerHtml + switchGraphicBtnHtml + '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:4px;">' +
         (isFocused
             ? '<button class="btn btn-sm" style="flex:1;justify-content:center;border-color:#60a5fa;background:rgba(59,130,246,0.2);color:#93c5fd;" onclick="setFocusDevice(null)">✕ Fokus-Modus beenden (Alle zeigen)</button>'
             : '<button class="btn btn-sm" style="flex:1;justify-content:center;border-color:rgba(96,165,250,0.45);color:#93c5fd;" onclick="setFocusDevice(' + dev.id + ')">🎯 Fokus: Gerät &amp; Nachbarn isolieren</button>') +
@@ -2082,9 +2460,10 @@ function selectDevice(deviceId) {
         focusBtnHtml +
         '<div class="kv-grid">' +
             '<div class="kv-label">Status</div><div class="kv-val"><span class="badge badge-' + dev.status + '">' + dev.status.toUpperCase() + '</span> (' + (dev.latency_ms || '1.0') + ' ms)</div>' +
+            '<div class="kv-label">Steckplatz (Port)</div><div class="kv-val">' + switchPortInspectorHtml + '</div>' +
             '<div class="kv-label">Alarm-Modus</div><div class="kv-val">' + alertBadgeHtml + '</div>' +
             '<div class="kv-label">IP-Adresse</div><div class="kv-val">' + escapeHtml(dev.ip_address) + '</div>' +
-            '<div class="kv-label">MAC-Adresse</div><div class="kv-val">' + escapeHtml(dev.mac_address || 'Nicht im lokalen ARP') + '</div>' +
+            '<div class="kv-label">MAC-Adresse</div><div class="kv-val" style="font-family:monospace;">' + escapeHtml(dev.mac_address || 'Nicht im lokalen ARP') + '</div>' +
             '<div class="kv-label">Hersteller</div><div class="kv-val">' + escapeHtml(dev.vendor || 'Unbekannt') + '</div>' +
             '<div class="kv-label">Hostname</div><div class="kv-val">' + escapeHtml(dev.hostname || '-') + '</div>' +
             '<div class="kv-label">Betriebssystem</div><div class="kv-val" style="color:#a7f3d0;font-weight:600;">' + escapeHtml(dev.os_guess || '-') + '</div>' +
@@ -2098,6 +2477,7 @@ function selectDevice(deviceId) {
 
 function saveDeviceChanges(devId) {
     var alertEl = document.getElementById('edit-dev-alert');
+    var isCoreEl = document.getElementById('edit-dev-iscore');
     var payload = {
         id: devId,
         custom_name: document.getElementById('edit-dev-name').value,
@@ -2108,6 +2488,9 @@ function saveDeviceChanges(devId) {
         parent_port: document.getElementById('edit-dev-port').value,
         notes: document.getElementById('edit-dev-notes').value
     };
+    if (isCoreEl) {
+        payload.is_core = isCoreEl.checked ? 1 : 0;
+    }
     fetch('api.php?action=save_device', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -2414,18 +2797,19 @@ function deleteScope(scopeId) {
 }
 
 var INV_COLUMNS = [
-    { key: 'visible',     label: 'Im Plan',                   defaultShow: true },
-    { key: 'status',      label: 'Status',                    defaultShow: true },
-    { key: 'ip_address',  label: 'IP-Adresse',                defaultShow: true },
-    { key: 'name',        label: 'Hostname / Bezeichnung',    defaultShow: true },
-    { key: 'device_type', label: 'Typ',                       defaultShow: true },
-    { key: 'os_guess',    label: 'Betriebssystem & Dienste',  defaultShow: true },
-    { key: 'mac_address', label: 'MAC-Adresse',               defaultShow: true },
-    { key: 'vendor',      label: 'Hersteller (OUI)',          defaultShow: true },
-    { key: 'open_ports',  label: 'Offene TCP-Ports',          defaultShow: true },
-    { key: 'snmp',        label: 'SNMP Details',              defaultShow: true },
-    { key: 'scope_name',  label: 'Netzwerk-Scope',            defaultShow: true },
-    { key: 'last_seen',   label: 'Zuletzt gesehen',           defaultShow: false }
+    { key: 'visible',     label: 'Im Plan',                     defaultShow: true },
+    { key: 'status',      label: 'Status',                      defaultShow: true },
+    { key: 'ip_address',  label: 'IP-Adresse',                  defaultShow: true },
+    { key: 'name',        label: 'Hostname / Bezeichnung',      defaultShow: true },
+    { key: 'device_type', label: 'Typ',                         defaultShow: true },
+    { key: 'switch_port', label: 'Switch / Port (Steckplatz)',  defaultShow: true },
+    { key: 'mac_address', label: 'MAC-Adresse',                 defaultShow: true },
+    { key: 'vendor',      label: 'Hersteller (OUI)',            defaultShow: true },
+    { key: 'os_guess',    label: 'Betriebssystem & Dienste',    defaultShow: true },
+    { key: 'open_ports',  label: 'Offene TCP-Ports',            defaultShow: true },
+    { key: 'snmp',        label: 'SNMP Details',                defaultShow: true },
+    { key: 'scope_name',  label: 'Netzwerk-Scope',              defaultShow: true },
+    { key: 'last_seen',   label: 'Zuletzt gesehen',             defaultShow: false }
 ];
 
 var InvTableState = {
@@ -2529,12 +2913,15 @@ function renderInventoryTable() {
     if (thead) thead.innerHTML = thHtml;
 
     // 3. Geräte filtern & nach gewählter Spalte sortieren
+    var searchMacHex = normalizeMacHex(search);
     var rowsData = [];
     for (var i = 0; i < AppState.devices.length; i++) {
         var d = AppState.devices[i];
         if (AppState.selectedScopeId !== 'all' && String(d.scope_id) !== String(AppState.selectedScopeId)) {
             continue;
         }
+        var spInfo = getDeviceSwitchPortInfo(d);
+        d._spInfo = spInfo;
         if (search !== '') {
             var hay = (
                 (d.ip_address || '') + ' ' +
@@ -2545,9 +2932,17 @@ function renderInventoryTable() {
                 (d.os_guess || '') + ' ' +
                 (d.service_info || '') + ' ' +
                 (d.open_ports || '') + ' ' +
-                (d.custom_group || '')
+                (d.custom_group || '') + ' ' +
+                (spInfo ? spInfo.searchString : '')
             ).toLowerCase();
-            if (hay.indexOf(search) === -1) continue;
+            var matched = (hay.indexOf(search) !== -1);
+            if (!matched && searchMacHex.length >= 2) {
+                var devMacHex = normalizeMacHex(d.mac_address || '');
+                if (devMacHex && devMacHex.indexOf(searchMacHex) !== -1) {
+                    matched = true;
+                }
+            }
+            if (!matched) continue;
         }
         rowsData.push(d);
     }
@@ -2569,6 +2964,9 @@ function renderInventoryTable() {
         if (sk === 'name') {
             va = (a.custom_name || a.hostname || '').toLowerCase();
             vb = (b.custom_name || b.hostname || '').toLowerCase();
+        } else if (sk === 'switch_port') {
+            va = (a._spInfo ? a._spInfo.searchString : '').toLowerCase();
+            vb = (b._spInfo ? b._spInfo.searchString : '').toLowerCase();
         } else if (sk === 'os_guess') {
             va = ((a.os_guess || '') + ' ' + (a.service_info || '')).toLowerCase();
             vb = ((b.os_guess || '') + ' ' + (b.service_info || '')).toLowerCase();
@@ -2589,12 +2987,26 @@ function renderInventoryTable() {
         var visChk = '<input type="checkbox" ' + (isVisible ? 'checked' : '') + (userCanEdit() ? '' : ' disabled') +
                      ' onchange="toggleSingleDeviceHidden(' + dev.id + ', this.checked ? 0 : 1)" title="Im Netzwerkplan anzeigen">';
         var grpInfo = dev.custom_group ? (' <span class="badge" style="background:rgba(245,158,11,0.2);color:#fcd34d;">' + escapeHtml(dev.custom_group) + '</span>') : '';
+        var coreTag = (parseInt(dev.is_core || 0, 10) === 1)
+            ? ' <span class="badge" style="background:rgba(168,85,247,0.25);border:1px solid #a855f7;color:#e9d5ff;" title="Geschützter Core-Switch (Nur für Netzwerkexperten &amp; Admins sichtbar)">🔒 CORE</span>'
+            : '';
         var alertTag = (dev.alert_mode && dev.alert_mode !== 'none')
             ? (' <span class="badge" style="background:rgba(239,68,68,0.18);color:#fca5a5;" title="Alarm-Überwachung aktiv (' + escapeHtml(dev.alert_mode) + ')">🔔</span>')
             : '';
         var snmpBadge = parseInt(dev.snmp_enabled, 10) === 1
             ? '<button class="btn btn-sm" style="background:rgba(16,185,129,0.16);border-color:#10b981;color:#34d399;padding:2px 8px;font-size:11px;" onclick="event.stopPropagation(); openSnmpModal(' + dev.id + ');">🔍 SNMP (' + escapeHtml(dev.snmp_sysname || 'Details') + ')</button>'
             : '-';
+
+        var spCellHtml = '-';
+        if (dev._spInfo && dev._spInfo.switchId) {
+            var spObj = dev._spInfo;
+            var vlanPart = spObj.vlan ? (' <span style="color:#fcd34d;">(V' + spObj.vlan + ')</span>') : '';
+            spCellHtml = '<button class="btn btn-sm" style="background:rgba(59,130,246,0.15);border-color:rgba(59,130,246,0.45);color:#93c5fd;padding:2px 8px;font-size:11px;font-family:monospace;" ' +
+                'onclick="event.stopPropagation(); openSwitchGraphicModal(' + spObj.switchId + ', false, \'' + escapeHtml(spObj.portName || '') + '\');" ' +
+                'title="Klicken, um Switch ' + escapeHtml(spObj.switchName) + ' an Port ' + escapeHtml(spObj.portName || '-') + ' zu öffnen">' +
+                '🎛 ' + escapeHtml(spObj.switchName) + ' • <b>' + escapeHtml(spObj.portName || '-') + '</b>' + vlanPart +
+            '</button>';
+        }
 
         var osAndBanner = '<div style="font-weight:600;color:#a7f3d0;">' + escapeHtml(dev.os_guess || '-') + '</div>' +
             (dev.service_info ? ('<div style="font-size:11px;color:var(--text-secondary);margin-top:2px;">' + escapeHtml(dev.service_info) + '</div>') : '');
@@ -2609,9 +3021,11 @@ function renderInventoryTable() {
             } else if (ck === 'ip_address') {
                 html += '<td style="font-family:monospace;font-weight:600;color:#93c5fd;">' + escapeHtml(dev.ip_address) + '</td>';
             } else if (ck === 'name') {
-                html += '<td>' + escapeHtml(dev.custom_name || dev.hostname || '-') + grpInfo + '</td>';
+                html += '<td>' + escapeHtml(dev.custom_name || dev.hostname || '-') + grpInfo + coreTag + '</td>';
             } else if (ck === 'device_type') {
                 html += '<td>' + escapeHtml((dev.device_type || '').toUpperCase()) + '</td>';
+            } else if (ck === 'switch_port') {
+                html += '<td>' + spCellHtml + '</td>';
             } else if (ck === 'os_guess') {
                 html += '<td>' + osAndBanner + '</td>';
             } else if (ck === 'mac_address') {
@@ -3258,6 +3672,7 @@ function buildRealSwitchGraphicModel(dev) {
 
     return {
         isDemo: false,
+        isCore: parseInt(dev.is_core || 0, 10) === 1,
         snmpEnabled: parseInt(dev.snmp_enabled || 0, 10) === 1,
         deviceType: dev.device_type,
         switchName: swName,
@@ -3310,13 +3725,17 @@ function openSwitchGraphicModal(devId, isDemoPreview, keepSelectedPortName) {
     SwitchGraphicState.selectedPortKey = null;
 
     var isStacked = model.units.length > 1;
+    var coreHeaderBadge = model.isCore
+        ? ' <span class="badge" style="background:rgba(168,85,247,0.3);border:1px solid #a855f7;color:#e9d5ff;margin-left:8px;">🔒 CORE-SWITCH (Nur NetAdmin / Admin)</span>'
+        : '';
     titleEl.innerHTML = '🎛 ' + escapeHtml(model.switchName) + ' <span style="font-family:monospace;color:#93c5fd;font-size:14px;">(' + escapeHtml(model.switchIp) + ')</span>' +
+        coreHeaderBadge +
         (isStacked ? (' <span class="badge" style="background:rgba(168,85,247,0.25);border:1px solid #a855f7;color:#e9d5ff;margin-left:8px;">📚 STACK: ' + model.units.length + ' SWITCHE</span>') : '');
 
     var html = '';
 
     // =========================================================================
-    // 0. SSH / SNMP ZUGANGSDATEN & MULTI-VENDOR KONFIGURATIONS-LEISTE (für Operator / Admin)
+    // 0. SSH / SNMP ZUGANGSDATEN & MULTI-VENDOR KONFIGURATIONS-LEISTE
     // =========================================================================
     if (!model.isDemo && userCanEdit()) {
         var sshBadge = (model.cliProfile === 'snmp_set')
@@ -3359,6 +3778,50 @@ function openSwitchGraphicModal(devId, isDemoPreview, keepSelectedPortName) {
             profOptsHtml += '<option value="' + profList[pr].k + '" ' + psel + '>' + escapeHtml(profList[pr].l) + '</option>';
         }
 
+        var credsFormBlock = '';
+        if (userIsNetExpert()) {
+            credsFormBlock =
+                '<div id="sw-creds-form-box" style="display:' + (model.hasSshPass ? 'none' : 'block') + ';border-top:1px dashed rgba(148,163,184,0.25);padding-top:10px;">' +
+                    '<div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(195px, 1fr));gap:10px;align-items:end;">' +
+                        '<div class="form-group" style="margin:0;">' +
+                            '<label>Hersteller / CLI-Befehlsprofil</label>' +
+                            '<select id="sw-cred-cli-profile" class="select-input">' + profOptsHtml + '</select>' +
+                        '</div>' +
+                        '<div class="form-group" style="margin:0;">' +
+                            '<label>SSH-Benutzername (Switch CLI)</label>' +
+                            '<input type="text" id="sw-cred-ssh-user" class="form-input" value="' + escapeHtml(model.sshUser || 'cisco') + '" placeholder="z.B. cisco oder admin">' +
+                        '</div>' +
+                        '<div class="form-group" style="margin:0;">' +
+                            '<label>SSH-Passwort ' + (model.hasSshPass ? '<span style="color:#34d399;">(gespeichert)</span>' : '') + '</label>' +
+                            '<input type="password" id="sw-cred-ssh-pass" class="form-input" value="" placeholder="' + (model.hasSshPass ? '•••••••• (leer = behalten)' : 'SSH-Passwort eingeben') + '">' +
+                        '</div>' +
+                        '<div class="form-group" style="margin:0;">' +
+                            '<label>Enable-Secret (optional für Cisco IOS)</label>' +
+                            '<input type="password" id="sw-cred-enable-pass" class="form-input" value="" placeholder="' + (model.hasEnablePass ? '•••••••• (gespeichert)' : 'Leer = wie SSH-Passwort') + '">' +
+                        '</div>' +
+                        '<div class="form-group" style="margin:0;">' +
+                            '<label>SNMPv2c Lese-Community</label>' +
+                            '<input type="text" id="sw-cred-snmp-comm" class="form-input" value="' + escapeHtml(model.snmpCommunity || 'public') + '" placeholder="public">' +
+                        '</div>' +
+                        '<div class="form-group" style="margin:0;">' +
+                            '<label>SNMP Write-Community (optional)</label>' +
+                            '<input type="password" id="sw-cred-snmp-write" class="form-input" value="" placeholder="' + (model.hasSnmpWrite ? '•••••••• (gespeichert)' : 'Optional für SNMP-SET') + '">' +
+                        '</div>' +
+                        '<div style="display:flex;gap:8px;flex-wrap:wrap;">' +
+                            '<button id="btn-save-sw-creds" class="btn btn-primary btn-sm" style="padding:8px 12px;" onclick="saveSwitchCredentials(' + devId + ', true)">🔌 Speichern &amp; testen</button>' +
+                            '<button class="btn btn-sm" style="padding:8px 10px;" onclick="saveSwitchCredentials(' + devId + ', false)">💾 Speichern</button>' +
+                        '</div>' +
+                    '</div>' +
+                    '<div style="margin-top:10px;padding-top:8px;border-top:1px solid rgba(148,163,184,0.18);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">' +
+                        '<label style="display:flex;align-items:center;gap:8px;font-size:12px;color:#e9d5ff;cursor:pointer;">' +
+                            '<input type="checkbox" id="sw-cred-is-core" ' + (model.isCore ? 'checked' : '') + '>' +
+                            '<span><b>🔒 Als Core-Switch / Kritische Infrastruktur einstufen</b> (Wird vor Betrachtern &amp; Technikern/Operatoren komplett verborgen &amp; gesperrt)</span>' +
+                        '</label>' +
+                    '</div>' +
+                    '<div id="sw-creds-status-msg" style="margin-top:8px;font-size:12px;display:none;"></div>' +
+                '</div>';
+        }
+
         html += '<div style="background:rgba(15,23,42,0.85);border:1px solid rgba(59,130,246,0.38);border-radius:10px;padding:10px 14px;display:flex;flex-direction:column;gap:10px;">' +
             '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">' +
                 '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">' +
@@ -3368,41 +3831,11 @@ function openSwitchGraphicModal(devId, isDemoPreview, keepSelectedPortName) {
                     '<span style="font-size:11.5px;color:var(--text-secondary);">VLANs (' + vlanCount + '):</span>' +
                     vlanSummaryPills +
                 '</div>' +
-                '<button class="btn btn-sm" style="border-color:#60a5fa;color:#93c5fd;" onclick="toggleSwitchCredsForm()">🔑 Zugangsdaten &amp; Hersteller-Profil ' + (model.hasSshPass ? 'ändern / testen' : 'einrichten') + '</button>' +
+                (userIsNetExpert()
+                    ? '<button class="btn btn-sm" style="border-color:#60a5fa;color:#93c5fd;" onclick="toggleSwitchCredsForm()">🔑 Zugangsdaten, Core-Schutz &amp; Hersteller-Profil ' + (model.hasSshPass ? 'ändern / testen' : 'einrichten') + '</button>'
+                    : '<span class="badge" style="background:rgba(148,163,184,0.18);color:#cbd5e1;">🔒 SSH-Zugangsdaten &amp; Trunks nur für Netzwerkexperten (netadmin)</span>') +
             '</div>' +
-            '<div id="sw-creds-form-box" style="display:' + (model.hasSshPass ? 'none' : 'block') + ';border-top:1px dashed rgba(148,163,184,0.25);padding-top:10px;">' +
-                '<div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(195px, 1fr));gap:10px;align-items:end;">' +
-                    '<div class="form-group" style="margin:0;">' +
-                        '<label>Hersteller / CLI-Befehlsprofil</label>' +
-                        '<select id="sw-cred-cli-profile" class="select-input">' + profOptsHtml + '</select>' +
-                    '</div>' +
-                    '<div class="form-group" style="margin:0;">' +
-                        '<label>SSH-Benutzername (Switch CLI)</label>' +
-                        '<input type="text" id="sw-cred-ssh-user" class="form-input" value="' + escapeHtml(model.sshUser || 'cisco') + '" placeholder="z.B. cisco oder admin">' +
-                    '</div>' +
-                    '<div class="form-group" style="margin:0;">' +
-                        '<label>SSH-Passwort ' + (model.hasSshPass ? '<span style="color:#34d399;">(gespeichert)</span>' : '') + '</label>' +
-                        '<input type="password" id="sw-cred-ssh-pass" class="form-input" value="" placeholder="' + (model.hasSshPass ? '•••••••• (leer = behalten)' : 'SSH-Passwort eingeben') + '">' +
-                    '</div>' +
-                    '<div class="form-group" style="margin:0;">' +
-                        '<label>Enable-Secret (optional für Cisco IOS)</label>' +
-                        '<input type="password" id="sw-cred-enable-pass" class="form-input" value="" placeholder="' + (model.hasEnablePass ? '•••••••• (gespeichert)' : 'Leer = wie SSH-Passwort') + '">' +
-                    '</div>' +
-                    '<div class="form-group" style="margin:0;">' +
-                        '<label>SNMPv2c Lese-Community</label>' +
-                        '<input type="text" id="sw-cred-snmp-comm" class="form-input" value="' + escapeHtml(model.snmpCommunity || 'public') + '" placeholder="public">' +
-                    '</div>' +
-                    '<div class="form-group" style="margin:0;">' +
-                        '<label>SNMP Write-Community (optional)</label>' +
-                        '<input type="password" id="sw-cred-snmp-write" class="form-input" value="" placeholder="' + (model.hasSnmpWrite ? '•••••••• (gespeichert)' : 'Optional für SNMP-SET') + '">' +
-                    '</div>' +
-                    '<div style="display:flex;gap:8px;flex-wrap:wrap;">' +
-                        '<button id="btn-save-sw-creds" class="btn btn-primary btn-sm" style="padding:8px 12px;" onclick="saveSwitchCredentials(' + devId + ', true)">🔌 Speichern &amp; testen</button>' +
-                        '<button class="btn btn-sm" style="padding:8px 10px;" onclick="saveSwitchCredentials(' + devId + ', false)">💾 Speichern</button>' +
-                    '</div>' +
-                '</div>' +
-                '<div id="sw-creds-status-msg" style="margin-top:8px;font-size:12px;display:none;"></div>' +
-            '</div>' +
+            credsFormBlock +
         '</div>';
     }
 
@@ -3818,7 +4251,9 @@ function selectSwitchGraphicPort(portKey) {
             var vsel = (vid === curVlan) ? 'selected' : '';
             vlanOpts += '<option value="' + vid + '" ' + vsel + '>' + escapeHtml(vlbl) + '</option>';
         }
-        vlanOpts += '<option value="__new__">➕ Neues VLAN auf Switch anlegen &amp; zuweisen...</option>';
+        if (userIsNetExpert()) {
+            vlanOpts += '<option value="__new__">➕ Neues VLAN auf Switch anlegen &amp; zuweisen...</option>';
+        }
 
         var uplinkWarnHtml = p.isUplink
             ? '<div style="background:rgba(239,68,68,0.16);border:1px solid #ef4444;border-radius:6px;padding:8px 12px;margin-bottom:10px;font-size:12px;color:#fecaca;">' +
@@ -3827,6 +4262,18 @@ function selectSwitchGraphicPort(portKey) {
             : '';
 
         var isTrunkMode = (p.port_mode === 'trunk' || p.isUplink);
+        if (!userIsNetExpert()) {
+            isTrunkMode = false;
+        }
+
+        var modeSelectHtml = userIsNetExpert()
+            ? '<select id="sw-port-mode-select" class="select-input" onchange="onSwitchPortModeChange()">' +
+                  '<option value="access" ' + (!isTrunkMode ? 'selected' : '') + '>🔌 Access-Port (1 Endgeräte-VLAN)</option>' +
+                  '<option value="trunk" ' + (isTrunkMode ? 'selected' : '') + '>🔗 802.1Q Trunk-Port (Uplink / AP / Core)</option>' +
+              '</select>'
+            : '<select id="sw-port-mode-select" class="select-input" disabled title="802.1Q Trunk-Konfiguration ist Netzwerkexperten (netadmin) vorbehalten">' +
+                  '<option value="access" selected>🔌 Access-Port (Operator-Modus)</option>' +
+              '</select>';
 
         sshConfigHtml =
             '<div style="margin-top:14px;padding-top:12px;border-top:1px solid rgba(59,130,246,0.35);">' +
@@ -3838,10 +4285,7 @@ function selectSwitchGraphicPort(portKey) {
                 '<div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(195px, 1fr));gap:10px;align-items:end;">' +
                     '<div class="form-group" style="margin:0;">' +
                         '<label>Switchport-Modus</label>' +
-                        '<select id="sw-port-mode-select" class="select-input" onchange="onSwitchPortModeChange()">' +
-                            '<option value="access" ' + (!isTrunkMode ? 'selected' : '') + '>🔌 Access-Port (1 Endgeräte-VLAN)</option>' +
-                            '<option value="trunk" ' + (isTrunkMode ? 'selected' : '') + '>🔗 802.1Q Trunk-Port (Uplink / AP / Core)</option>' +
-                        '</select>' +
+                        modeSelectHtml +
                     '</div>' +
                     '<div class="form-group" style="margin:0;">' +
                         '<label id="sw-port-vlan-label">' + (isTrunkMode ? 'Native VLAN (Ungetaggt auf Trunk)' : ('Access-VLAN (PVID) auf ' + escapeHtml(p.name))) + '</label>' +
@@ -3934,6 +4378,7 @@ function saveSwitchCredentials(devId, testConn) {
     var enPassEl = document.getElementById('sw-cred-enable-pass');
     var commEl = document.getElementById('sw-cred-snmp-comm');
     var writeEl = document.getElementById('sw-cred-snmp-write');
+    var isCoreEl = document.getElementById('sw-cred-is-core');
     var msgEl = document.getElementById('sw-creds-status-msg');
     var btnEl = document.getElementById('btn-save-sw-creds');
 
@@ -3947,6 +4392,9 @@ function saveSwitchCredentials(devId, testConn) {
         switch_snmp_write_community: writeEl ? writeEl.value : '',
         test_connection: testConn ? 1 : 0
     };
+    if (isCoreEl) {
+        payload.is_core = isCoreEl.checked ? 1 : 0;
+    }
 
     if (msgEl) {
         msgEl.style.display = 'block';
@@ -3981,6 +4429,9 @@ function saveSwitchCredentials(devId, testConn) {
                 AppState.devices[i].has_ssh_pass = res.has_ssh_pass ? 1 : 0;
                 AppState.devices[i].has_enable_pass = res.has_enable_pass ? 1 : 0;
                 AppState.devices[i].has_snmp_write = res.has_snmp_write ? 1 : 0;
+                if (res.is_core !== undefined) {
+                    AppState.devices[i].is_core = res.is_core ? 1 : 0;
+                }
                 if (res.cli_profile) {
                     AppState.devices[i].cli_profile = res.cli_profile;
                     AppState.devices[i].cli_profile_label = res.cli_profile_label;
@@ -4280,7 +4731,8 @@ function renderAdminSection() {
     var html = '';
     var roleLabels = {
         admin: '<span class="badge" style="background:rgba(16,185,129,0.2);color:#34d399;">ADMIN (Vollzugriff)</span>',
-        operator: '<span class="badge" style="background:rgba(59,130,246,0.2);color:#93c5fd;">OPERATOR (Scans &amp; Edit)</span>',
+        netadmin: '<span class="badge" style="background:rgba(168,85,247,0.22);border:1px solid #a855f7;color:#e9d5ff;">NETADMIN (Netzwerkexperte &amp; Core)</span>',
+        operator: '<span class="badge" style="background:rgba(59,130,246,0.2);color:#93c5fd;">OPERATOR (Access-Ports &amp; Scans)</span>',
         viewer: '<span class="badge" style="background:rgba(148,163,184,0.2);color:#cbd5e1;">VIEWER (Nur Lesen)</span>'
     };
 

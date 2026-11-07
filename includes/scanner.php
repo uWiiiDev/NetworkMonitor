@@ -799,16 +799,23 @@ class NetworkScanner
             ));
             return (int)$existing['id'];
         } else {
+            $autoIsCore = 0;
+            if ($data['device_type'] === 'switch' || $data['device_type'] === 'router') {
+                $coreHint = strtolower((string)$data['hostname'] . ' ' . (string)$data['snmp_sysname'] . ' ' . (string)$data['snmp_sysdescr']);
+                if (preg_match('/\b(core|sw-core|catalyst\s*9[3456]00|c9[3456]00|c65\d\d|c45\d\d|c3850|nexus)\b/i', $coreHint)) {
+                    $autoIsCore = 1;
+                }
+            }
             $ins = $this->pdo->prepare("
                 INSERT INTO devices (
                     scope_id, ip_address, mac_address, vendor, hostname, device_type,
                     os_guess, open_ports, service_info, snmp_enabled, snmp_sysname, snmp_sysdescr,
-                    snmp_sysobjectid, snmp_location, snmp_ports_json, status, latency_ms,
+                    snmp_sysobjectid, snmp_location, snmp_ports_json, status, latency_ms, is_core,
                     first_seen, last_seen
                 ) VALUES (
                     :scope_id, :ip_address, :mac_address, :vendor, :hostname, :device_type,
                     :os_guess, :open_ports, :service_info, :snmp_enabled, :snmp_sysname, :snmp_sysdescr,
-                    :snmp_sysobjectid, :snmp_location, :snmp_ports_json, :status, :latency_ms,
+                    :snmp_sysobjectid, :snmp_location, :snmp_ports_json, :status, :latency_ms, :is_core,
                     :first_seen, :last_seen
                 )
             ");
@@ -830,6 +837,7 @@ class NetworkScanner
                 ':snmp_ports_json' => $data['snmp_ports_json'],
                 ':status'          => $data['status'],
                 ':latency_ms'      => $data['latency_ms'],
+                ':is_core'         => $autoIsCore,
                 ':first_seen'      => $now,
                 ':last_seen'       => $now,
             ));

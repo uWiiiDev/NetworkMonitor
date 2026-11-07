@@ -191,6 +191,7 @@ class Database
         $this->ensureColumnExists('devices', 'switch_ssh_pass', 'VARCHAR(255) DEFAULT NULL');
         $this->ensureColumnExists('devices', 'switch_snmp_community', 'VARCHAR(100) DEFAULT NULL');
         $this->ensureColumnExists('devices', 'switch_snmp_write_community', 'VARCHAR(100) DEFAULT NULL');
+        $this->ensureColumnExists('devices', 'is_core', 'TINYINT(1) NOT NULL DEFAULT 0');
     }
 
     private function initSqliteSchema()
@@ -247,6 +248,7 @@ class Database
                 switch_ssh_pass TEXT DEFAULT NULL,
                 switch_snmp_community TEXT DEFAULT NULL,
                 switch_snmp_write_community TEXT DEFAULT NULL,
+                is_core INTEGER NOT NULL DEFAULT 0,
                 first_seen TEXT NOT NULL,
                 last_seen TEXT NOT NULL
             )
@@ -263,6 +265,7 @@ class Database
         $this->ensureColumnExists('devices', 'switch_ssh_pass', 'TEXT DEFAULT NULL');
         $this->ensureColumnExists('devices', 'switch_snmp_community', 'TEXT DEFAULT NULL');
         $this->ensureColumnExists('devices', 'switch_snmp_write_community', 'TEXT DEFAULT NULL');
+        $this->ensureColumnExists('devices', 'is_core', 'INTEGER NOT NULL DEFAULT 0');
 
         $this->pdo->exec("
             CREATE TABLE IF NOT EXISTS links (
@@ -354,7 +357,15 @@ class Database
                 ':r'   => 'admin',
                 ':now' => $now,
             ));
-            // Operator-Konto (Scans starten, Scopes & Geräte bearbeiten)
+            // Netzwerkexperte-Konto (Core-Switches, VLANs, Trunks & Switch-Zugangsdaten)
+            $insUser->execute(array(
+                ':u'   => 'netadmin',
+                ':p'   => password_hash('netadmin123', PASSWORD_DEFAULT),
+                ':n'   => 'Netzwerkexperte (Core & Switch Admin)',
+                ':r'   => 'netadmin',
+                ':now' => $now,
+            ));
+            // Operator-Konto (Scans starten, Scopes & Access-Ports bearbeiten)
             $insUser->execute(array(
                 ':u'   => 'operator',
                 ':p'   => password_hash('operator123', PASSWORD_DEFAULT),
@@ -407,6 +418,26 @@ class Database
                     ':desc' => 'Automatisch erkanntes lokales Subnetz des Servers',
                     ':now'  => $now,
                 ));
+            }
+        } else {
+            // Stelle bei bestehenden Datenbanken sicher, dass das Standard-Konto für die neue Rolle 'netadmin' vorhanden ist
+            $netAdminCount = (int)$this->pdo->query("SELECT COUNT(*) FROM users WHERE role = 'netadmin'")->fetchColumn();
+            if ($netAdminCount === 0) {
+                $chkName = $this->pdo->prepare("SELECT id FROM users WHERE username = 'netadmin' LIMIT 1");
+                $chkName->execute();
+                if (!$chkName->fetchColumn()) {
+                    $insNet = $this->pdo->prepare("
+                        INSERT INTO users (username, password_hash, full_name, role, is_active, created_at)
+                        VALUES (:u, :p, :n, :r, 1, :now)
+                    ");
+                    $insNet->execute(array(
+                        ':u'   => 'netadmin',
+                        ':p'   => password_hash('netadmin123', PASSWORD_DEFAULT),
+                        ':n'   => 'Netzwerkexperte (Core & Switch Admin)',
+                        ':r'   => 'netadmin',
+                        ':now' => $now,
+                    ));
+                }
             }
         }
     }

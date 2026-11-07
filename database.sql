@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS `devices` (
   `switch_ssh_pass` VARCHAR(255) DEFAULT NULL,
   `switch_snmp_community` VARCHAR(100) DEFAULT NULL,
   `switch_snmp_write_community` VARCHAR(100) DEFAULT NULL,
+  `is_core` TINYINT(1) NOT NULL DEFAULT 0,
   `first_seen` DATETIME NOT NULL,
   `last_seen` DATETIME NOT NULL,
   PRIMARY KEY (`id`),
