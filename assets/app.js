@@ -7497,8 +7497,208 @@ function exportSelectedDeviceDetails() {
     showToast('Gerätedetails als "' + fileName + '" heruntergeladen!');
 }
 
+// ============================================================================
+// FARBSCHEMA (THEME) & MEHRSPRACHIGKEIT (DE / EN / FR / ES)
+// ============================================================================
+
+var I18N_DICT = {
+    de: {
+        nav_map: 'Netzwerkplan',
+        nav_inventory: 'Inventarliste',
+        nav_admin: '⚙ Einstellungen',
+        btn_actions_scan: 'Aktionen & Scan ▾',
+        scan_all_scopes: 'Alle aktiven Scopes jetzt scannen',
+        new_scope: 'Neuen Netzwerk-Scope anlegen',
+        btn_start_scan: '▶ Scan starten',
+        alerts: 'Alarme',
+        theme_btn: 'Design',
+        theme_header: 'Farbschema wählen',
+        own_profile: '🔑 Eigenes Profil, E-Mail, Passwort & 2FA',
+        admin_settings: '⚙ Einstellungen',
+        logout: '⏻ Abmelden (Logout)',
+        inv_search_ph: 'Schnellsuche (IP, MAC, Port, Dose)...',
+        col_visible: 'Im Plan',
+        col_status: 'Status',
+        col_ip_address: 'IP-Adresse',
+        col_name: 'Hostname / Bezeichnung',
+        col_custom_group: 'Gerätegruppe',
+        col_device_type: 'Typ',
+        col_switch_port: 'Switch / Port (Steckplatz)',
+        col_mac_address: 'MAC-Adresse',
+        col_vendor: 'Hersteller (OUI)',
+        col_os_guess: 'Betriebssystem & Dienste',
+        col_open_ports: 'Offene TCP-Ports',
+        col_snmp: 'SNMP Details',
+        col_scope_name: 'Netzwerk-Scope',
+        col_last_seen: 'Zuletzt gesehen'
+    },
+    en: {
+        nav_map: 'Network Map',
+        nav_inventory: 'Inventory List',
+        nav_admin: '⚙ Settings',
+        btn_actions_scan: 'Actions & Scan ▾',
+        scan_all_scopes: 'Scan all active scopes now',
+        new_scope: 'Create new network scope',
+        btn_start_scan: '▶ Start Scan',
+        alerts: 'Alerts',
+        theme_btn: 'Theme',
+        theme_header: 'Select Color Theme',
+        own_profile: '🔑 My Profile, Email, Password & 2FA',
+        admin_settings: '⚙ Settings',
+        logout: '⏻ Sign Out (Logout)',
+        inv_search_ph: 'Quick search (IP, MAC, Port, Jack)...',
+        col_visible: 'In Map',
+        col_status: 'Status',
+        col_ip_address: 'IP Address',
+        col_name: 'Hostname / Label',
+        col_custom_group: 'Device Group',
+        col_device_type: 'Type',
+        col_switch_port: 'Switch / Port (Wall Jack)',
+        col_mac_address: 'MAC Address',
+        col_vendor: 'Vendor (OUI)',
+        col_os_guess: 'OS & Services',
+        col_open_ports: 'Open TCP Ports',
+        col_snmp: 'SNMP Details',
+        col_scope_name: 'Network Scope',
+        col_last_seen: 'Last Seen'
+    },
+    fr: {
+        nav_map: 'Plan Réseau',
+        nav_inventory: 'Inventaire',
+        nav_admin: '⚙ Paramètres',
+        btn_actions_scan: 'Actions & Scan ▾',
+        scan_all_scopes: 'Scanner tous les sous-réseaux actifs',
+        new_scope: 'Nouveau sous-réseau (Scope)',
+        btn_start_scan: '▶ Lancer Scan',
+        alerts: 'Alertes',
+        theme_btn: 'Thème',
+        theme_header: 'Choisir le thème',
+        own_profile: '🔑 Mon Profil, E-mail, Mot de passe & 2FA',
+        admin_settings: '⚙ Paramètres',
+        logout: '⏻ Déconnexion',
+        inv_search_ph: 'Recherche rapide (IP, MAC, Port, Prise)...',
+        col_visible: 'Affiché',
+        col_status: 'Statut',
+        col_ip_address: 'Adresse IP',
+        col_name: 'Nom d’hôte / Libellé',
+        col_custom_group: 'Groupe',
+        col_device_type: 'Type',
+        col_switch_port: 'Switch / Port (Prise)',
+        col_mac_address: 'Adresse MAC',
+        col_vendor: 'Fabricant (OUI)',
+        col_os_guess: 'Système & Services',
+        col_open_ports: 'Ports TCP ouverts',
+        col_snmp: 'Détails SNMP',
+        col_scope_name: 'Sous-réseau',
+        col_last_seen: 'Vu le'
+    },
+    es: {
+        nav_map: 'Mapa de Red',
+        nav_inventory: 'Inventario',
+        nav_admin: '⚙ Ajustes',
+        btn_actions_scan: 'Acciones y Escaneo ▾',
+        scan_all_scopes: 'Escanear todas las subredes activas',
+        new_scope: 'Crear nueva subred (Scope)',
+        btn_start_scan: '▶ Iniciar Escaneo',
+        alerts: 'Alertas',
+        theme_btn: 'Tema',
+        theme_header: 'Seleccionar esquema de color',
+        own_profile: '🔑 Mi Perfil, Correo, Contraseña y 2FA',
+        admin_settings: '⚙ Ajustes',
+        logout: '⏻ Cerrar sesión',
+        inv_search_ph: 'Búsqueda rápida (IP, MAC, Puerto, Roseta)...',
+        col_visible: 'En Mapa',
+        col_status: 'Estado',
+        col_ip_address: 'Dirección IP',
+        col_name: 'Nombre de host',
+        col_custom_group: 'Grupo',
+        col_device_type: 'Tipo',
+        col_switch_port: 'Switch / Puerto (Roseta)',
+        col_mac_address: 'Dirección MAC',
+        col_vendor: 'Fabricante (OUI)',
+        col_os_guess: 'Sistema y Servicios',
+        col_open_ports: 'Puertos TCP',
+        col_snmp: 'Detalles SNMP',
+        col_scope_name: 'Subred (Scope)',
+        col_last_seen: 'Última vez'
+    }
+};
+
+function setAppTheme(themeName, silent) {
+    var t = themeName || 'midnight';
+    document.documentElement.setAttribute('data-theme', t);
+    try {
+        localStorage.setItem('nm_theme', t);
+    } catch (e) {}
+    if (!silent) {
+        var names = {
+            midnight: 'Midnight Slate',
+            emerald: 'Cyber Emerald',
+            cyberpunk: 'Deep Violet & Cyan',
+            amber: 'Amber Industrial',
+            light: 'Daylight Clean'
+        };
+        showToast('🎨 Farbschema aktiviert: ' + (names[t] || t));
+    }
+}
+
+function setAppLanguage(langCode, silent) {
+    var lang = (I18N_DICT[langCode]) ? langCode : 'de';
+    AppState.lang = lang;
+    try {
+        localStorage.setItem('nm_lang', lang);
+    } catch (e) {}
+
+    var d = I18N_DICT[lang];
+    var codeEl = document.getElementById('topbar-lang-code');
+    if (codeEl) codeEl.textContent = lang.toUpperCase();
+
+    var mapIds = {
+        'nav-tab-map': d.nav_map,
+        'nav-tab-inventory': d.nav_inventory,
+        'nav-tab-admin': d.nav_admin,
+        'btn-scan-actions-dd': d.btn_actions_scan,
+        'lbl-scan-all-scopes': d.scan_all_scopes,
+        'lbl-new-scope': d.new_scope,
+        'btn-start-scan': d.btn_start_scan,
+        'topbar-alert-label': d.alerts,
+        'topbar-theme-label': d.theme_btn,
+        'lbl-theme-header': d.theme_header,
+        'menu-own-profile': d.own_profile,
+        'menu-admin-settings': d.admin_settings,
+        'menu-logout': d.logout
+    };
+    var idKeys = Object.keys(mapIds);
+    for (var i = 0; i < idKeys.length; i++) {
+        var el = document.getElementById(idKeys[i]);
+        if (el) el.textContent = mapIds[idKeys[i]];
+    }
+
+    var invSearch = document.getElementById('inv-search');
+    if (invSearch) invSearch.placeholder = d.inv_search_ph;
+
+    for (var c = 0; c < INV_COLUMNS.length; c++) {
+        var ck = INV_COLUMNS[c].key;
+        if (d['col_' + ck]) {
+            INV_COLUMNS[c].label = d['col_' + ck];
+        }
+    }
+    if (AppState.devices && AppState.devices.length > 0) {
+        renderInventoryTable();
+    }
+    if (!silent) {
+        showToast('🌐 Sprache / Language: ' + lang.toUpperCase());
+    }
+}
+
 document.addEventListener('DOMContentLoaded', function () {
     initFloatingInspectorDrag();
+    try {
+        var savedTheme = localStorage.getItem('nm_theme');
+        if (savedTheme) setAppTheme(savedTheme, true);
+        var savedLang = localStorage.getItem('nm_lang');
+        if (savedLang) setAppLanguage(savedLang, true);
+    } catch (e) {}
     document.addEventListener('click', function () {
         closeAllDropdowns();
         closeInvColumnFilterPopover();

@@ -14,6 +14,10 @@ $db = Database::getInstance();
 $pdo = $db->getPdo();
 $currentUser = Auth::requireRole(array('viewer', 'operator', 'netadmin', 'admin'));
 $isNetExpert = in_array($currentUser['role'], array('netadmin', 'admin'), true);
+$canEditRole = in_array($currentUser['role'], array('operator', 'netadmin', 'admin'), true);
+
+// Gib das PHP-Session-File-Lock sofort frei, damit parallele Requests (z.B. während eines Scans) niemals blockieren
+@session_write_close();
 
 $action = isset($_GET['action']) ? $_GET['action'] : (isset($_POST['action']) ? $_POST['action'] : 'topology');
 
@@ -28,6 +32,11 @@ try {
     switch ($action) {
         case 'topology':
             $scopes = $pdo->query("SELECT * FROM scopes ORDER BY id ASC")->fetchAll();
+            if (!$canEditRole) {
+                for ($si = 0; $si < count($scopes); $si++) {
+                    unset($scopes[$si]['snmp_community']);
+                }
+            }
             $rawDevices = $pdo->query("
                 SELECT d.*, s.name AS scope_name, s.cidr AS scope_cidr, s.color AS scope_color, s.vlan_id
                 FROM devices d
@@ -66,6 +75,9 @@ try {
                 $dRow['has_snmp_write'] = ($rawWrite !== '') ? 1 : 0;
                 unset($dRow['switch_ssh_pass']);
                 unset($dRow['switch_snmp_write_community']);
+                if (!$canEditRole) {
+                    unset($dRow['switch_ssh_user'], $dRow['switch_snmp_community']);
+                }
                 $devices[] = $dRow;
             }
 

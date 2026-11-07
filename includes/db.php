@@ -74,15 +74,34 @@ class Database
         if (!is_dir($dataDir)) {
             @mkdir($dataDir, 0775, true);
         }
+        self::protectDataDirectory($dataDir);
         $this->pdo = new PDO('sqlite:' . $sqlitePath, null, null, array(
             PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
             PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
         ));
         $this->pdo->exec('PRAGMA journal_mode = WAL');
+        $this->pdo->exec('PRAGMA synchronous = NORMAL');
+        $this->pdo->exec('PRAGMA temp_store = MEMORY');
+        $this->pdo->exec('PRAGMA cache_size = -8000');
         $this->pdo->exec('PRAGMA busy_timeout = 5000');
         $this->activeDriver = 'sqlite';
         $this->initSqliteSchema();
         $this->seedInitialDataIfEmpty();
+    }
+
+    public static function protectDataDirectory($dataDir)
+    {
+        if (!is_dir($dataDir)) {
+            return;
+        }
+        $htFile = rtrim($dataDir, '/\\') . '/.htaccess';
+        if (!file_exists($htFile)) {
+            @file_put_contents($htFile, "Order deny,allow\nDeny from all\n<IfModule mod_authz_core.c>\n    Require all denied\n</IfModule>\n");
+        }
+        $idxFile = rtrim($dataDir, '/\\') . '/index.php';
+        if (!file_exists($idxFile)) {
+            @file_put_contents($idxFile, "<?php\nhttp_response_code(403);\nexit('403 Forbidden');\n");
+        }
     }
 
     public static function getInstance()
@@ -108,8 +127,11 @@ class Database
         return $this->connectionError;
     }
 
-    public function getConfig()
+    public function getConfig($section = null, $default = array())
     {
+        if ($section !== null) {
+            return isset($this->config[$section]) ? $this->config[$section] : $default;
+        }
         return $this->config;
     }
 
@@ -194,7 +216,9 @@ class Database
         if (!empty($smtpSettings)) {
             $existing['smtp'] = array_merge(isset($existing['smtp']) && is_array($existing['smtp']) ? $existing['smtp'] : array(), $smtpSettings);
         }
+        self::protectDataDirectory($dataDir);
         file_put_contents($customFile, json_encode($existing, JSON_PRETTY_PRINT));
+        @chmod($customFile, 0600);
     }
 
     private function initMysqlSchema()
@@ -433,6 +457,13 @@ class Database
         ");
         $this->pdo->exec("CREATE INDEX IF NOT EXISTS idx_spo_switch ON switch_port_outlets(switch_id)");
         $this->pdo->exec("CREATE INDEX IF NOT EXISTS idx_spo_outlet ON switch_port_outlets(outlet_label)");
+        $this->pdo->exec("CREATE INDEX IF NOT EXISTS idx_dev_scope_status ON devices(scope_id, status)");
+        $this->pdo->exec("CREATE INDEX IF NOT EXISTS idx_dev_mac ON devices(mac_address)");
+        $this->pdo->exec("CREATE INDEX IF NOT EXISTS idx_dev_core ON devices(is_core)");
+        $this->pdo->exec("CREATE INDEX IF NOT EXISTS idx_links_scope ON links(scope_id)");
+        $this->pdo->exec("CREATE INDEX IF NOT EXISTS idx_links_src_dst ON links(source_device_id, target_device_id)");
+        $this->pdo->exec("CREATE INDEX IF NOT EXISTS idx_alerts_ack ON device_alerts(is_acknowledged, id)");
+        $this->pdo->exec("CREATE INDEX IF NOT EXISTS idx_logs_started ON scan_logs(started_at)");
     }
 
     private function ensureColumnExists($table, $column, $definition)

@@ -6,24 +6,31 @@
 require_once __DIR__ . '/includes/db.php';
 require_once __DIR__ . '/includes/auth.php';
 $currentUser = Auth::getCurrentUser();
+$appVersion = Database::getAppVersion();
 ?>
 <!DOCTYPE html>
 <html lang="de">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Hilfe &amp; Installationsanleitung – NetworkMonitor</title>
+    <title>Hilfe &amp; Handbuch (v<?php echo htmlspecialchars($appVersion, ENT_QUOTES, 'UTF-8'); ?>) – NetworkMonitor</title>
     <link rel="stylesheet" href="assets/style.css">
+    <script>
+        try {
+            var savedTheme = localStorage.getItem('nm_theme');
+            if (savedTheme) document.documentElement.setAttribute('data-theme', savedTheme);
+        } catch (e) {}
+    </script>
     <style>
         body {
             overflow-y: auto;
             height: auto;
             min-height: 100vh;
-            background: var(--bg-dark);
+            background: var(--bg-app);
             color: var(--text-primary);
         }
         .help-wrapper {
-            max-width: 1060px;
+            max-width: 1080px;
             margin: 0 auto;
             padding: 28px 24px 60px 24px;
             display: flex;
@@ -45,13 +52,16 @@ $currentUser = Auth::getCurrentUser();
         }
         .help-card h3 {
             font-size: 14.5px;
-            color: #e2e8f0;
+            color: var(--text-primary);
             margin: 16px 0 8px 0;
         }
         .help-card p, .help-card li {
             font-size: 13.5px;
             line-height: 1.65;
-            color: #cbd5e1;
+            color: var(--text-secondary);
+        }
+        .help-card strong {
+            color: var(--text-primary);
         }
         .help-card ul, .help-card ol {
             padding-left: 20px;
@@ -68,7 +78,7 @@ $currentUser = Auth::getCurrentUser();
             background: rgba(59, 130, 246, 0.12);
             border: 1px solid rgba(59, 130, 246, 0.35);
             border-radius: 6px;
-            color: #93c5fd;
+            color: #60a5fa;
             font-size: 12.5px;
             font-weight: 600;
         }
@@ -94,8 +104,9 @@ $currentUser = Auth::getCurrentUser();
     <header class="topbar">
         <div class="brand">
             <div class="brand-logo">?</div>
-            <div>
+            <div style="display:flex;align-items:center;gap:8px;">
                 <div class="brand-title">NetworkMonitor – Hilfe, Handbuch &amp; Installationsanleitung</div>
+                <span class="badge" style="background:rgba(59,130,246,0.18);border:1px solid rgba(59,130,246,0.45);color:#93c5fd;font-family:monospace;">v<?php echo htmlspecialchars($appVersion, ENT_QUOTES, 'UTF-8'); ?></span>
             </div>
         </div>
         <div class="topbar-actions">
@@ -110,209 +121,194 @@ $currentUser = Auth::getCurrentUser();
         <div class="help-card">
             <h2>Inhaltsverzeichnis</h2>
             <div class="help-toc">
-                <a href="#sec-speicherung">1. Werden alte Scans gespeichert?</a>
-                <a href="#sec-snmp-daten">2. SNMP-Inspektor &amp; OS-Erkennung</a>
-                <a href="#sec-ansichten">3. Die 6 Ansichten &amp; Vektor-Exporte</a>
-                <a href="#sec-inventar">4. Inventarliste (Sortieren &amp; Spalten)</a>
-                <a href="#sec-rechte">5. Benutzerrollen &amp; Adminbereich</a>
-                <a href="#sec-install">6. Installationsanleitung (Ubuntu 14.04 &amp; Linux)</a>
-                <a href="#sec-switches">7. SNMP auf Managed Switches aktivieren</a>
-                <a href="#sec-cron">8. Automatischer Hintergrund-Scan (Cronjob)</a>
+                <a href="#sec-speicherung">1. Dauerhafte Speicherung &amp; Aufbewahrungsfristen</a>
+                <a href="#sec-snmp-daten">2. SNMP-Inspektor, 19" Switch-Grafik &amp; Dosen-Mapping</a>
+                <a href="#sec-ansichten">3. Die 6 Ansichten, Mehrsprachigkeit &amp; Farbschemata</a>
+                <a href="#sec-inventar">4. Inventarliste (Excel-Filter &amp; Gruppensummen)</a>
+                <a href="#sec-alarme">5. Anomalie-Wächter, MAC-Fahndung &amp; Alarm-Quittierung</a>
+                <a href="#sec-rechte">6. 4 Rollen, Benutzer-E-Mails, Passwort-Reset &amp; 2FA</a>
+                <a href="#sec-update">7. GitHub-Online-Update, Sicherheit &amp; Performance</a>
+                <a href="#sec-install">8. Installationsanleitung (Ubuntu 14.04 &amp; modernes Linux)</a>
+                <a href="#sec-switches">9. SNMP &amp; LLDP auf Managed Switches aktivieren</a>
             </div>
         </div>
 
         <!-- 1. Speicherverhalten -->
         <div id="sec-speicherung" class="help-card">
-            <h2>1. Werden alte Scans abgespeichert oder nur temporär angezeigt?</h2>
+            <h2>1. Dauerhafte Speicherung, Geräte-Historie &amp; Aufbewahrungsfristen</h2>
             <p>
-                <strong>Alle Scan-Ergebnisse, Geräte, Verbindungen und manuellen Anpassungen werden dauerhaft in der Datenbank (SQLite bzw. MySQL) gespeichert!</strong>
-                Sie bleiben auch nach dem Schließen des Browsers oder nach einem Neustart des Servers vollständig erhalten:
+                <strong>Alle Scan-Ergebnisse, Geräte, Switch-Port-Historien, Netzwerkdosen-Zuordnungen und Alarme werden dauerhaft in der Datenbank (SQLite im WAL-Modus bzw. MySQL/MariaDB) gespeichert.</strong>
             </p>
             <ul>
-                <li><strong>Dauerhafte Geräte-Historie:</strong> Jedes jemals gefundene Gerät erhält in der Datenbank einen Zeitstempel für die erste Entdeckung (<code>first_seen</code>) und die letzte Sichtung (<code>last_seen</code>).</li>
-                <li><strong>Was passiert, wenn ein Gerät beim nächsten Scan ausgeschaltet ist?</strong> Das Gerät wird <em>nicht</em> gelöscht! Es behält seinen Namen, seine Gruppe, seine Switch-Port-Zuordnung und seine Position im Plan, wird aber automatisch als <span class="badge badge-offline">OFFLINE</span> (rot umrandet) markiert, bis es wieder eingeschaltet wird.</li>
-                <li><strong>Erhalt eigener Anpassungen:</strong> Manuell vergebene Anzeigenamen, eigene Gruppen (z. B. <em>IoT</em>, <em>Büro EG</em>), manuell gezogene Switch-Port-Links und das Ausblenden einzelner Geräte bleiben bei jedem neuen Scan erhalten.</li>
-                <li><strong>Scan-Protokolle:</strong> Unter dem Reiter <strong>Cronjob &amp; System</strong> werden die letzten Scan-Durchläufe mit Start-/Endzeit, Auslöser (Web-Klick oder Cronjob) und Anzahl der gefundenen Hosts protokolliert.</li>
+                <li><strong>Dauerhafte Geräte- &amp; Port-Historie:</strong> Jedes gefundene Gerät erhält Zeitstempel für die erste Entdeckung (<code>first_seen</code>) und die letzte Sichtung (<code>last_seen</code>). Zudem protokolliert <code>mac_port_history</code>, welche MAC-Adresse wann an welchem Switch-Port gesteckt war.</li>
+                <li><strong>Verhalten bei ausgeschalteten Geräten:</strong> Ausgeschaltete Geräte behalten ihren Namen, ihre eigene Gruppe, ihre Switch-Port-Zuordnung und ihre Position im Plan, werden aber als <span class="badge badge-offline">OFFLINE</span> markiert, bis sie wieder antworten.</li>
+                <li><strong>Automatische Datenbank-Bereinigung (Retention):</strong> Im Reiter <strong>⚙ Einstellungen</strong> unter Punkt 5 lässt sich festlegen, nach wie vielen Tagen alte Scan-Protokolle/Alarme (Standard: 14 Tage) sowie lange verschwundene Offline-Clients (Standard: 30 Tage) automatisch bereinigt werden.</li>
             </ul>
         </div>
 
-        <!-- 2. SNMP & OS Fingerprinting -->
+        <!-- 2. SNMP, 19" Switch-Grafik & Dosen-Mapping -->
         <div id="sec-snmp-daten" class="help-card">
-            <h2>2. Was wird per SNMP &amp; OS-Fingerprinting aus den Geräten gelesen?</h2>
-            <p>
-                Beim Klick auf ein beliebiges Gerät im Netzwerkplan oder in der Inventarliste öffnet sich rechts die Detail-Seitenleiste. Antworten Geräte auf <strong>SNMP (v1/v2c)</strong> (z. B. Managed Switches, Router, NAS oder Netzwerkdrucker), erscheint zusätzlich der grüne Button <strong>„🔍 Alle SNMP-Daten öffnen“</strong>.
-            </p>
-            <h3>A. Ausgelesene SNMP-Daten (MIB-II, IF-MIB, Bridge-MIB, LLDP, Printer-MIB)</h3>
+            <h2>2. SNMP-Discovery, 19" Switch-Frontblende, Live-SSH &amp; Netzwerkdosen-Zuordnung</h2>
+            <h3>A. Ausgelesene SNMP-Daten (MIB-II, IF-MIB, Bridge-MIB, Q-Bridge-MIB, LLDP, Printer-MIB)</h3>
             <ul>
-                <li><strong>System- &amp; Hardware-Daten:</strong> Gerätename (<code>sysName</code>), Standort (<code>sysLocation</code>), Kontakt (<code>sysContact</code>), exaktes Gerätemodell (<code>hrDeviceDescr</code> / <code>entPhysicalModelName</code>), <strong>Seriennummer</strong>, Firmware-Version und die aktuelle <strong>Betriebszeit (Uptime)</strong> auf die Sekunde genau.</li>
-                <li><strong>Switch-Ports &amp; Netzwerk-Interfaces (IF-MIB):</strong> Alle Ports inkl. Admin-Beschreibung (<code>ifAlias</code>), Link-Status (<code>UP</code>/<code>DOWN</code>), ausgehandelter Geschwindigkeit (<code>10 Mbit/s</code>, <code>100 Mbit/s</code>, <code>1 Gbit/s</code>, <code>10 Gbit/s</code>), <strong>übertragenem Datenvolumen (RX/TX in MB)</strong> sowie <strong>Paket-Fehlerzählern (CRC-Fehler)</strong> zur Erkennung defekter Netzwerkkabel.</li>
-                <li><strong>Layer-2 MAC-Adresstabelle (Bridge-MIB &amp; Q-Bridge-MIB):</strong> Liest aus Managed Switches aus, welche MAC-Adresse an welchem physischen Switch-Port (z. B. <code>Gi1/0/5</code>) angeschlossen ist, und verbindet die Geräte automatisch im Netzwerkplan.</li>
-                <li><strong>LLDP-Nachbarschaft (IEEE 802.1AB):</strong> Erkennt direkt verbundene Nachbar-Switches und Access Points über deren Uplink-/Trunk-Ports.</li>
-                <li><strong>Netzwerkdrucker-Spezialdaten (Printer-MIB):</strong> Liest bei SNMP-fähigen Druckern (z. B. HP OfficeJet / LaserJet, Brother, Epson, Kyocera) automatisch den <strong>Gesamt-Seitenzähler (Gedruckte Seiten)</strong>, den aktuellen <strong>Display-Text</strong> des Druckers sowie die <strong>exakten Tinten- bzw. Toner-Füllstände in Prozent (%)</strong> mit farbigen Fortschrittsbalken aus.</li>
+                <li><strong>System- &amp; Hardware-Daten:</strong> <code>sysName</code>, <code>sysLocation</code>, Gerätemodell, Seriennummer, Uptime sowie Switch-Stack-Mitglieder (Unit #1, Unit #2 usw.).</li>
+                <li><strong>Layer-2 Port-Zuordnung &amp; Topologie:</strong> Automatische Zuordnung von Endgeräten an den exakten physischen Switch-Port (inkl. Multi-Switch-Kaskaden, Uplink-Erkennung und korrekter Unterscheidung zwischen lokalen Switch-Ports und Geräten hinter dem Router/WLAN).</li>
+                <li><strong>Drucker-MIB:</strong> Gesamt-Seitenzähler, Display-Meldung und exakte Toner-/Tinten-Füllstände in Prozent (<code>%</code>).</li>
             </ul>
 
-            <h3>B. Betriebssystem- &amp; Dienst-Erkennung (auch ohne SNMP!)</h3>
+            <h3>B. Originalgetreue 19-Zoll Switch-Frontblende &amp; Live-Port-Konfiguration (SSH / SNMP)</h3>
             <ul>
-                <li><strong>ICMP-TTL-Fingerprinting:</strong> Erkennt anhand des Time-To-Live-Werts der Ping-Antwort das Grundsystem (<code>TTL 64</code> = Linux / macOS / iOS / Android, <code>TTL 128</code> = Microsoft Windows 10/11/Server, <code>TTL 255</code> = Switch / Drucker / IoT-Controller).</li>
-                <li><strong>HTTP/HTTPS &amp; SSH Banner-Grabbing:</strong> Liest von offenen Web- und SSH-Ports parallel den HTML-Seitentitel (<code>&lt;title&gt;</code>), den Webserver-Header (<code>Server:</code>) sowie die SSH-Versionskennung (z. B. <code>OpenSSH Ubuntu</code>) aus.</li>
-                <li><strong>Windows NetBIOS (UDP Port 137):</strong> Ermittelt Windows-Rechnernamen und die zugehörige Arbeitsgruppe/Domäne (z. B. <code>Workgroup: WORKGROUP</code>).</li>
+                <li>Ein Klick auf <strong>„🎛 19" Switch-Port-Belegung &amp; VLANs“</strong> öffnet das grafische 19"-Switch-Gehäuse mit ungeraden Ports oben, geraden Ports unten (umschaltbar zwischen <em>Standard Untereinander</em> und <em>Linear Nebeneinander</em>) und abgetrenntem SFP+/Uplink-Block.</li>
+                <li><strong>Live-Port-Konfiguration:</strong> Nach Klick auf eine Buchse können Administratoren, Netzwerkexperten und Operatoren das <strong>Access-VLAN (PVID)</strong>, den <strong>Port-Alias</strong> sowie den <strong>Admin-Status (PoE / Shutdown)</strong> live per SSH auf den Switch übertragen (Profile für Cisco IOS/SG/CBS, HP Aruba/ProCurve, HPE Comware, Dell, Netgear, Extreme, Allied Telesis, D-Link, Zyxel, MikroTik, Huawei, Juniper).</li>
+            </ul>
+
+            <h3>C. 🔌 Patchfeld- &amp; Netzwerkdosen-Zuordnung (Wall Jack Mapping)</h3>
+            <ul>
+                <li>Da Anwender meist nur die Beschriftung ihrer Wanddose (z. B. <code>Dose E1-04</code>, <code>D-104</code> im <code>Raum 204</code>) kennen, lässt sich jedem Switch-Port direkt im Port-Inspektor oder über den <strong>„🔌 Patchfeld- &amp; Dosen-Editor (Alle Ports + CSV)“</strong> eine <strong>Dosenbezeichnung</strong>, ein <strong>Patchfeld-Port</strong> und ein <strong>Raum</strong> zuweisen (inkl. CSV-Import und CSV-Export der kompletten Patchliste).</li>
+                <li>Die Dosenbezeichnung erscheint automatisch auf der 19"-Switch-Buchse, in den Geräte-Details, in der Inventarliste und ist im <strong>„🔍 MAC-, Dosen- &amp; Switch-Port-Finder“</strong> direkt durchsuchbar.</li>
             </ul>
         </div>
 
-        <!-- 3. Ansichten, Große Netzwerke & Export -->
+        <!-- 3. Ansichten, Sprachen & Farbschemata -->
         <div id="sec-ansichten" class="help-card">
-            <h2>3. Die 6 Ansichten, Werkzeuge für große Netzwerke &amp; Vektor-Exporte</h2>
+            <h2>3. Die 6 Topologie-Ansichten, Mehrsprachigkeit &amp; 5 Farbschemata</h2>
             <ul>
-                <li><strong>Ansicht 1 – Stern-Topologie:</strong> Frei bewegliches Kräfte-Layout rund um Gateway und Switches (friert nach dem Einschwingen automatisch ein, damit verschobene Knoten ruhig stehen bleiben).</li>
-                <li><strong>Ansicht 2 – Baum (Oben → Unten, Block-Raster):</strong> Klassisches Organigramm (Router oben → Switches → Endgeräte als kompaktes 5er-Block-Raster direkt unter ihrem Switch).</li>
-                <li><strong>Ansicht 3 – Baum (Links → Rechts, Block-Raster):</strong> Ideal für breite Monitore und viele Gerätenamen.</li>
-                <li><strong>Ansicht 4 – Kreis / Radial:</strong> Übersichtsring ohne überlappende Knoten.</li>
-                <li><strong>Ansicht 5 – Gruppen-Kacheln (Matrix):</strong> Sortierte Gerätekarten nach Kategorien und eigenen Gruppen ganz ohne Linien-Gewirr.</li>
-                <li><strong>Ansicht 6 – 19" Switch-Port-Rack:</strong> Zeigt jeden Switch/Router als physisches 19-Zoll-Port-Panel mit grünen/roten Status-LEDs pro Port.</li>
+                <li><strong>6 Ansichten:</strong> (1) Dynamische Stern-Topologie, (2) Baum Oben &rarr; Unten, (3) Baum Links &rarr; Rechts, (4) Kreis / Radial, (5) Gruppen-Kacheln (Matrix), (6) 19"-Switch-Rack-Ansicht.</li>
+                <li><strong>🎨 5 Farbschemata (Design-Wähler oben rechts):</strong>
+                    <ul>
+                        <li><strong>Midnight Slate:</strong> Klassisches dunkles NOC-Blau (Standard).</li>
+                        <li><strong>Cyber Emerald:</strong> Dunkles Leitwarten- &amp; Matrix-Grün.</li>
+                        <li><strong>Deep Violet &amp; Cyan:</strong> Kontrastreiches Indigo-Violett mit Cyan-Akzenten.</li>
+                        <li><strong>Amber Industrial:</strong> Dunkles Anthrazit mit warmen Gold-/Bernstein-Akzenten.</li>
+                        <li><strong>☀️ Daylight Clean:</strong> Heller Büro- und Druck-Modus mit weißem Hintergrund.</li>
+                    </ul>
+                </li>
+                <li><strong>🌐 Mehrsprachigkeit (DE / EN / FR / ES):</strong> Über den Sprachwähler <strong>„🌐 DE ▾“</strong> in der oberen Kopfleiste lässt sich die Oberfläche jederzeit verzögerungsfrei zwischen <strong>Deutsch</strong>, <strong>Englisch</strong>, <strong>Französisch</strong> und <strong>Spanisch</strong> umschalten.</li>
             </ul>
-            <h3>Spezial-Funktionen für große Netzwerke (Übersichtlichkeit)</h3>
-            <ul>
-                <li><strong>📦 Client-Cluster:</strong> Bündelt normale Endgeräte (PCs/Clients) pro Switch bzw. Gateway zu einem Sammel-Knoten (z. B. <code>📦 18 Clients</code>). Ein Klick zeigt alle enthaltenen Geräte rechts in der Seitenleiste; ein <strong>Doppelklick</strong> klappt das Cluster im Plan auf.</li>
-                <li><strong>🏢 Nur Infrastruktur:</strong> Blendet mit einem Klick alle normalen Workstations aus, sodass nur das Netzwerk-Rückgrat (Router, Switches, Server, Access Points und Drucker) sichtbar ist.</li>
-                <li><strong>🎯 Fokus-Modus (Nachbarschaft isolieren):</strong> Ein Doppelklick auf einen Switch/Router (oder Klick auf <em>„🎯 Fokus: Gerät &amp; Nachbarn isolieren“</em> in den Details rechts) blendet alle anderen Zweige aus und zeigt nur dieses Gerät samt seinen direkt verbundenen Ports.</li>
-                <li><strong>📌 Layout &amp; Positionen speichern:</strong> Über das Menü <strong>„📌 Layout ▾“</strong> lassen sich die zurechtgezogenen Knoten-Positionen dauerhaft in der Datenbank speichern sowie die Option <em>„🔍 Text-Details erst beim Reinzoomen“</em> steuern.</li>
-            </ul>
-            <p>
-                Über das Menü <strong>„Exportieren ▾“</strong> lässt sich der Plan als <strong>verlustfreie SVG-Vektorgrafik (<code>.svg</code>)</strong> (unendlich zoombar + Textsuche mit <code>Strg+F</code>), als <strong>bearbeitbare Draw.io / Visio-Datei (<code>.drawio</code>)</strong>, als <strong>Vektor-PDF-Report</strong> oder als <strong>4K Ultra-HD PNG (3840×2160 px)</strong> speichern.
-            </p>
         </div>
 
-        <!-- 4. Inventarliste -->
+        <!-- 4. Inventarliste: Excel-Filter & Gruppensummen -->
         <div id="sec-inventar" class="help-card">
-            <h2>4. Inventarliste: Sortieren &amp; Spalten ein-/ausblenden</h2>
+            <h2>4. Inventarliste: Excel-Spaltenfilter („Enthält") &amp; Gruppensummen</h2>
             <ul>
-                <li><strong>Sortieren per Klick:</strong> Ein Klick auf eine beliebige Spaltenüberschrift (z. B. <em>IP-Adresse</em>, <em>Hostname</em>, <em>Typ</em>, <em>Betriebssystem</em> oder <em>SNMP Details</em>) sortiert die Tabelle aufsteigend (<code>▲</code>) bzw. beim zweiten Klick absteigend (<code>▼</code>). IP-Adressen werden dabei echt numerisch sortiert (<code>.2</code> vor <code>.10</code>).</li>
-                <li><strong>Spalten ein-/ausblenden:</strong> Über den Button <strong>„☷ Spalten ein-/ausblenden ▾“</strong> oben rechts über der Tabelle kannst du beliebige Spalten per Häkchen ein- oder ausschalten (z. B. auch die Zusatzspalte <em>Zuletzt gesehen</em>). Deine Spaltenauswahl wird automatisch im Browser gespeichert.</li>
+                <li><strong>⧩ Excel-Filter in jedem Spaltenkopf:</strong> Ein Klick auf das Filter-Symbol <strong><code>⧩</code></strong> neben einer Spaltenüberschrift öffnet ein Excel-ähnliches Filtermenü mit:
+                    <ul>
+                        <li><strong>Bedingungsfiltern:</strong> <em>Enthält</em>, <em>Enthält nicht</em>, <em>Beginnt mit</em>, <em>Endet mit</em>, <em>Ist gleich (=)</em>, <em>Ist nicht leer (zugeordnet)</em> und <em>Ist leer (nicht zugeordnet)</em>.</li>
+                        <li><strong>Werteliste mit Summen:</strong> Zeigt alle in dieser Spalte vorkommenden Werte per Checkbox samt ihrer exakten Anzahl in Klammern an (z. B. Hersteller- oder Gerätetyp-Summen).</li>
+                    </ul>
+                </li>
+                <li><strong>📊 Gruppieren &amp; Zwischensummen:</strong> Über das Auswahlfeld <strong>„📊 Gruppieren &amp; Summen“</strong> kann die Tabelle nach <em>Eigener Gerätegruppe</em>, <em>Gerätetyp</em>, <em>Hersteller</em>, <em>Betriebssystem</em>, <em>Switch/Verteiler</em>, <em>Scope</em> oder <em>Status</em> gruppiert werden. Jede Gruppe erhält eine auf-/zuklappbare Kopfzeile mit ihrer Zwischensumme (Anzahl Geräte, Online, Offline, SNMP).</li>
+                <li><strong>Gruppen-Summen-Chips &amp; CSV-Export:</strong> Oberhalb der Tabelle werden klickbare Summen-Chips aller Gruppen angezeigt; der Button <strong>„CSV Export“</strong> exportiert genau die aktuell gefilterte Auswahl.</li>
             </ul>
         </div>
 
-        <!-- 5. Benutzerrollen & Alarme -->
+        <!-- 5. Anomalie-Wächter, MAC-Fahndungsliste & Alarm-Quittierung -->
+        <div id="sec-alarme" class="help-card">
+            <h2>5. Automatischer Anomalie-Wächter, MAC-Fahndungsliste &amp; Quittierung mit Kommentar</h2>
+            <ul>
+                <li><strong>🛡️ Automatischer Layer-2/Layer-3 Anomalie-Wächter:</strong> Überwacht bei jedem Scan vollautomatisch auf:
+                    <ol>
+                        <li><strong>⚡ ARP-Spoofing / IP-Konflikte:</strong> Warnung, wenn eine IP-Adresse plötzlich ihre Hardware-MAC-Adresse wechselt.</li>
+                        <li><strong>🚨 Neue unbekannte MAC-Adressen:</strong> Meldung, sobald ein bislang unbekanntes Gerät erstmals im Netzwerk oder an einem Switch-Port auftaucht.</li>
+                        <li><strong>🔌 Rogue-Switch / Mini-Hub-Erkennung:</strong> Alarm, wenn an einem einzelnen Access-Port mehr MAC-Adressen als erlaubt (Schwellenwert einstellbar, Standard: &gt; 3 MACs) auftauchen.</li>
+                        <li><strong>🌪️ MAC-Flapping / Netzwerkschleifen &amp; Port-Paketfehler:</strong> Erkennt springende MAC-Adressen zwischen Ports sowie defekte Patchkabel anhand steigender CRC-/Input-Errors.</li>
+                    </ol>
+                </li>
+                <li><strong>🎯 Gezielte MAC-Überwachung (MAC-Fahndungsliste):</strong> Unter <strong>„🔔 Alarme“</strong> kann eine noch unbekannte oder gesuchte MAC-Adresse vorab hinterlegt werden. Sobald diese MAC irgendwo im Netz angesteckt wird, erfolgt sofort ein Alarm (inkl. Switch, Port, Dose und IP) per Web &amp; E-Mail.</li>
+                <li><strong>✅ Alarme mit Kommentar quittieren:</strong> Benutzer mit den Rollen <code>operator</code>, <code>netadmin</code> oder <code>admin</code> können einzelne oder alle offenen Alarme direkt in der Alarm-Zentrale mit einem **Freitext-Kommentar** (z. B. <em>„Wartung am Switch abgeschlossen"</em>) quittieren. Benutzername, Zeitstempel und Kommentar werden dauerhaft beim Alarm protokolliert.</li>
+            </ul>
+        </div>
+
+        <!-- 6. 4 Rollen, Benutzer-E-Mails, Passwort-Reset & 2FA -->
         <div id="sec-rechte" class="help-card">
-            <h2>5. Benutzerrollen, Einstellungen &amp; Geräte-Alarme (SMTP)</h2>
+            <h2>6. Die 4 Berechtigungs-Rollen, Benutzer-E-Mails, Passwort-Reset &amp; 2FA</h2>
             <ul>
-                <li><span class="badge" style="background:rgba(239,68,68,0.2);color:#fca5a5;">ADMIN</span> <strong>Administrator:</strong> Vollzugriff auf alle Funktionen sowie auf den Reiter <strong>⚙ Einstellungen</strong> zur Konfiguration der MySQL-/SQLite-Datenbankverbindung, des SMTP-E-Mail-Servers, der Benutzerverwaltung sowie zum Leeren einzelner Scopes.</li>
-                <li><span class="badge" style="background:rgba(16,185,129,0.2);color:#6ee7b7;">OPERATOR</span> <strong>Operator (Techniker):</strong> Darf Netzwerk-Scans starten, Scopes anlegen, Geräte umbenennen, Switch-Ports zuweisen, Geräte-Alarme aktivieren und Geräte/Gruppen ein- oder ausblenden.</li>
-                <li><span class="badge" style="background:rgba(59,130,246,0.2);color:#93c5fd;">VIEWER</span> <strong>Betrachter (Nur Lesen):</strong> Darf alle 6 Ansichten, den SNMP-Inspektor und alle Export-Funktionen nutzen, aber keine Änderungen speichern oder Scans auslösen.</li>
+                <li><span class="badge" style="background:rgba(16,185,129,0.2);color:#34d399;">ADMIN</span> <strong>Administrator:</strong> Vollzugriff inkl. Core-Switches, Datenbank- &amp; SMTP-Konfiguration, GitHub-Update und Benutzerverwaltung.</li>
+                <li><span class="badge" style="background:rgba(168,85,247,0.22);border:1px solid #a855f7;color:#e9d5ff;">NETADMIN</span> <strong>Netzwerkexperte:</strong> Vollzugriff auf <strong>alle Switches inkl. geschützter Core-Switches (<code>🔒 CORE</code>)</strong>, 802.1Q Trunk-Ports, VLAN-Neuanlage und Switch-Zugangsdaten.</li>
+                <li><span class="badge" style="background:rgba(59,130,246,0.2);color:#93c5fd;">OPERATOR</span> <strong>Operator (Techniker):</strong> Darf Scans starten, Access-Ports patchen, Netzwerkdosen pflegen und Alarme mit Kommentar quittieren – sieht und verändert jedoch <strong>keine Core-Switches</strong>.</li>
+                <li><span class="badge" style="background:rgba(148,163,184,0.2);color:#cbd5e1;">VIEWER</span> <strong>Betrachter (Nur Lesen):</strong> Darf alle Ansichten, Filter und Exporte nutzen (ohne Core-Switches, ohne Schreibrechte).</li>
             </ul>
-            <h3>🔔 Online-/Offline-Geräte-Alarme &amp; E-Mail-Benachrichtigungen</h3>
+            <h3>📧 Benutzer-E-Mail-Alarme, „Passwort vergessen?" &amp; Zwei-Faktor-Authentifizierung (2FA)</h3>
             <ul>
-                <li><strong>Gerät überwachen:</strong> Klicke ein Gerät im Plan an und wähle rechts unter <strong>„🔔 Alarm-Überwachung (Online / Offline)“</strong> den gewünschten Modus (z. B. <em>🔴 Alarm wenn OFFLINE (+ Online-Recovery)</em>). Vor einem Offline-Alarm führt der Scanner automatisch einen Sicherheits-Nachping aus, um Fehlalarme zu vermeiden.</li>
-                <li><strong>Web-Alarm-Zentrale:</strong> Über die Glocke <strong>„🔔 Alarme“</strong> oben in der Navigationsleiste siehst du jederzeit alle ausgelösten Statuswechsel und aktuell überwachten Geräte.</li>
-                <li><strong>E-Mail-Versand per SMTP:</strong> Unter <strong>⚙ Einstellungen</strong> kannst du einen beliebigen SMTP-Server (STARTTLS Port 587, SSL Port 465 oder unverschlüsselt Port 25) hinterlegen und per <strong>„✉ Test-E-Mail senden“</strong> sofort testen.</li>
+                <li><strong>Individuelle Alarm-Benachrichtigung pro Benutzer:</strong> Jedem Benutzer kann im Adminbereich (oder über <em>👤 Benutzer ▾ &rarr; 🔑 Eigenes Profil, E-Mail, Passwort &amp; 2FA</em>) eine persönliche E-Mail-Adresse samt Haken <strong>„🔔 Bei Netzwerk- &amp; Geräte-Alarmen per E-Mail benachrichtigen“</strong> zugeordnet werden.</li>
+                <li><strong>Passwort vergessen? (Selbstständiger Reset):</strong> Auf der Login-Seite kann jeder Benutzer mit hinterlegter E-Mail-Adresse über <em>„Passwort vergessen?“</em> einen 6-stelligen Sicherheitscode per E-Mail anfordern und sein Passwort selbst zurücksetzen.</li>
+                <li><strong>Zwei-Faktor-Authentifizierung (2FA):</strong> Pro Benutzerkonto lässt sich wahlweise **📧 2FA per E-Mail-Sicherheitscode** oder **📱 2FA per Authenticator-App (TOTP / RFC 6238 für Google/Microsoft Authenticator, Bitwarden)** aktivieren.</li>
             </ul>
         </div>
 
-        <!-- 6. Installationsanleitung -->
+        <!-- 7. GitHub-Update, Sicherheit & Performance -->
+        <div id="sec-update" class="help-card">
+            <h2>7. 1-Klick GitHub-Update, Sicherheit &amp; Performance-Architektur</h2>
+            <ul>
+                <li><strong>🔄 Online-Update über GitHub:</strong> Im Reiter <strong>⚙ Einstellungen</strong> unter <em>„4. System-Umgebung, Version &amp; GitHub-Update“</em> prüft der Button <strong>„🔍 Auf GitHub nach Update prüfen“</strong> live gegen das Repository <code>github.com/uWiiiDev/NetworkMonitor</code> (Branch <code>main</code>), zeigt neue Commits als Changelog an und aktualisiert die Installation per 1-Klick unter vollständigem Erhalt aller lokalen Datenbanken und Konfigurationen in <code>data/</code>.</li>
+                <li><strong>🔒 Sicherheits-Architektur:</strong>
+                    <ul>
+                        <li>Passwörter und Einmal-Sicherheitscodes werden ausschließlich als <code>bcrypt</code>-Hashes (<code>password_hash</code>) gespeichert.</li>
+                        <li>Automatischer Brute-Force-Schutz (Rate-Limiting) bei Login, 2FA und Passwort-Reset sowie Session-ID-Regenerierung gegen Session-Fixation.</li>
+                        <li>Automatischer HTTP-Zugriffsschutz (<code>.htaccess</code> &amp; <code>index.php</code>) für das Verzeichnis <code>data/</code> sowie Stripping sensibler Switch-Credentials aus API-Antworten.</li>
+                    </ul>
+                </li>
+                <li><strong>⚡ Performance-Optimierung:</strong>
+                    <ul>
+                        <li>Sofortige Freigabe des PHP-Session-Locks (<code>session_write_close()</code>) in der API, damit laufende Hintergrund-Scans niemals parallele Klicks im Browser blockieren.</li>
+                        <li>SQLite läuft im hochparallelen <code>WAL</code>-Journal-Modus mit Memory-Temp-Store und optimierten Indizes auf allen Such-, MAC-, Link- und Alarm-Tabellen.</li>
+                    </ul>
+                </li>
+            </ul>
+        </div>
+
+        <!-- 8. Installationsanleitung -->
         <div id="sec-install" class="help-card">
-            <h2>6. Schritt-für-Schritt-Installationsanleitung (Ubuntu 14.04 LTS &amp; modernes Linux)</h2>
+            <h2>8. Schritt-für-Schritt-Installationsanleitung (Ubuntu 14.04 LTS &amp; modernes Linux)</h2>
             <p>
-                <strong>NetworkMonitor</strong> ist so programmiert, dass es sowohl auf älteren Bestandsservern (<strong>Ubuntu 14.04 LTS mit Apache 2.4, PHP 5.5+ und MySQL 5.5+</strong>) als auch auf aktuellen Linux-Systemen (Ubuntu 20.04 / 22.04 / 24.04, Debian 11/12 mit PHP 7.x / 8.x) ohne zusätzliche Abhängigkeiten läuft.
+                <strong>NetworkMonitor</strong> läuft sowohl auf älteren Bestandsservern (<strong>Ubuntu 14.04 LTS mit Apache 2.4, PHP 5.5+ und MySQL 5.5+</strong>) als auch auf aktuellen Linux-Systemen (Ubuntu 20.04 / 22.04 / 24.04, Debian 11/12 mit PHP 7.x / 8.x) ohne externe Composer-Abhängigkeiten.
             </p>
 
-            <h3>Schritt 1: Benötigte Pakete auf dem Ubuntu-Server installieren</h3>
+            <h3>Schritt 1: Pakete installieren</h3>
             <div class="code-pre">sudo apt-get update
-sudo apt-get install -y apache2 mysql-server php5 php5-mysql php5-sqlite php5-snmp php5-cli php5-json snmp nmap iproute2</div>
+sudo apt-get install -y apache2 mysql-server php php-mysql php-sqlite3 php-snmp php-cli snmp nmap iproute2 git</div>
             <p style="font-size:12px;color:var(--text-secondary);">
-                <em>Hinweis für neuere Ubuntu/Debian-Versionen (ab 18.04+): Ersetze <code>php5-*</code> durch <code>php php-mysql php-sqlite3 php-snmp php-cli php-xml</code>.</em>
+                <em>Hinweis für Ubuntu 14.04 LTS: Verwende <code>php5 php5-mysql php5-sqlite php5-snmp php5-cli php5-json</code> statt <code>php-*</code>.</em>
             </p>
 
-            <h3>Schritt 2: Programmdateien nach /var/www/html/networkmonitor kopieren</h3>
-            <div class="code-pre">sudo mkdir -p /var/www/html/networkmonitor
-sudo cp -r * /var/www/html/networkmonitor/
+            <h3>Schritt 2: Repository klonen &amp; Berechtigungen setzen</h3>
+            <div class="code-pre">cd /var/www/html
+sudo git clone https://github.com/uWiiiDev/NetworkMonitor.git networkmonitor
 sudo chown -R www-data:www-data /var/www/html/networkmonitor
 sudo chmod -R 755 /var/www/html/networkmonitor
 sudo chmod -R 775 /var/www/html/networkmonitor/data</div>
 
-            <h3>Schritt 3: Datenbank wählen (SQLite Sofort-Start oder MySQL)</h3>
-            <ul>
-                <li><strong>Option A – SQLite (Empfohlen bis ~5.000 Geräte, 0 Konfiguration nötig):</strong> Standardmäßig legt NetworkMonitor automatisch die Datei <code>data/network_monitor.sqlite</code> im schnellen WAL-Modus an. Es ist keine manuelle Datenbank-Einrichtung erforderlich!</li>
-                <li><strong>Option B – MySQL / MariaDB Server:</strong> Falls du MySQL nutzen möchtest, kannst du die Verbindung direkt im Webinterface unter <strong>⚙ Adminbereich (DB &amp; Rechte)</strong> eintragen und per Klick auf <em>„MySQL-Verbindung testen“</em> prüfen – alle Tabellen werden dabei automatisch angelegt. Alternativ per Kommandozeile:</li>
-            </ul>
-            <div class="code-pre">mysql -u root -p -e "CREATE DATABASE IF NOT EXISTS network_monitor CHARACTER SET utf8 COLLATE utf8_general_ci;"
-mysql -u root -p network_monitor &lt; /var/www/html/networkmonitor/database.sql</div>
-
-            <h3>Schritt 4: Im Browser öffnen &amp; anmelden</h3>
+            <h3>Schritt 3: Im Browser öffnen &amp; anmelden</h3>
             <p>
-                Rufe <code>http://&lt;SERVER-IP&gt;/networkmonitor/</code> im Browser auf. Standard-Zugangsdaten beim Erststart (bitte danach über das Benutzermenü ändern):
+                Rufe <code>http://&lt;SERVER-IP&gt;/networkmonitor/</code> im Browser auf. Vorab angelegte Rollen-Zugänge beim Erststart (bitte danach über das Benutzermenü ändern):
             </p>
             <ul>
-                <li>Administrator: <code>admin</code> / Passwort: <code>admin123</code></li>
-                <li>Techniker: <code>operator</code> / Passwort: <code>operator123</code></li>
-                <li>Betrachter: <code>gast</code> / Passwort: <code>gast123</code></li>
+                <li>Administrator: <code>admin</code> / <code>admin123</code></li>
+                <li>Netzwerkexperte: <code>netadmin</code> / <code>netadmin123</code></li>
+                <li>Techniker: <code>operator</code> / <code>operator123</code></li>
+                <li>Betrachter: <code>gast</code> / <code>gast123</code></li>
             </ul>
         </div>
 
-        <!-- 7. SNMP auf Switches aktivieren -->
+        <!-- 9. SNMP auf Switches aktivieren -->
         <div id="sec-switches" class="help-card">
-            <h2>7. Managed Switches vorbereiten: Wie funktioniert die Port-Erkennung &amp; was wird benötigt?</h2>
-            <p>
-                NetworkMonitor kann vollautomatisch ermitteln, <strong>welches Endgerät an welcher physischen Buchse (Port) eines Switches angeschlossen ist</strong>, und zeichnet diese Port-Bezeichnung (z. B. <code>Gi1/0/8</code> oder <code>Port 12</code>) direkt an die grünen Verbindungslinien im Netzwerkplan sowie in die 19"-Rack-Ansicht.
-            </p>
-
-            <h3>A. Wie funktioniert das technisch im Hintergrund?</h3>
-            <ol style="font-size:13.5px;color:#cbd5e1;line-height:1.65;padding-left:20px;margin-bottom:12px;">
-                <li><strong>IP &harr; MAC-Adresse (Ping &amp; ARP-Cache):</strong> Beim Subnetz-Scan ermittelt der Server für jedes aktive Gerät dessen IP- und Hardware-MAC-Adresse (z. B. <code>192.168.178.34</code> &rarr; <code>48:BA:4E:86:2B:BF</code>).</li>
-                <li><strong>SNMP-Abfrage der Switch-MAC-Tabelle (UDP Port 161):</strong> Jeder Managed Switch führt intern eine sogenannte <em>Forwarding Database (MAC-Adresstabelle)</em>, um zu wissen, hinter welchem Port welche MAC-Adresse steckt. NetworkMonitor liest diese Tabelle über die standardisierten MIBs <strong><code>Bridge-MIB</code> (<code>1.3.6.1.2.1.17.4.3.1.2</code>)</strong> sowie für VLANs <strong><code>Q-Bridge-MIB</code> (<code>1.3.6.1.2.1.17.7.1.2.2.1.2</code>)</strong> aus und übersetzt die Port-Nummer über die <strong><code>IF-MIB</code></strong> in den echten Portnamen (z. B. <code>Gi1/0/18</code>).</li>
-                <li><strong>Uplink-Filterung &amp; LLDP-Nachbarschaft:</strong> Sieht ein Switch auf einem Port viele verschiedene MAC-Adressen (inkl. der MAC des Routers), erkennt der Algorithmus diesen Port automatisch als <strong>Uplink-/Trunk-Port</strong>. Sieht er auf einem Port nur 1–2 MAC-Adressen, ist das der direkte Anschlussport des Endgeräts. Über <strong><code>LLDP</code> (IEEE 802.1AB)</strong> erkennen sich zudem direkt miteinander verbundene Switches untereinander.</li>
-            </ol>
-
-            <h3>B. Was braucht man dafür? (Die 3 Voraussetzungen)</h3>
+            <h2>9. SNMP &amp; LLDP auf Managed Switches aktivieren</h2>
             <ul>
-                <li><strong>1. Einen „Managed Switch“ oder „Smart Managed Switch“:</strong> Einfache, „dumme“ Tischswitches (<em>Unmanaged Switches</em> ohne eigene IP-Adresse und ohne Weboberfläche) besitzen keinen SNMP-Agenten und leiten Kabelsignale nur unsichtbar weiter. Sobald es ein <em>Smart Managed</em> oder <em>Managed Switch</em> mit eigener IP-Adresse im Subnetz ist, kann er abgefragt werden.</li>
-                <li><strong>2. SNMP (v1 / v2c) im Switch einschalten:</strong> In der Weboberfläche (oder CLI) des Switches muss <strong>SNMP (Read-Only)</strong> auf UDP-Port <code>161</code> aktiviert und ein sogenannter <strong>Community-String</strong> (Lese-Passwort, Standard: <code>public</code>) eingetragen sein.</li>
-                <li><strong>3. Gleiche Community im NetworkMonitor-Scope eintragen:</strong> Beim Anlegen oder Bearbeiten des Netzwerk-Scopes im NetworkMonitor muss im Feld <strong>„SNMP v2c Community“</strong> exakt derselbe Community-String stehen (Standard ist bereits <code>public</code>). Auf dem Linux-Server selbst ist kein Zusatzprogramm nötig, da NetworkMonitor einen eigenen Pure-PHP-SNMP-Client mitbringt.</li>
-            </ul>
-
-            <h3>C. Schritt-für-Schritt: SNMP &amp; LLDP bei gängigen Switch-Herstellern aktivieren</h3>
-            <ul>
-                <li><strong>Cisco IOS / Catalyst / Small Business (CBS / SG-Serie):</strong>
-                    Per CLI (SSH/Telnet) oder im Web-GUI unter <em>SNMP &rarr; Communities</em>:
+                <li><strong>Cisco IOS / Catalyst / CBS / SG-Serie:</strong>
                     <div class="code-pre">configure terminal
 snmp-server community public RO
 lldp run
 end
 write memory</div>
                 </li>
-                <li><strong>HP ProCurve / ArubaOS / HPE Aruba InstantOn / OfficeConnect:</strong>
-                    Per CLI oder im Webinterface unter <em>System &rarr; SNMP</em> (Community <code>public</code> mit Lese-Rechten / Read-Only anlegen):
+                <li><strong>HP ProCurve / ArubaOS / HPE OfficeConnect:</strong>
                     <div class="code-pre">configure
 snmp-server community "public" Unrestricted
 lldp run
 write memory</div>
                 </li>
-                <li><strong>Netgear (ProSAFE / Smart Managed Plus / Insight):</strong>
-                    Im Webinterface unter <em>System &rarr; SNMP &rarr; SNMP Configuration</em>: <strong>SNMP aktivieren (Enable)</strong>, danach unter <em>Community Configuration</em> die Community <code>public</code> mit Access Mode <strong>Read Only</strong> und Status <strong>Enable</strong> anlegen. Unter <em>System &rarr; LLDP</em> zusätzlich LLDP aktivieren.
-                </li>
-                <li><strong>TP-Link (JetStream / Easy Smart / Omada):</strong>
-                    Im Switch-Webinterface unter <em>System &rarr; SNMP &rarr; Global Config</em> das Häkchen bei <strong>SNMP Enable</strong> setzen. Anschließend unter <em>SNMP v1/v2c &rarr; Community List</em> einen Eintrag mit Community Name <code>public</code> und Access Right <strong>Read-Only</strong> hinzufügen. (Bei Omada SDN unter <em>Settings &rarr; Services &rarr; SNMP</em>).
-                </li>
-                <li><strong>Zyxel (GS1900 / GS1920 / XGS-Serie) &amp; D-Link (DGS-Serie):</strong>
-                    Im Webinterface unter <em>Management &rarr; SNMP</em> den Dienst aktivieren und die Get-Community (Read-Only) auf <code>public</code> stellen.
-                </li>
-                <li><strong>Ubiquiti UniFi Switches &amp; Access Points:</strong>
-                    Im UniFi Network Controller unter <em>Settings (Einstellungen) &rarr; System &rarr; Advanced / Services &rarr; SNMP</em> die Option <strong>SNMP v1/v2c</strong> aktivieren und als Community String <code>public</code> speichern.
-                </li>
-                <li><strong>MikroTik (RouterOS &amp; SwOS):</strong>
-                    In WinBox / WebFig unter <em>IP &rarr; SNMP</em> das Häkchen bei <strong>Enabled</strong> setzen (Community <code>public</code> ist standardmäßig bereits hinterlegt).
-                </li>
+                <li><strong>Netgear, TP-Link, Zyxel, D-Link, Ubiquiti UniFi &amp; MikroTik:</strong> Im Switch-Webinterface unter <em>System / Management &rarr; SNMP</em> den Dienst <strong>SNMP v1/v2c</strong> aktivieren, die Read-Only Community (z. B. <code>public</code>) eintragen und <strong>LLDP</strong> einschalten.</li>
             </ul>
-        </div>
-
-        <!-- 8. Cronjob -->
-        <div id="sec-cron" class="help-card">
-            <h2>8. Automatischen Hintergrund-Scan per Cronjob einrichten</h2>
-            <p>
-                Neben dem manuellen Scan per Klick im Webinterface kann der Scanner über das Skript <code>cli_scan.php</code> beliebig oft im Hintergrund laufen (z. B. alle 30 Minuten):
-            </p>
-            <div class="code-pre">sudo crontab -e
-
-# Alle 30 Minuten alle aktiven Netzwerk-Scopes scannen:
-*/30 * * * * /usr/bin/php /var/www/html/networkmonitor/cli_scan.php --all &gt;&gt; /var/log/networkmonitor_scan.log 2&gt;&amp;1</div>
         </div>
 
     </div>

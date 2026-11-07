@@ -26,6 +26,12 @@ $gitShort = Database::getGitCommitShort();
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>NetworkMonitor - Automatischer Netzwerkplan & SNMP Switch Discovery</title>
     <link rel="stylesheet" href="assets/style.css">
+    <script>
+        try {
+            var savedTheme = localStorage.getItem('nm_theme');
+            if (savedTheme) document.documentElement.setAttribute('data-theme', savedTheme);
+        } catch (e) {}
+    </script>
     <script src="assets/vis-network.min.js"></script>
 </head>
 <body>
@@ -41,8 +47,8 @@ $gitShort = Database::getGitCommitShort();
         </div>
 
         <nav class="nav-tabs">
-            <button class="nav-tab active" onclick="switchTab('map', this)">Netzwerkplan</button>
-            <button class="nav-tab" onclick="switchTab('inventory', this)">Inventarliste</button>
+            <button id="nav-tab-map" class="nav-tab active" onclick="switchTab('map', this)">Netzwerkplan</button>
+            <button id="nav-tab-inventory" class="nav-tab" onclick="switchTab('inventory', this)">Inventarliste</button>
             <?php if ($isAdmin): ?>
                 <button id="nav-tab-admin" class="nav-tab" onclick="switchTab('admin', this)" title="Einstellungen">⚙ Einstellungen</button>
             <?php endif; ?>
@@ -51,17 +57,17 @@ $gitShort = Database::getGitCommitShort();
         <div class="topbar-actions">
             <?php if ($canEdit): ?>
                 <div class="dropdown">
-                    <button class="btn btn-sm" onclick="toggleDropdown('dd-scan-actions', event)">Aktionen &amp; Scan ▾</button>
+                    <button id="btn-scan-actions-dd" class="btn btn-sm" onclick="toggleDropdown('dd-scan-actions', event)">Aktionen &amp; Scan ▾</button>
                     <div id="dd-scan-actions" class="dropdown-menu dropdown-right">
                         <div class="dropdown-item" onclick="triggerScan('all', null); closeAllDropdowns();">
-                            <span style="color:#10b981;font-weight:700;">▶</span> Alle aktiven Scopes jetzt scannen
+                            <span style="color:#10b981;font-weight:700;">▶</span> <span id="lbl-scan-all-scopes">Alle aktiven Scopes jetzt scannen</span>
                         </div>
                         <div class="dropdown-item" onclick="openScopeModal(0); closeAllDropdowns();">
-                            <span style="color:#60a5fa;font-weight:700;">+</span> Neuen Netzwerk-Scope anlegen
+                            <span style="color:#60a5fa;font-weight:700;">+</span> <span id="lbl-new-scope">Neuen Netzwerk-Scope anlegen</span>
                         </div>
                     </div>
                 </div>
-                <button class="btn btn-sm btn-success" onclick="triggerScan(AppState.selectedScopeId, this)">
+                <button id="btn-start-scan" class="btn btn-sm btn-success" onclick="triggerScan(AppState.selectedScopeId, this)">
                     ▶ Scan starten
                 </button>
             <?php endif; ?>
@@ -71,6 +77,50 @@ $gitShort = Database::getGitCommitShort();
                 🔔 <span id="topbar-alert-label" style="font-size:12px;">Alarme</span>
                 <span id="topbar-alert-badge" class="badge badge-offline" style="display:none;margin-left:3px;">0</span>
             </button>
+
+            <!-- Farbschema / Theme-Auswahl -->
+            <div class="dropdown">
+                <button id="btn-theme-selector" class="btn btn-sm" onclick="toggleDropdown('dd-theme-menu', event)" title="Farbschema / Design wechseln">
+                    🎨 <span id="topbar-theme-label" style="font-size:11.5px;">Design</span> ▾
+                </button>
+                <div id="dd-theme-menu" class="dropdown-menu dropdown-right" style="min-width:235px;">
+                    <div class="dropdown-header" id="lbl-theme-header">Farbschema wählen</div>
+                    <div class="dropdown-item" onclick="setAppTheme('midnight'); closeAllDropdowns();">
+                        <span style="width:12px;height:12px;border-radius:50%;background:#3b82f6;border:2px solid #0f172a;display:inline-block;"></span>
+                        <span>Midnight Slate (Standard)</span>
+                    </div>
+                    <div class="dropdown-item" onclick="setAppTheme('emerald'); closeAllDropdowns();">
+                        <span style="width:12px;height:12px;border-radius:50%;background:#10b981;border:2px solid #061411;display:inline-block;"></span>
+                        <span>Cyber Emerald (NOC Grün)</span>
+                    </div>
+                    <div class="dropdown-item" onclick="setAppTheme('cyberpunk'); closeAllDropdowns();">
+                        <span style="width:12px;height:12px;border-radius:50%;background:#8b5cf6;border:2px solid #110c1d;display:inline-block;"></span>
+                        <span>Deep Violet &amp; Cyan</span>
+                    </div>
+                    <div class="dropdown-item" onclick="setAppTheme('amber'); closeAllDropdowns();">
+                        <span style="width:12px;height:12px;border-radius:50%;background:#f59e0b;border:2px solid #141210;display:inline-block;"></span>
+                        <span>Amber Industrial (Gold)</span>
+                    </div>
+                    <div class="dropdown-item" onclick="setAppTheme('light'); closeAllDropdowns();">
+                        <span style="width:12px;height:12px;border-radius:50%;background:#ffffff;border:2px solid #2563eb;display:inline-block;"></span>
+                        <span>☀️ Daylight Clean (Hell)</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Sprachauswahl (DE / EN / FR / ES) -->
+            <div class="dropdown">
+                <button id="btn-lang-selector" class="btn btn-sm" onclick="toggleDropdown('dd-lang-menu', event)" title="Sprache / Language">
+                    🌐 <span id="topbar-lang-code" style="font-size:11.5px;font-weight:700;">DE</span> ▾
+                </button>
+                <div id="dd-lang-menu" class="dropdown-menu dropdown-right" style="min-width:170px;">
+                    <div class="dropdown-header">Sprache / Language</div>
+                    <div class="dropdown-item" onclick="setAppLanguage('de'); closeAllDropdowns();">🇩🇪 Deutsch (DE)</div>
+                    <div class="dropdown-item" onclick="setAppLanguage('en'); closeAllDropdowns();">🇬🇧 English (EN)</div>
+                    <div class="dropdown-item" onclick="setAppLanguage('fr'); closeAllDropdowns();">🇫🇷 Français (FR)</div>
+                    <div class="dropdown-item" onclick="setAppLanguage('es'); closeAllDropdowns();">🇪🇸 Español (ES)</div>
+                </div>
+            </div>
 
             <!-- Benutzermenü Dropdown -->
             <div class="dropdown">
@@ -84,16 +134,16 @@ $gitShort = Database::getGitCommitShort();
                     <div class="dropdown-header">
                         <?php echo htmlspecialchars($currentUser['full_name'] ?: $currentUser['username'], ENT_QUOTES, 'UTF-8'); ?>
                     </div>
-                    <div class="dropdown-item" onclick="closeAllDropdowns(); openPasswordModal();">
+                    <div id="menu-own-profile" class="dropdown-item" onclick="closeAllDropdowns(); openPasswordModal();">
                         🔑 Eigenes Profil, E-Mail, Passwort &amp; 2FA
                     </div>
                     <?php if ($isAdmin): ?>
-                        <div class="dropdown-item" onclick="closeAllDropdowns(); var b = document.getElementById('nav-tab-admin'); if (b) b.click();">
+                        <div id="menu-admin-settings" class="dropdown-item" onclick="closeAllDropdowns(); var b = document.getElementById('nav-tab-admin'); if (b) b.click();">
                             ⚙ Einstellungen
                         </div>
                     <?php endif; ?>
                     <div class="dropdown-divider"></div>
-                    <a href="login.php?logout=1" class="dropdown-item" style="text-decoration:none;color:#fca5a5;">
+                    <a id="menu-logout" href="login.php?logout=1" class="dropdown-item" style="text-decoration:none;color:#fca5a5;">
                         ⏻ Abmelden (Logout)
                     </a>
                 </div>

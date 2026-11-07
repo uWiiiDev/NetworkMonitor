@@ -25,6 +25,22 @@ class SmtpMailer
     }
 
     /**
+     * Kompatibilitäts-Wrapper für send($toEmail, $subject, $htmlBody)
+     */
+    public function send($toEmail, $subject, $htmlBody)
+    {
+        if ($toEmail !== null && trim((string)$toEmail) !== '') {
+            $this->config['to_email'] = trim((string)$toEmail);
+        }
+        $this->sendMail($subject, $htmlBody);
+        return array(
+            'host' => $this->config['host'],
+            'port' => (int)$this->config['port'],
+            'to'   => $this->config['to_email'],
+        );
+    }
+
+    /**
      * Sendet eine E-Mail über den konfigurierten SMTP-Server
      */
     public function sendMail($subject, $htmlBody, $textBody = '')

@@ -17,9 +17,69 @@ class Auth
 {
     public static function startSession()
     {
+        if (!headers_sent()) {
+            @header('X-Frame-Options: SAMEORIGIN');
+            @header('X-Content-Type-Options: nosniff');
+            @header('Referrer-Policy: same-origin');
+            @ini_set('session.use_only_cookies', '1');
+            @ini_set('session.cookie_httponly', '1');
+        }
         if (session_status() === PHP_SESSION_NONE) {
             @session_start();
         }
+    }
+
+    public static function checkRateLimit()
+    {
+        self::startSession();
+        $now = time();
+        if (!empty($_SESSION['nm_lockout_until']) && (int)$_SESSION['nm_lockout_until'] > $now) {
+            $waitSec = (int)$_SESSION['nm_lockout_until'] - $now;
+            throw new RuntimeException('Zu viele Fehlversuche! Bitte warte ' . $waitSec . ' Sekunden vor dem nächsten Versuch.');
+        }
+    }
+
+    public static function recordFailedAttempt()
+    {
+        self::startSession();
+        $now = time();
+        $windowStart = isset($_SESSION['nm_fail_window']) ? (int)$_SESSION['nm_fail_window'] : 0;
+        if ($now - $windowStart > 300) {
+            $_SESSION['nm_fail_window'] = $now;
+            $_SESSION['nm_fail_count'] = 1;
+        } else {
+            $_SESSION['nm_fail_count'] = (isset($_SESSION['nm_fail_count']) ? (int)$_SESSION['nm_fail_count'] : 0) + 1;
+        }
+        if ($_SESSION['nm_fail_count'] >= 6) {
+            $_SESSION['nm_lockout_until'] = $now + 60;
+        }
+    }
+
+    public static function clearFailedAttempts()
+    {
+        self::startSession();
+        unset($_SESSION['nm_fail_window'], $_SESSION['nm_fail_count'], $_SESSION['nm_lockout_until']);
+    }
+
+    public static function secureRandomInt($min, $max)
+    {
+        if (function_exists('random_int')) {
+            try {
+                return random_int((int)$min, (int)$max);
+            } catch (Exception $e) {}
+        }
+        if (function_exists('openssl_random_pseudo_bytes')) {
+            $range = (int)$max - (int)$min + 1;
+            if ($range > 1) {
+                $bytes = @openssl_random_pseudo_bytes(4);
+                if ($bytes !== false && strlen($bytes) === 4) {
+                    $unpacked = unpack('N', $bytes);
+                    $val = $unpacked[1] & 0x7FFFFFFF;
+                    return (int)$min + ($val % $range);
+                }
+            }
+        }
+        return mt_rand((int)$min, (int)$max);
     }
 
     public static function getCurrentUser()
@@ -49,6 +109,7 @@ class Auth
     public static function login($username, $password)
     {
         self::startSession();
+        self::checkRateLimit();
         $pdo = Database::getInstance()->getPdo();
         $stmt = $pdo->prepare("SELECT * FROM users WHERE username = :u OR (email IS NOT NULL AND email != '' AND LOWER(email) = LOWER(:e)) LIMIT 1");
         $cleanInput = trim($username);
@@ -56,15 +117,18 @@ class Auth
         $user = $stmt->fetch();
 
         if (!$user) {
+            self::recordFailedAttempt();
             return false;
         }
         if ((int)$user['is_active'] !== 1) {
             throw new RuntimeException('Dieses Benutzerkonto ist deaktiviert.');
         }
         if (!password_verify($password, $user['password_hash'])) {
+            self::recordFailedAttempt();
             return false;
         }
 
+        self::clearFailedAttempts();
         $twoFaMode = isset($user['two_fa_mode']) ? trim((string)$user['two_fa_mode']) : 'none';
         if ($twoFaMode === 'totp' && !empty($user['totp_secret'])) {
             $_SESSION['nm_2fa_pending_user_id'] = (int)$user['id'];
@@ -88,6 +152,7 @@ class Auth
     public static function completeLoginSession(array $user)
     {
         self::startSession();
+        self::clearFailedAttempts();
         if (function_exists('session_regenerate_id')) {
             @session_regenerate_id(true);
         }
@@ -115,18 +180,21 @@ class Auth
             unset($_SESSION['nm_2fa_pending_user_id'], $_SESSION['nm_2fa_mode']);
             return null;
         }
+        $user['mode'] = isset($user['two_fa_mode']) ? $user['two_fa_mode'] : 'none';
         return $user;
     }
 
     public static function verify2faCode($code)
     {
+        self::checkRateLimit();
         $user = self::getPending2faUser();
         if (!$user) {
             throw new RuntimeException('Keine offene 2FA-Anmeldung gefunden. Bitte erneut anmelden.');
         }
         $cleanCode = preg_replace('/[^0-9]/', '', (string)$code);
         if (strlen($cleanCode) !== 6) {
-            return false;
+            self::recordFailedAttempt();
+            throw new RuntimeException('Bitte einen gültigen 6-stelligen Sicherheitscode eingeben.');
         }
 
         $mode = isset($user['two_fa_mode']) ? $user['two_fa_mode'] : 'none';
@@ -135,7 +203,8 @@ class Auth
                 self::completeLoginSession($user);
                 return true;
             }
-            return false;
+            self::recordFailedAttempt();
+            throw new RuntimeException('Der eingegebene 6-stellige Authenticator-Code ist ungültig.');
         }
 
         if ($mode === 'email') {
@@ -149,7 +218,8 @@ class Auth
                 self::completeLoginSession($user);
                 return true;
             }
-            return false;
+            self::recordFailedAttempt();
+            throw new RuntimeException('Der eingegebene 6-stellige E-Mail-Sicherheitscode ist ungültig.');
         }
 
         return false;
@@ -162,7 +232,7 @@ class Auth
             throw new RuntimeException('Keine offene E-Mail-2FA-Sitzung gefunden.');
         }
         self::generateAndSendEmailOtp($user, '2fa');
-        return true;
+        return self::maskEmail($user['email']);
     }
 
     /**
@@ -180,7 +250,7 @@ class Auth
             throw new RuntimeException('Der SMTP-Server für den E-Mail-Versand ist noch nicht im Adminbereich konfiguriert.');
         }
 
-        $code = str_pad((string)mt_rand(0, 999999), 6, '0', STR_PAD_LEFT);
+        $code = str_pad((string)self::secureRandomInt(0, 999999), 6, '0', STR_PAD_LEFT);
         $hash = password_hash($code, PASSWORD_DEFAULT);
         $expiresAt = date('Y-m-d H:i:s', time() + ($purpose === 'reset' ? 900 : 600));
 
@@ -244,10 +314,7 @@ class Auth
         }
 
         self::generateAndSendEmailOtp($user, 'reset');
-        return array(
-            'username'     => $user['username'],
-            'masked_email' => self::maskEmail($user['email']),
-        );
+        return self::maskEmail($user['email']);
     }
 
     /**
@@ -255,6 +322,7 @@ class Auth
      */
     public static function resetPasswordWithCode($identifier, $code, $newPassword)
     {
+        self::checkRateLimit();
         $cleanId = trim((string)$identifier);
         $cleanCode = preg_replace('/[^0-9]/', '', (string)$code);
         if (strlen($cleanCode) !== 6) {
@@ -270,6 +338,7 @@ class Auth
         $user = $stmt->fetch();
 
         if (!$user || (int)$user['is_active'] !== 1) {
+            self::recordFailedAttempt();
             throw new RuntimeException('Benutzerkonto nicht gefunden.');
         }
         if (empty($user['otp_code_hash']) || empty($user['otp_expires_at'])) {
@@ -279,9 +348,11 @@ class Auth
             throw new RuntimeException('Der Sicherheitscode ist abgelaufen. Bitte fordere einen neuen Code an.');
         }
         if (!password_verify($cleanCode, $user['otp_code_hash'])) {
+            self::recordFailedAttempt();
             throw new RuntimeException('Der eingegebene 6-stellige Sicherheitscode ist ungültig.');
         }
 
+        self::clearFailedAttempts();
         $newHash = password_hash($newPassword, PASSWORD_DEFAULT);
         $upd = $pdo->prepare("UPDATE users SET password_hash = :p, otp_code_hash = NULL, otp_expires_at = NULL WHERE id = :id");
         $upd->execute(array(':p' => $newHash, ':id' => (int)$user['id']));
@@ -312,7 +383,7 @@ class Auth
         $chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
         $secret = '';
         for ($i = 0; $i < $length; $i++) {
-            $secret .= $chars[mt_rand(0, 31)];
+            $secret .= $chars[self::secureRandomInt(0, 31)];
         }
         return $secret;
     }
