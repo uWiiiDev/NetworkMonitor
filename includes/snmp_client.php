@@ -150,34 +150,109 @@ class SnmpClient
         if (!$deviceModel) {
             $deviceModel = $this->getOid('1.3.6.1.2.1.47.1.1.1.1.13.1');
         }
+        if (!$deviceModel) {
+            $entModWalk = $this->walkOid('1.3.6.1.2.1.47.1.1.1.1.13', 4);
+            foreach ($entModWalk as $emVal) {
+                $emClean = $this->cleanSnmpValue($emVal);
+                if ($emClean !== '') {
+                    // Bekannter Firmware-Tippfehler bei Cisco SG500 ("SG5000-28-k9" -> "Cisco SG500-28 (SG5000-28-k9)")
+                    if (preg_match('/^SG5000-(.+)$/i', $emClean, $sgm)) {
+                        $deviceModel = 'Cisco SG500-' . strtoupper($sgm[1]);
+                    } else {
+                        $deviceModel = $emClean;
+                    }
+                    break;
+                }
+            }
+        }
         $serialNumber = $this->getOid('1.3.6.1.2.1.43.5.1.1.17.1');
         if (!$serialNumber) {
             $serialNumber = $this->getOid('1.3.6.1.2.1.47.1.1.1.1.11.1');
+        }
+        if (!$serialNumber) {
+            $entSerWalk = $this->walkOid('1.3.6.1.2.1.47.1.1.1.1.11', 4);
+            foreach ($entSerWalk as $esVal) {
+                $esClean = $this->cleanSnmpValue($esVal);
+                if ($esClean !== '') {
+                    $serialNumber = $esClean;
+                    break;
+                }
+            }
         }
         $firmwareRev = $this->getOid('1.3.6.1.2.1.47.1.1.1.1.10.1');
         if (!$firmwareRev) {
             $firmwareRev = $this->getOid('1.3.6.1.2.1.47.1.1.1.1.9.1');
         }
+        if (!$firmwareRev) {
+            $entFwWalk = $this->walkOid('1.3.6.1.2.1.47.1.1.1.1.10', 4);
+            foreach ($entFwWalk as $efVal) {
+                $efClean = $this->cleanSnmpValue($efVal);
+                if ($efClean !== '') {
+                    $firmwareRev = $efClean;
+                    break;
+                }
+            }
+        }
 
         // Interfaces (ifName / ifDescr, ifOperStatus, ifSpeed / ifHighSpeed, ifAlias, Traffic In/Out, Errors)
-        $ifNames = $this->walkOid('1.3.6.1.2.1.31.1.1.1.1', 64);
+        $ifNames = $this->walkOid('1.3.6.1.2.1.31.1.1.1.1', 108);
         if (empty($ifNames)) {
-            $ifNames = $this->walkOid('1.3.6.1.2.1.2.2.1.2', 64);
+            $ifNames = $this->walkOid('1.3.6.1.2.1.2.2.1.2', 108);
         }
-        $ifStatus    = $this->walkOid('1.3.6.1.2.1.2.2.1.8', 64);
-        $ifAliasWalk = $this->walkOid('1.3.6.1.2.1.31.1.1.1.18', 64);
-        $ifHighSpeed = $this->walkOid('1.3.6.1.2.1.31.1.1.1.15', 64);
-        $ifSpeedWalk = empty($ifHighSpeed) ? $this->walkOid('1.3.6.1.2.1.2.2.1.5', 64) : array();
-        $ifInOctets  = $this->walkOid('1.3.6.1.2.1.2.2.1.10', 64);
-        $ifOutOctets = $this->walkOid('1.3.6.1.2.1.2.2.1.16', 64);
-        $ifInErrors  = $this->walkOid('1.3.6.1.2.1.2.2.1.14', 64);
+        $ifStatus    = $this->walkOid('1.3.6.1.2.1.2.2.1.8', 108);
+        $ifAliasWalk = $this->walkOid('1.3.6.1.2.1.31.1.1.1.18', 108);
+        $ifHighSpeed = $this->walkOid('1.3.6.1.2.1.31.1.1.1.15', 108);
+        $ifSpeedWalk = empty($ifHighSpeed) ? $this->walkOid('1.3.6.1.2.1.2.2.1.5', 108) : array();
+        $ifInOctets  = $this->walkOid('1.3.6.1.2.1.2.2.1.10', 108);
+        $ifOutOctets = $this->walkOid('1.3.6.1.2.1.2.2.1.16', 108);
+        $ifInErrors  = $this->walkOid('1.3.6.1.2.1.2.2.1.14', 108);
+
+        // Erwartete Portanzahl aus sysDescr / Modellnamen erkennen (z.B. "28-Port Gigabit Stackable Managed Switch")
+        $expectedPorts = 0;
+        if (preg_match('/\b(8|10|12|16|18|20|24|26|28|48|50|52)[-\s]*Port\b/i', (string)$sysDescr . ' ' . (string)$deviceModel, $epm)) {
+            $expectedPorts = (int)$epm[1];
+        }
+
+        // Aktive Präfixe (z.B. "gi1/1/") bestimmen, die mindestens einen physisch vorhandenen Port (ifOperStatus 1=up oder 2=down) besitzen
+        $presentPrefixes = array();
+        $hasPresentPorts = false;
+        foreach ($ifNames as $oid => $val) {
+            $parts = explode('.', $oid);
+            $ifIndex = (int)end($parts);
+            $stRaw = isset($ifStatus['1.3.6.1.2.1.2.2.1.8.' . $ifIndex]) ? trim((string)$ifStatus['1.3.6.1.2.1.2.2.1.8.' . $ifIndex]) : '1';
+            $isNotPresent = ($stRaw === '6' || stripos($stRaw, 'notPresent') !== false);
+            if (!$isNotPresent) {
+                $hasPresentPorts = true;
+                $cleanName = $this->cleanSnmpValue($val);
+                if (preg_match('/^([A-Za-z\-]*[1-8]\/[0-9]+\/)[0-9]+$/', $cleanName, $pxm)) {
+                    $presentPrefixes[$pxm[1]] = true;
+                }
+            }
+        }
 
         $interfaces = array();
         foreach ($ifNames as $oid => $val) {
             $parts = explode('.', $oid);
             $ifIndex = (int)end($parts);
             if ($ifIndex > 0) {
-                $statusVal = isset($ifStatus['1.3.6.1.2.1.2.2.1.8.' . $ifIndex]) ? $ifStatus['1.3.6.1.2.1.2.2.1.8.' . $ifIndex] : '1';
+                $statusVal = isset($ifStatus['1.3.6.1.2.1.2.2.1.8.' . $ifIndex]) ? trim((string)$ifStatus['1.3.6.1.2.1.2.2.1.8.' . $ifIndex]) : '1';
+                $cleanName = $this->cleanSnmpValue($val);
+                $isNotPresent = ($statusVal === '6' || stripos($statusVal, 'notPresent') !== false);
+                if ($isNotPresent && $hasPresentPorts) {
+                    // Nicht bestückte SFP-Ports (status=6) des aktiven Switch-Moduls bis $expectedPorts beibehalten (z.B. gi1/1/27..28 beim 28-Port Switch),
+                    // aber virtuelle Platzhalter-Slots/Stack-Units (wie fa1/2/1..48, gi1/1/29..52, fa2/2/*, Po1..32) ausblenden
+                    $keepEmptySfp = false;
+                    if ($expectedPorts > 0 && preg_match('/^([A-Za-z\-]*[1-8]\/[0-9]+\/)([0-9]+)$/', $cleanName, $pmSfp)) {
+                        $pfx = $pmSfp[1];
+                        $pNum = (int)$pmSfp[2];
+                        if (isset($presentPrefixes[$pfx]) && $pNum >= 1 && $pNum <= $expectedPorts) {
+                            $keepEmptySfp = true;
+                        }
+                    }
+                    if (!$keepEmptySfp) {
+                        continue;
+                    }
+                }
                 $aliasVal  = isset($ifAliasWalk['1.3.6.1.2.1.31.1.1.1.18.' . $ifIndex]) ? $this->cleanSnmpValue($ifAliasWalk['1.3.6.1.2.1.31.1.1.1.18.' . $ifIndex]) : '';
 
                 // Geschwindigkeit bestimmen (Mbit/s oder Gbit/s)
@@ -204,9 +279,9 @@ class SnmpClient
 
                 $interfaces[$ifIndex] = array(
                     'ifIndex'   => $ifIndex,
-                    'name'      => $this->cleanSnmpValue($val),
+                    'name'      => $cleanName,
                     'alias'     => $aliasVal,
-                    'status'    => (strpos((string)$statusVal, '1') !== false || stripos((string)$statusVal, 'up') !== false) ? 'up' : 'down',
+                    'status'    => ($statusVal === '1' || stripos((string)$statusVal, 'up') !== false) ? 'up' : 'down',
                     'speed'     => $speedStr,
                     'rx_mb'     => $inBytes > 0 ? round($inBytes / 1048576, 1) : 0,
                     'tx_mb'     => $outBytes > 0 ? round($outBytes / 1048576, 1) : 0,
@@ -218,7 +293,7 @@ class SnmpClient
         // Bridge-MIB: dot1dBasePortIfIndex (1.3.6.1.2.1.17.1.4.1.2)
         // Zuordnung BridgePort -> ifIndex
         $bridgePortToIfIndex = array();
-        $bpWalk = $this->walkOid('1.3.6.1.2.1.17.1.4.1.2', 64);
+        $bpWalk = $this->walkOid('1.3.6.1.2.1.17.1.4.1.2', 108);
         foreach ($bpWalk as $oid => $val) {
             $parts = explode('.', $oid);
             $bridgePort = (int)end($parts);
@@ -273,10 +348,19 @@ class SnmpClient
             if ($remName !== '') {
                 $suffix = substr($oid, strlen('1.0.8802.1.1.2.1.4.1.1.9.'));
                 $remPort = '';
-                if (isset($lldpPortWalk['1.0.8802.1.1.2.1.4.1.1.7.' . $suffix])) {
-                    $remPort = $this->cleanSnmpValue($lldpPortWalk['1.0.8802.1.1.2.1.4.1.1.7.' . $suffix]);
-                } elseif (isset($lldpPortDescWalk['1.0.8802.1.1.2.1.4.1.1.8.' . $suffix])) {
-                    $remPort = $this->cleanSnmpValue($lldpPortDescWalk['1.0.8802.1.1.2.1.4.1.1.8.' . $suffix]);
+                $rawDesc = isset($lldpPortDescWalk['1.0.8802.1.1.2.1.4.1.1.8.' . $suffix]) ? $this->cleanSnmpValue($lldpPortDescWalk['1.0.8802.1.1.2.1.4.1.1.8.' . $suffix]) : '';
+                $rawPortId = isset($lldpPortWalk['1.0.8802.1.1.2.1.4.1.1.7.' . $suffix]) ? (string)$lldpPortWalk['1.0.8802.1.1.2.1.4.1.1.7.' . $suffix] : '';
+                if ($rawDesc !== '' && preg_match('/^[\x20-\x7E]+$/', $rawDesc)) {
+                    $remPort = $rawDesc;
+                } elseif (strlen($rawPortId) === 6 && !preg_match('/^[\x20-\x7E]+$/', $rawPortId)) {
+                    $macHex = array();
+                    for ($mi = 0; $mi < 6; $mi++) {
+                        $macHex[] = sprintf('%02X', ord($rawPortId[$mi]));
+                    }
+                    $remPort = implode(':', $macHex);
+                } else {
+                    $cleanPortId = $this->cleanSnmpValue($rawPortId);
+                    $remPort = preg_match('/^[\x20-\x7E]+$/', $cleanPortId) ? $cleanPortId : ($rawDesc !== '' ? $rawDesc : 'Uplink');
                 }
                 $portName = isset($interfaces[$localPortNum]['name']) ? $interfaces[$localPortNum]['name'] : ('Port ' . $localPortNum);
                 $lldpNeighbors[] = array(
