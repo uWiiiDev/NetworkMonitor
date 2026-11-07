@@ -2793,6 +2793,13 @@ function closeSwitchGraphicModal() {
     if (m) m.classList.remove('open');
 }
 
+function setFallbackSwitchPorts(devId, portCount) {
+    try {
+        localStorage.setItem('nm_sw_ports_' + devId, String(portCount));
+    } catch (e) {}
+    openSwitchGraphicModal(devId, false);
+}
+
 /**
  * Erzeugt ein realistisches Demo-Modell (2x gestackter 28-Port Core-Switch + Upstream-Firewall + 2 kaskadierte Etagen-Switche),
  * damit man Stacking & Switch-Kaskadierung jederzeit live testen kann.
@@ -3093,9 +3100,17 @@ function buildRealSwitchGraphicModel(dev) {
             });
         }
     } else {
-        // Fallback für Switches/Router ohne SNMP IF-MIB: Baue ein 8-, 16-, 24- oder 48-Port Panel aus den bekannten Topologie-Links
+        // Fallback für Switches/Router ohne SNMP IF-MIB:
+        // Ohne aktiviertes SNMP verrät ein Switch über das Netzwerk seine Portanzahl nicht automatisch.
+        // Standardmäßig 28 Ports (24x RJ45 + 4x SFP+) für Managed Switches anzeigen, oder benutzerdefinierte Auswahl aus localStorage nutzen.
         var pKeys = Object.keys(devicesByPortName);
-        var minPorts = pKeys.length <= 8 ? 8 : (pKeys.length <= 16 ? 16 : (pKeys.length <= 24 ? 24 : 48));
+        var savedPortCount = 0;
+        try {
+            savedPortCount = parseInt(localStorage.getItem('nm_sw_ports_' + dev.id) || '0', 10);
+        } catch (e) {}
+
+        var defaultSwitchPorts = (dev.device_type === 'switch') ? 28 : 8;
+        var minPorts = savedPortCount > 0 ? savedPortCount : Math.max(defaultSwitchPorts, pKeys.length <= 8 ? 8 : (pKeys.length <= 16 ? 16 : (pKeys.length <= 28 ? 28 : 52)));
         unitsMap[1] = [];
         var usedPortNums = {};
 
@@ -3113,10 +3128,10 @@ function buildRealSwitchGraphicModel(dev) {
             while (usedPortNums[pNumber]) pNumber++;
             usedPortNums[pNumber] = true;
             if (pNumber > minPorts) {
-                minPorts = Math.ceil(pNumber / 24) * 24;
+                minPorts = (pNumber <= 28) ? 28 : 52;
             }
             var lblLower = pLabel.toLowerCase();
-            var isSfpFallback = (lblLower.indexOf('sfp') !== -1 || lblLower.indexOf('te') === 0 || lblLower.indexOf('xg') !== -1);
+            var isSfpFallback = (lblLower.indexOf('sfp') !== -1 || lblLower.indexOf('te') === 0 || lblLower.indexOf('xg') !== -1 || (minPorts === 28 && pNumber > 24) || (minPorts === 52 && pNumber > 48));
 
             unitsMap[1].push({
                 key: 'u1_p' + pNumber,
@@ -3141,13 +3156,14 @@ function buildRealSwitchGraphicModel(dev) {
 
         for (var fp = 1; fp <= minPorts; fp++) {
             if (!usedPortNums[fp]) {
+                var isSfpSlot = ((minPorts === 28 && fp > 24) || (minPorts === 52 && fp > 48));
                 unitsMap[1].push({
                     key: 'u1_p' + fp,
                     unit: 1,
                     portNum: fp,
-                    name: 'Port ' + fp,
+                    name: isSfpSlot ? ('SFP ' + fp) : ('Port ' + fp),
                     shortName: String(fp),
-                    isSfp: false,
+                    isSfp: isSfpSlot,
                     status: 'down',
                     speed: 'Down',
                     alias: 'Freier Port',
@@ -3233,9 +3249,28 @@ function openSwitchGraphicModal(devId, isDemoPreview) {
             (SwitchGraphicState.currentDevId ? '<button class="btn btn-sm" onclick="openSwitchGraphicModal(' + SwitchGraphicState.currentDevId + ', false)">↩ Zurück zum ausgewählten Gerät</button>' : '') +
         '</div>';
     } else if (!model.snmpEnabled) {
-        html += '<div style="background:rgba(245,158,11,0.12);border:1px solid rgba(245,158,11,0.45);border-radius:8px;padding:10px 14px;font-size:12.5px;color:#fde68a;line-height:1.5;">' +
-            '💡 <b>Hinweis – SNMP v2c ist auf diesem Gerät (' + escapeHtml(model.switchIp) + ') noch nicht aktiv:</b> ' +
-            'Daher ist aktuell nur der <b>Uplink zur FRITZ!Box / Gateway</b> bekannt. Welche Geräte physisch an den einzelnen Ports dieses Switches stecken, kann erst automatisch ausgelesen werden, sobald <b>SNMP v2c</b> im Webinterface des Switches eingeschaltet wurde (siehe <a href="hilfe.php" style="color:#60a5fa;text-decoration:underline;">❓ Hilfe</a>) oder wenn du einem Gerät im Detailfenster manuell einen Switch-Port zuordnest.' +
+        var curPortCnt = (model.units[0] && model.units[0].ports) ? model.units[0].ports.length : 28;
+        var sizeBtns = [
+            { c: 8,  l: '8 Ports' },
+            { c: 16, l: '16 Ports' },
+            { c: 24, l: '24 Ports' },
+            { c: 28, l: '28 Ports (24+4 SFP)' },
+            { c: 48, l: '48 Ports' },
+            { c: 52, l: '52 Ports (48+4 SFP)' }
+        ];
+        var btnsHtml = '';
+        for (var sb = 0; sb < sizeBtns.length; sb++) {
+            var isActSize = (curPortCnt === sizeBtns[sb].c);
+            btnsHtml += '<button class="btn btn-sm" style="' + (isActSize ? 'border-color:#f59e0b;background:rgba(245,158,11,0.28);color:#fff;font-weight:700;' : '') + '" onclick="setFallbackSwitchPorts(' + SwitchGraphicState.currentDevId + ', ' + sizeBtns[sb].c + ')">' + sizeBtns[sb].l + '</button>';
+        }
+        html += '<div style="background:rgba(245,158,11,0.12);border:1px solid rgba(245,158,11,0.45);border-radius:8px;padding:12px 14px;font-size:12.5px;color:#fde68a;line-height:1.55;display:flex;flex-direction:column;gap:8px;">' +
+            '<div>💡 <b>Warum sieht die Anwendung die genaue Portanzahl &amp; Belegung bei ' + escapeHtml(model.switchIp) + ' noch nicht automatisch?</b><br>' +
+            'Ohne aktiviertes <b>SNMP v2c</b> verrät ein Managed Switch über das Netzwerk aus Sicherheitsgründen nur seine Login-Seite, aber <b>nicht</b> seine interne Port-Tabelle (<code>IF-MIB</code>) und MAC-Adresstabelle (<code>Bridge-MIB</code>). ' +
+            'Sobald du im Webinterface des Switches (z. B. beim <b>Cisco SG500/SF500 Switch</b> unter <a href="http://' + escapeHtml(model.switchIp) + '" target="_blank" style="color:#60a5fa;text-decoration:underline;">http://' + escapeHtml(model.switchIp) + '</a> &rarr; <b>SNMP &rarr; System &rarr; Enable</b> &amp; <b>Communities: public</b>) SNMP einschaltest und neu scannst, erkennt NetworkMonitor automatisch die exakte Hardware-Portanzahl (z. B. 28 oder 52 Ports) und alle angeschlossenen Geräte!</div>' +
+            '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding-top:4px;border-top:1px dashed rgba(245,158,11,0.3);">' +
+                '<span style="font-size:11.5px;color:#fcd34d;font-weight:700;">Bauform bis zur SNMP-Aktivierung manuell wählen:</span>' +
+                btnsHtml +
+            '</div>' +
         '</div>';
     }
 

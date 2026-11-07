@@ -1681,6 +1681,25 @@ class NetworkScanner
                     $banners[$ip]['http_server'] = substr($srv, 0, 50);
                 }
             }
+            // Cisco Small Business Managed Switch (SG200 / SG300 / SG500 / SF500) Redirect-Erkennung (/csbXXXX/)
+            if (preg_match('/Location:\s*(?:https?:\/\/[^\/]+)?(\/csb[0-9a-f]+\/)/i', $buf, $csbMatch)) {
+                $csbPath = $csbMatch[1];
+                $banners[$ip]['http_title'] = 'Cisco Small Business Managed Switch';
+                $ctx = stream_context_create(array('http' => array('timeout' => 0.8, 'ignore_errors' => true)));
+                $dictXml = @file_get_contents('http://' . $ip . ':' . $m['port'] . $csbPath . 'device/English/dictionaryLogin.xml', false, $ctx);
+                if ($dictXml) {
+                    $fwVer = '';
+                    if (preg_match('/<version>([^<]+)<\/version>/i', $dictXml, $vm)) {
+                        $fwVer = trim($vm[1]);
+                    }
+                    if (preg_match_all('/<moduleType>([^<]+)<\/moduleType>/i', $dictXml, $mm) && !empty($mm[1])) {
+                        $firstMod = trim($mm[1][0]);
+                        $series = preg_replace('/-.*$/', '', $firstMod);
+                        $banners[$ip]['http_title'] = 'Cisco ' . $series . ' Series Managed Switch' . ($fwVer ? (' (FW ' . $fwVer . ')') : '');
+                    }
+                }
+                return;
+            }
             if (preg_match('/<title[^>]*>(.*?)<\/title>/is', $buf, $tm)) {
                 $title = trim(html_entity_decode(strip_tags($tm[1]), ENT_QUOTES, 'UTF-8'));
                 $title = preg_replace('/\s+/', ' ', $title);
@@ -1711,6 +1730,9 @@ class NetworkScanner
         // 1. Spezifische Netzwerk- & Infrastruktur-Systeme
         if (strpos($combined, 'cisco ios') !== false) {
             return 'Cisco IOS';
+        }
+        if (strpos($combined, 'cisco sg') !== false || strpos($combined, 'cisco sf') !== false || strpos($combined, 'small business') !== false || strpos($combined, 'goahead-webs') !== false && strpos($combined, 'cisco') !== false) {
+            return 'Cisco Small Business Switch OS';
         }
         if (strpos($combined, 'procurve') !== false || strpos($combined, 'arubaos') !== false) {
             return 'HP ArubaOS / ProCurve';

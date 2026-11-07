@@ -21,13 +21,16 @@ class OuiLookup
         'E0:28:6D' => 'AVM GmbH (FRITZ!Box)',
         'F0:B0:E7' => 'AVM GmbH (FRITZ!Box)',
 
-        // Router & Firewalls & Gateways
+        // Router & Firewalls & Gateways & Cisco Switches
         '00:00:0C' => 'Cisco Systems',
         '00:01:42' => 'Cisco Systems',
         '00:0C:85' => 'Cisco Systems',
         '00:1B:54' => 'Cisco Systems',
         '00:25:45' => 'Cisco Systems',
+        '00:26:0A' => 'Cisco Systems',
         '58:AC:78' => 'Cisco Systems',
+        'C4:72:95' => 'Cisco Systems (Small Business Switch)',
+        'DC:A5:F4' => 'Cisco Systems',
         'F4:CF:E2' => 'Cisco Meraki',
         '00:09:0F' => 'Fortinet (FortiGate)',
         '90:6C:AC' => 'Fortinet (FortiGate)',
