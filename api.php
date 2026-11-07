@@ -1044,6 +1044,9 @@ try {
                 @file_put_contents($tmpTar, $tarBytes);
                 @mkdir($tmpExtract, 0755, true);
                 @shell_exec('tar -xzf ' . escapeshellarg($tmpTar) . ' -C ' . escapeshellarg($tmpExtract) . ' --strip-components=1 2>&1');
+                // Wichtig für .deb-Paket (/opt/network-monitor/data Symlink) und bestehende data/-Ordner:
+                // data/-Verzeichnis aus dem Update-Archiv vor dem Kopieren entfernen, damit Datenbank & Symlink unberührt bleiben!
+                @shell_exec('rm -rf ' . escapeshellarg($tmpExtract . '/data'));
                 @shell_exec('cp -rf ' . escapeshellarg($tmpExtract) . '/* ' . escapeshellarg($rootDir) . '/ 2>&1');
                 @shell_exec('rm -rf ' . escapeshellarg($tmpTar) . ' ' . escapeshellarg($tmpExtract));
                 $outputLines[] = 'Update-Archiv von GitHub (main) erfolgreich heruntergeladen und entpackt.';
