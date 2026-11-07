@@ -3953,11 +3953,29 @@ function openSwitchGraphicModal(devId, isDemoPreview, keepSelectedPortName) {
 
     html += '</div></div>';
 
+    // Ermittle Port-Nummerierungs-Layout der physischen 19"-Frontblende:
+    // - 'sequential':  Ports 1–12 oben, Ports 13–24 unten (Standard bei Cisco SG200/300/350/500, SF, CBS, Zyxel, MikroTik, D-Link)
+    // - 'interleaved': Ungerade Ports 1,3,5..23 oben, Gerade Ports 2,4,6..24 unten (Standard bei Cisco Catalyst IOS, HP/Aruba, Netgear)
+    var defaultNumbering = (model.cliProfile === 'cisco_smb' || model.cliProfile === 'zyxel_gs' || model.cliProfile === 'mikrotik_routeros')
+        ? 'sequential'
+        : 'interleaved';
+    var savedNumbering = null;
+    try {
+        savedNumbering = localStorage.getItem('nm_sw_numbering_' + (devId || 'demo'));
+    } catch (e) {}
+    var portNumberingMode = (savedNumbering === 'sequential' || savedNumbering === 'interleaved') ? savedNumbering : defaultNumbering;
+
     // =========================================================================
     // 2. FARB-LEGENDE & 19-ZOLL FRONTBLENDEN PRO STACK-UNIT
     // =========================================================================
     html += '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;padding:4px 2px;">' +
-        '<div style="font-size:12.5px;font-weight:700;color:#f8fafc;text-transform:uppercase;">🎛 2. Physische 19-Zoll Switch-Frontblende (Klick auf eine RJ45-/SFP-Buchse für Port-Details)</div>' +
+        '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">' +
+            '<div style="font-size:12.5px;font-weight:700;color:#f8fafc;text-transform:uppercase;">🎛 2. Physische 19-Zoll Switch-Frontblende</div>' +
+            '<div style="display:inline-flex;background:#0f172a;border:1px solid var(--border-color);border-radius:6px;padding:2px;gap:2px;" title="Physische Port-Anordnung der 19-Zoll-Frontblende umschalten">' +
+                '<button type="button" class="btn btn-sm" style="padding:2px 8px;font-size:11px;border:none;' + (portNumberingMode === 'sequential' ? 'background:#3b82f6;color:#fff;font-weight:700;' : 'background:transparent;color:var(--text-secondary);') + '" onclick="setSwitchPortNumberingMode(' + (devId || 0) + ', \'sequential\')">🔢 1–12 oben / 13–24 unten</button>' +
+                '<button type="button" class="btn btn-sm" style="padding:2px 8px;font-size:11px;border:none;' + (portNumberingMode === 'interleaved' ? 'background:#3b82f6;color:#fff;font-weight:700;' : 'background:transparent;color:var(--text-secondary);') + '" onclick="setSwitchPortNumberingMode(' + (devId || 0) + ', \'interleaved\')">🔢 1,3,5 oben / 2,4,6 unten</button>' +
+            '</div>' +
+        '</div>' +
         '<div style="display:flex;gap:12px;flex-wrap:wrap;font-size:11.5px;color:var(--text-secondary);">' +
             '<span><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:#10b981;margin-right:4px;"></span>1G / 10G Aktiv</span>' +
             '<span><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:#f59e0b;margin-right:4px;"></span>100M / 10M (FastEth/PoE)</span>' +
@@ -3990,18 +4008,24 @@ function openSwitchGraphicModal(devId, isDemoPreview, keepSelectedPortName) {
             SwitchGraphicState.selectedPortKey = unitObj.ports[0].key;
         }
 
-        // Teile RJ45-Ports in 24er-Blöcke (je max. 12 Ports oben ungerade + 12 Ports unten gerade),
-        // damit auch 48-Port-Switche oder Gateways mit vielen Geräten komplett OHNE horizontale Scrollbalken ins Gehäuse passen!
+        // Teile RJ45-Ports in 24er-Blöcke (je max. 12 Ports oben + 12 Ports unten),
+        // wahlweise 'sequential' (1–12 oben / 13–24 unten, z.B. Cisco SG500) oder 'interleaved' (1,3,5 oben / 2,4,6 unten, z.B. Catalyst)
         var copperBlocks = [];
         for (var bStart = 0; bStart < copperPorts.length; bStart += 24) {
             var slice = copperPorts.slice(bStart, bStart + 24);
             var tRow = [];
             var bRow = [];
-            for (var cp = 0; cp < slice.length; cp++) {
-                if (cp % 2 === 0) {
-                    tRow.push(slice[cp]);
-                } else {
-                    bRow.push(slice[cp]);
+            if (portNumberingMode === 'sequential') {
+                var half = Math.ceil(slice.length / 2);
+                tRow = slice.slice(0, half);
+                bRow = slice.slice(half);
+            } else {
+                for (var cp = 0; cp < slice.length; cp++) {
+                    if (cp % 2 === 0) {
+                        tRow.push(slice[cp]);
+                    } else {
+                        bRow.push(slice[cp]);
+                    }
                 }
             }
             copperBlocks.push({ top: tRow, bottom: bRow });
@@ -4091,6 +4115,17 @@ function openSwitchGraphicModal(devId, isDemoPreview, keepSelectedPortName) {
     if (SwitchGraphicState.selectedPortKey) {
         selectSwitchGraphicPort(SwitchGraphicState.selectedPortKey);
     }
+}
+
+function setSwitchPortNumberingMode(devId, mode) {
+    try {
+        localStorage.setItem('nm_sw_numbering_' + (devId || 'demo'), mode);
+    } catch (e) {}
+    var curPortName = null;
+    if (SwitchGraphicState.selectedPortKey && SwitchGraphicState.portsByKey[SwitchGraphicState.selectedPortKey]) {
+        curPortName = SwitchGraphicState.portsByKey[SwitchGraphicState.selectedPortKey].name;
+    }
+    openSwitchGraphicModal(devId, SwitchGraphicState.isDemo, curPortName);
 }
 
 function renderSwitchPortRowHtml(portList, rowPosition) {
