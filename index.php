@@ -732,15 +732,15 @@ $isAdmin = ($userRole === 'admin');
 
     <!-- Modal: Vollständiger SNMP-Inspektor (Switch-Ports, Traffic, MAC-Tabelle, LLDP, Drucker-Füllstände) -->
     <div id="snmp-modal" class="modal-backdrop">
-        <div class="modal" style="width:820px;max-width:95vw;max-height:88vh;display:flex;flex-direction:column;">
-            <div class="panel-header">
+        <div class="modal" style="width:920px;max-width:96vw;max-height:90vh;display:flex;flex-direction:column;">
+            <div class="panel-header" style="flex-shrink:0;">
                 <span class="panel-title" id="snmp-modal-title">SNMP-Geräte-Inspektor</span>
                 <button class="btn btn-sm" onclick="closeSnmpModal()">×</button>
             </div>
-            <div id="snmp-modal-body" class="modal-body" style="overflow-y:auto;max-height:74vh;display:flex;flex-direction:column;gap:16px;">
+            <div id="snmp-modal-body" class="modal-body" style="overflow-y:auto;flex:1;display:block;">
                 <!-- Dynamisch per JS gefüllt -->
             </div>
-            <div class="modal-footer">
+            <div class="modal-footer" style="flex-shrink:0;">
                 <button class="btn btn-primary" onclick="closeSnmpModal()">Schließen</button>
             </div>
         </div>
@@ -748,8 +748,8 @@ $isAdmin = ($userRole === 'admin');
 
     <!-- Modal: Grafische 19-Zoll Switch-Frontblende, Port-Belegung, Switch-Kaskade & Stacking -->
     <div id="switch-graphic-modal" class="modal-backdrop">
-        <div class="modal" style="width:1040px;max-width:96vw;max-height:90vh;display:flex;flex-direction:column;">
-            <div class="panel-header">
+        <div class="modal" style="width:1180px;max-width:96vw;max-height:92vh;display:flex;flex-direction:column;">
+            <div class="panel-header" style="flex-shrink:0;">
                 <span class="panel-title" id="switch-graphic-title">🎛 Grafische Switch-Port-Belegung &amp; Stacking</span>
                 <div style="display:flex;gap:8px;align-items:center;">
                     <button class="btn btn-sm" style="border-color:#8b5cf6;color:#c4b5fd;" onclick="openSwitchGraphicModal(0, true)" title="Zeigt ein Beispiel eines gestackten Core-Switches (2 Stack-Units) mit kaskadiertem Etagen-Switch">
@@ -758,10 +758,10 @@ $isAdmin = ($userRole === 'admin');
                     <button class="btn btn-sm" onclick="closeSwitchGraphicModal()">×</button>
                 </div>
             </div>
-            <div id="switch-graphic-body" class="modal-body" style="overflow-y:auto;max-height:78vh;display:flex;flex-direction:column;gap:16px;">
+            <div id="switch-graphic-body" class="modal-body" style="overflow-y:auto;flex:1;display:block;">
                 <!-- Dynamisch per JS gefüllt -->
             </div>
-            <div class="modal-footer" style="justify-content:space-between;">
+            <div class="modal-footer" style="justify-content:space-between;flex-shrink:0;">
                 <div style="font-size:12px;color:var(--text-secondary);">
                     💡 Klicke auf eine beliebige RJ45-/SFP-Buchse im Switch-Gehäuse, um die Port-Details und das angeschlossene Gerät anzuzeigen.
                 </div>
@@ -772,15 +772,15 @@ $isAdmin = ($userRole === 'admin');
 
     <!-- Modal: Alarm-Zentrale (Online/Offline Geräte-Alarme) -->
     <div id="alerts-modal" class="modal-backdrop">
-        <div class="modal" style="width:760px;max-width:95vw;max-height:86vh;display:flex;flex-direction:column;">
-            <div class="panel-header">
+        <div class="modal" style="width:820px;max-width:95vw;max-height:88vh;display:flex;flex-direction:column;">
+            <div class="panel-header" style="flex-shrink:0;">
                 <span class="panel-title">🔔 Geräte-Alarme &amp; Status-Ereignisse</span>
                 <button class="btn btn-sm" onclick="closeAlertsModal()">×</button>
             </div>
-            <div id="alerts-modal-body" class="modal-body" style="overflow-y:auto;max-height:70vh;display:flex;flex-direction:column;gap:12px;">
+            <div id="alerts-modal-body" class="modal-body" style="overflow-y:auto;flex:1;display:block;">
                 <!-- Dynamisch per JS gefüllt -->
             </div>
-            <div class="modal-footer" style="justify-content:space-between;">
+            <div class="modal-footer" style="justify-content:space-between;flex-shrink:0;">
                 <div style="display:flex;gap:8px;">
                     <button class="btn btn-sm" onclick="ackAllAlerts()">✓ Alle als gelesen markieren</button>
                     <?php if ($canEdit): ?>

@@ -3090,9 +3090,9 @@ function buildRealSwitchGraphicModel(dev) {
             });
         }
     } else {
-        // Fallback für Switches/Router ohne SNMP IF-MIB: Baue ein 8- oder 24-Port Panel aus den bekannten Topologie-Links
+        // Fallback für Switches/Router ohne SNMP IF-MIB: Baue ein 8-, 16-, 24- oder 48-Port Panel aus den bekannten Topologie-Links
         var pKeys = Object.keys(devicesByPortName);
-        var minPorts = Math.max(8, pKeys.length <= 8 ? 8 : (pKeys.length <= 16 ? 16 : 24));
+        var minPorts = pKeys.length <= 8 ? 8 : (pKeys.length <= 16 ? 16 : (pKeys.length <= 24 ? 24 : 48));
         unitsMap[1] = [];
         var usedPortNums = {};
 
@@ -3103,13 +3103,17 @@ function buildRealSwitchGraphicModel(dev) {
             var nm = pLabel.match(/(\d+)$/);
             if (nm) {
                 var candNo = parseInt(nm[1], 10);
-                if (candNo >= 1 && candNo <= 52 && !usedPortNums[candNo]) {
+                if (candNo >= 1 && candNo <= 96 && !usedPortNums[candNo]) {
                     pNumber = candNo;
                 }
             }
             while (usedPortNums[pNumber]) pNumber++;
             usedPortNums[pNumber] = true;
-            if (pNumber > minPorts) minPorts = (pNumber <= 24) ? 24 : 28;
+            if (pNumber > minPorts) {
+                minPorts = Math.ceil(pNumber / 24) * 24;
+            }
+            var lblLower = pLabel.toLowerCase();
+            var isSfpFallback = (lblLower.indexOf('sfp') !== -1 || lblLower.indexOf('te') === 0 || lblLower.indexOf('xg') !== -1);
 
             unitsMap[1].push({
                 key: 'u1_p' + pNumber,
@@ -3117,7 +3121,7 @@ function buildRealSwitchGraphicModel(dev) {
                 portNum: pNumber,
                 name: pLabel,
                 shortName: String(pNumber),
-                isSfp: pNumber > 24,
+                isSfp: isSfpFallback,
                 status: 'up',
                 speed: pInfo.isUplink ? '1 Gbps Uplink' : '1 Gbps',
                 alias: pInfo.list.length > 0 ? pInfo.list[0].name : pLabel,
@@ -3140,7 +3144,7 @@ function buildRealSwitchGraphicModel(dev) {
                     portNum: fp,
                     name: 'Port ' + fp,
                     shortName: String(fp),
-                    isSfp: fp > 24,
+                    isSfp: false,
                     status: 'down',
                     speed: 'Down',
                     alias: 'Freier Port',
@@ -3336,15 +3340,21 @@ function openSwitchGraphicModal(devId, isDemoPreview) {
             SwitchGraphicState.selectedPortKey = unitObj.ports[0].key;
         }
 
-        // Teile RJ45-Ports wie bei echten 19"-Switchen in obere Reihe (ungerade: 1, 3, 5...) und untere Reihe (gerade: 2, 4, 6...)
-        var topRowPorts = [];
-        var botRowPorts = [];
-        for (var cp = 0; cp < copperPorts.length; cp++) {
-            if (cp % 2 === 0) {
-                topRowPorts.push(copperPorts[cp]);
-            } else {
-                botRowPorts.push(copperPorts[cp]);
+        // Teile RJ45-Ports in 24er-Blöcke (je max. 12 Ports oben ungerade + 12 Ports unten gerade),
+        // damit auch 48-Port-Switche oder Gateways mit vielen Geräten komplett OHNE horizontale Scrollbalken ins Gehäuse passen!
+        var copperBlocks = [];
+        for (var bStart = 0; bStart < copperPorts.length; bStart += 24) {
+            var slice = copperPorts.slice(bStart, bStart + 24);
+            var tRow = [];
+            var bRow = [];
+            for (var cp = 0; cp < slice.length; cp++) {
+                if (cp % 2 === 0) {
+                    tRow.push(slice[cp]);
+                } else {
+                    bRow.push(slice[cp]);
+                }
             }
+            copperBlocks.push({ top: tRow, bottom: bRow });
         }
 
         var activeCnt = 0;
@@ -3354,7 +3364,7 @@ function openSwitchGraphicModal(devId, isDemoPreview) {
 
         // Falls mehrere Stack-Units vorhanden sind, zeichne zwischen den Gehäusen das Stack-Verbindungskabel
         if (uIdx > 0) {
-            html += '<div style="display:flex;align-items:center;justify-content:center;gap:12px;margin:-4px 0;">' +
+            html += '<div style="display:flex;align-items:center;justify-content:center;gap:12px;margin:4px 0;">' +
                 '<div style="height:22px;width:4px;background:linear-gradient(180deg, #a855f7, #ec4899);border-radius:2px;"></div>' +
                 '<div style="background:rgba(168,85,247,0.2);border:1px solid #a855f7;color:#e9d5ff;font-size:11px;font-weight:700;padding:2px 12px;border-radius:999px;font-family:monospace;">' +
                     '⚡ High-Speed Stack-Backplane Ring (Unit #' + model.units[uIdx - 1].unit + ' ⇄ Unit #' + unitObj.unit + ')' +
@@ -3363,16 +3373,16 @@ function openSwitchGraphicModal(devId, isDemoPreview) {
             '</div>';
         }
 
-        // 19-Zoll Metallgehäuse mit Rack-Ohren links & rechts
-        html += '<div style="display:flex;align-items:stretch;gap:0;background:#090d16;border:2px solid ' + (isStacked ? '#7e22ce' : '#475569') + ';border-radius:10px;overflow:hidden;box-shadow:0 10px 25px rgba(0,0,0,0.45);">' +
+        // 19-Zoll Metallgehäuse mit Rack-Ohren links & rechts (ohne overflow:hidden/auto, damit niemals Scrollbalken die Ports verdecken)
+        html += '<div style="display:flex;align-items:stretch;gap:0;background:#090d16;border:2px solid ' + (isStacked ? '#7e22ce' : '#475569') + ';border-radius:10px;box-shadow:0 10px 25px rgba(0,0,0,0.45);margin-bottom:14px;">' +
             // Linker 19" Rack-Haltewinkel
-            '<div style="width:22px;background:linear-gradient(90deg, #1e293b, #334155);border-right:2px solid #0f172a;display:flex;flex-direction:column;justify-content:space-between;align-items:center;padding:10px 0;">' +
+            '<div style="width:22px;flex-shrink:0;background:linear-gradient(90deg, #1e293b, #334155);border-right:2px solid #0f172a;border-radius:8px 0 0 8px;display:flex;flex-direction:column;justify-content:space-between;align-items:center;padding:10px 0;">' +
                 '<span style="width:8px;height:12px;border-radius:4px;background:#090d16;border:1px solid #64748b;"></span>' +
                 '<span style="writing-mode:vertical-rl;font-size:9px;font-family:monospace;color:#94a3b8;letter-spacing:1px;">19&quot; RACK</span>' +
                 '<span style="width:8px;height:12px;border-radius:4px;background:#090d16;border:1px solid #64748b;"></span>' +
             '</div>' +
             // Haupt-Frontblende
-            '<div style="flex:1;padding:12px 14px;display:flex;flex-direction:column;gap:10px;overflow-x:auto;">' +
+            '<div style="flex:1;min-width:0;padding:12px 14px;display:flex;flex-direction:column;gap:10px;">' +
                 // Chassis-Kopfzeile (Modell, Unit-Badge, System-LEDs)
                 '<div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid rgba(148,163,184,0.2);padding-bottom:8px;flex-wrap:wrap;gap:8px;">' +
                     '<div style="display:flex;align-items:center;gap:10px;">' +
@@ -3388,25 +3398,31 @@ function openSwitchGraphicModal(devId, isDemoPreview) {
                         (isStacked ? '<span><span class="port-led up" style="display:inline-block;background:#a855f7;box-shadow:0 0 6px #a855f7;margin-right:4px;"></span>MSTR/STACK</span>' : '') +
                     '</div>' +
                 '</div>' +
-                // Port-Matrix (Links 2-reihiges RJ45-Feld in 4er/6er-Portgruppen, Rechts abgetrenntes SFP+/Uplink-Modul)
-                '<div style="display:flex;align-items:stretch;gap:18px;min-width:max-content;">' +
-                    // RJ45 Port-Block (Ober- & Unterreihe)
-                    '<div style="display:flex;flex-direction:column;gap:8px;background:#111827;border:1px solid #374151;border-radius:8px;padding:10px;">' +
-                        '<div style="display:flex;gap:6px;">' + renderSwitchPortRowHtml(topRowPorts, 'top') + '</div>' +
-                        '<div style="display:flex;gap:6px;">' + renderSwitchPortRowHtml(botRowPorts, 'bottom') + '</div>' +
-                    '</div>';
+                // Port-Matrix (Links 2-reihige RJ45-Felder à max. 24 Ports, Rechts abgetrenntes SFP+/Uplink-Modul)
+                '<div style="display:flex;align-items:stretch;gap:14px;flex-wrap:wrap;">' +
+                    '<div style="flex:1;min-width:280px;display:flex;flex-direction:column;gap:10px;">';
+
+        for (var cb = 0; cb < copperBlocks.length; cb++) {
+            var colsCount = Math.max(4, copperBlocks[cb].top.length);
+            html += '<div style="display:flex;flex-direction:column;gap:6px;background:#111827;border:1px solid #374151;border-radius:8px;padding:10px;">' +
+                '<div style="display:grid;grid-template-columns:repeat(' + colsCount + ', minmax(0, 1fr));gap:5px;">' + renderSwitchPortRowHtml(copperBlocks[cb].top, 'top') + '</div>' +
+                '<div style="display:grid;grid-template-columns:repeat(' + colsCount + ', minmax(0, 1fr));gap:5px;">' + renderSwitchPortRowHtml(copperBlocks[cb].bottom, 'bottom') + '</div>' +
+            '</div>';
+        }
+
+        html += '</div>';
 
         if (sfpPorts.length > 0) {
-            html += '<div style="display:flex;flex-direction:column;justify-content:space-between;background:#172554;border:1px solid #3b82f6;border-radius:8px;padding:10px;">' +
-                '<div style="font-size:10px;font-weight:700;color:#93c5fd;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px;text-align:center;">SFP+ / Uplink / Stack</div>' +
-                '<div style="display:flex;gap:6px;align-items:center;flex:1;">' + renderSwitchPortRowHtml(sfpPorts, 'sfp') + '</div>' +
+            html += '<div style="display:flex;flex-direction:column;justify-content:space-between;background:#172554;border:1px solid #3b82f6;border-radius:8px;padding:10px;min-width:160px;">' +
+                '<div style="font-size:10px;font-weight:700;color:#93c5fd;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px;text-align:center;">SFP+ / Uplink / Stack</div>' +
+                '<div style="display:grid;grid-template-columns:repeat(' + Math.min(4, sfpPorts.length) + ', minmax(52px, 1fr));gap:6px;align-items:center;flex:1;">' + renderSwitchPortRowHtml(sfpPorts, 'sfp') + '</div>' +
             '</div>';
         }
 
         html +=     '</div>' +
             '</div>' +
             // Rechter 19" Rack-Haltewinkel
-            '<div style="width:22px;background:linear-gradient(90deg, #334155, #1e293b);border-left:2px solid #0f172a;display:flex;flex-direction:column;justify-content:space-between;align-items:center;padding:10px 0;">' +
+            '<div style="width:22px;flex-shrink:0;background:linear-gradient(90deg, #334155, #1e293b);border-left:2px solid #0f172a;border-radius:0 8px 8px 0;display:flex;flex-direction:column;justify-content:space-between;align-items:center;padding:10px 0;">' +
                 '<span style="width:8px;height:12px;border-radius:4px;background:#090d16;border:1px solid #64748b;"></span>' +
                 '<span style="writing-mode:vertical-rl;font-size:9px;font-family:monospace;color:#94a3b8;letter-spacing:1px;">19&quot; RACK</span>' +
                 '<span style="width:8px;height:12px;border-radius:4px;background:#090d16;border:1px solid #64748b;"></span>' +
@@ -3486,7 +3502,7 @@ function renderSwitchPortRowHtml(portList, rowPosition) {
 
         out += '<div id="swport_' + p.key + '" class="sw-front-port" onclick="selectSwitchGraphicPort(\'' + p.key + '\')" ' +
             'title="Port ' + escapeHtml(p.name) + ' (' + escapeHtml(p.speed) + ') – ' + escapeHtml(p.alias || 'Klicken für Details') + '" ' +
-            'style="' + groupMargin + 'width:60px;min-width:60px;background:' + bgCol + ';border:2px solid ' + borderCol + ';border-radius:6px;padding:5px 4px;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:space-between;transition:transform 0.12s, box-shadow 0.12s;user-select:none;">' +
+            'style="min-width:0;background:' + bgCol + ';border:2px solid ' + borderCol + ';border-radius:6px;padding:5px 3px;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:space-between;transition:transform 0.12s, box-shadow 0.12s;user-select:none;">' +
                 // Kopfzeile im Port: LED + Portnummer
                 '<div style="width:100%;display:flex;justify-content:space-between;align-items:center;margin-bottom:3px;">' +
                     '<span style="width:7px;height:7px;border-radius:50%;background:' + ledCol + ';' + (isUp ? ('box-shadow:0 0 6px ' + ledCol + ';') : '') + '"></span>' +

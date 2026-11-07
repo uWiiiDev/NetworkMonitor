@@ -545,11 +545,15 @@ body {
     gap: 20px;
 }
 
+.alt-view-container > * {
+    flex-shrink: 0;
+}
+
 .matrix-group-block {
     background: rgba(30, 41, 59, 0.85);
     border: 1px solid var(--border-color);
     border-radius: 10px;
-    overflow: hidden;
+    flex-shrink: 0;
 }
 
 .matrix-group-header {
@@ -704,6 +708,10 @@ body {
     flex: 1;
 }
 
+.inspector-body > * {
+    flex-shrink: 0;
+}
+
 .kv-grid {
     display: grid;
     grid-template-columns: 110px 1fr;
@@ -814,6 +822,15 @@ body {
     display: flex;
     flex-direction: column;
     gap: 12px;
+}
+
+.modal-body > * {
+    flex-shrink: 0;
+    margin-bottom: 12px;
+}
+
+.modal-body > *:last-child {
+    margin-bottom: 0;
 }
 
 .form-group {
