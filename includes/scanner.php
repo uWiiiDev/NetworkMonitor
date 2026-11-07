@@ -53,7 +53,18 @@ class NetworkScanner
 
         try {
             $ipList = $this->expandCidrOrRange($scope['cidr'], $this->config['max_hosts_per_scan']);
-            $gatewayIp = !empty($scope['gateway_ip']) ? $scope['gateway_ip'] : (!empty($ipList) ? $ipList[0] : null);
+            $rawGw = isset($scope['gateway_ip']) ? trim($scope['gateway_ip']) : '';
+            if ($rawGw !== '' && preg_match('/^\.?([0-9]{1,3})$/', $rawGw, $gwMatch) && !empty($ipList)) {
+                $parts = explode('.', $ipList[0]);
+                if (count($parts) === 4) {
+                    $rawGw = $parts[0] . '.' . $parts[1] . '.' . $parts[2] . '.' . (int)$gwMatch[1];
+                    $this->pdo->prepare("UPDATE scopes SET gateway_ip = :gw WHERE id = :id")
+                              ->execute(array(':gw' => $rawGw, ':id' => $scope['id']));
+                }
+            }
+            $gatewayIp = ($rawGw !== '' && filter_var($rawGw, FILTER_VALIDATE_IP))
+                ? $rawGw
+                : (!empty($ipList) ? $ipList[0] : null);
             $community = !empty($scope['snmp_community']) ? $scope['snmp_community'] : $this->config['default_snmp_community'];
 
             // 1. Live-Hosts & Latenz ermitteln (Nmap falls vorhanden, sonst Parallel-Ping + ARP-Cache)
@@ -71,14 +82,52 @@ class NetworkScanner
                 }
             }
 
-            // ARP-Tabelle nach dem Ping-Sweep auslesen
+            // ARP-Tabelle nach dem Ping-Sweep auslesen & Proxy-ARP (z.B. FRITZ!Box VPN-IPs .201/.202/.203) herausfiltern
             $arpMap = $this->readArpTable();
+            $gatewayMac = null;
+            if ($gatewayIp && isset($arpMap[$gatewayIp])) {
+                $gatewayMac = OuiLookup::normalizeMac($arpMap[$gatewayIp]);
+            } elseif ($gatewayIp && !empty($liveHosts[$gatewayIp]['mac'])) {
+                $gatewayMac = OuiLookup::normalizeMac($liveHosts[$gatewayIp]['mac']);
+            }
+
+            // Zusätzlich prüfen, ob eine MAC-Adresse unnatürlich oft (>= 3 verschiedene IPs) im ARP-Cache auftaucht (Proxy-ARP)
+            $macUsageCount = array();
+            foreach ($arpMap as $aip0 => $amac0) {
+                if (in_array($aip0, $ipList, true)) {
+                    $nm = OuiLookup::normalizeMac($amac0);
+                    if ($nm) {
+                        $macUsageCount[$nm] = isset($macUsageCount[$nm]) ? ($macUsageCount[$nm] + 1) : 1;
+                    }
+                }
+            }
+
             foreach ($arpMap as $aip => $amac) {
                 if (in_array($aip, $ipList, true)) {
-                    if (!isset($liveHosts[$aip])) {
-                        $liveHosts[$aip] = array('latency_ms' => 1.0, 'mac' => $amac, 'hostname' => null, 'ttl' => null);
-                    } elseif (empty($liveHosts[$aip]['mac'])) {
-                        $liveHosts[$aip]['mac'] = $amac;
+                    $normMac = OuiLookup::normalizeMac($amac);
+                    $isProxyArp = ($aip !== $gatewayIp) && (
+                        ($gatewayMac && $normMac === $gatewayMac) ||
+                        ($normMac && isset($macUsageCount[$normMac]) && $macUsageCount[$normMac] >= 3)
+                    );
+
+                    if ($isProxyArp) {
+                        if (!isset($liveHosts[$aip])) {
+                            // Inaktive Proxy-ARP / VPN-Reservierung (antwortet nicht auf Ping):
+                            // Nicht als falsches Gerät übernehmen und eventuelle Altlasten aus der DB bereinigen!
+                            $this->pdo->prepare("DELETE FROM devices WHERE scope_id = :sid AND ip_address = :ip AND mac_address = :mac")
+                                      ->execute(array(':sid' => $scope['id'], ':ip' => $aip, ':mac' => $normMac));
+                            continue;
+                        } else {
+                            // Aktiver VPN-Client antwortet auf Ping über das Gateway (Proxy-ARP)
+                            $liveHosts[$aip]['is_proxy_arp'] = true;
+                            $liveHosts[$aip]['mac'] = null;
+                        }
+                    } else {
+                        if (!isset($liveHosts[$aip])) {
+                            $liveHosts[$aip] = array('latency_ms' => 1.0, 'mac' => $amac, 'hostname' => null, 'ttl' => null);
+                        } elseif (empty($liveHosts[$aip]['mac'])) {
+                            $liveHosts[$aip]['mac'] = $amac;
+                        }
                     }
                 }
             }
@@ -148,8 +197,11 @@ class NetworkScanner
             $this->pdo->beginTransaction();
             try {
                 foreach ($liveHosts as $ip => $hostMeta) {
-                    $mac = !empty($hostMeta['mac']) ? OuiLookup::normalizeMac($hostMeta['mac']) : null;
-                    $vendor = $mac ? OuiLookup::lookupVendor($mac) : null;
+                    $isProxyArp = !empty($hostMeta['is_proxy_arp']);
+                    $mac = (!$isProxyArp && !empty($hostMeta['mac'])) ? OuiLookup::normalizeMac($hostMeta['mac']) : null;
+                    $vendor = $isProxyArp
+                        ? ('VPN-Fernzugang / Proxy-ARP (via ' . $gatewayIp . ')')
+                        : ($mac ? OuiLookup::lookupVendor($mac) : null);
                     $ttl = isset($hostMeta['ttl']) ? $hostMeta['ttl'] : null;
 
                     $hostname = !empty($hostMeta['hostname'])
@@ -211,14 +263,22 @@ class NetworkScanner
                     if (!empty($nbInfo['workgroup'])) {
                         $infoParts[] = 'Workgroup: ' . $nbInfo['workgroup'];
                     }
+                    if ($isProxyArp) {
+                        $infoParts[] = 'Proxy-ARP via ' . $gatewayIp;
+                    }
                     $serviceInfo = !empty($infoParts) ? implode(' | ', $infoParts) : null;
 
-                    $autoType = OuiLookup::classifyDevice($ip, $gatewayIp, $vendor, $hostname, $openPorts, $snmpSysDescr, $hasBridgeTable, $serviceInfo);
+                    $autoType = $isProxyArp
+                        ? 'workstation'
+                        : OuiLookup::classifyDevice($ip, $gatewayIp, $vendor, $hostname, $openPorts, $snmpSysDescr, $hasBridgeTable, $serviceInfo);
                     if ($autoType === 'switch') {
                         $switchesFound++;
                     }
 
                     $osGuess = $this->guessOs($openPorts, $vendor, $snmpSysDescr, $autoType, $ttl, $hostname, $serviceInfo);
+                    if ($isProxyArp && ($osGuess === 'Embedded / Unbekannt' || strpos($osGuess, 'FRITZ!OS') !== false)) {
+                        $osGuess = 'VPN-Client (WireGuard / IPSec Fernzugang)';
+                    }
                     $portsFormatted = $this->formatOpenPorts($openPorts);
 
                     $this->upsertDevice(array(

@@ -145,7 +145,13 @@ try {
             // Validiere CIDR/Range
             $scanner = new NetworkScanner();
             $ips = $scanner->expandCidrOrRange($cidr, 512);
-            if ($gatewayIp === null && !empty($ips)) {
+            if ($gatewayIp !== null && preg_match('/^\.?([0-9]{1,3})$/', $gatewayIp, $gwm) && !empty($ips)) {
+                $p = explode('.', $ips[0]);
+                if (count($p) === 4) {
+                    $gatewayIp = $p[0] . '.' . $p[1] . '.' . $p[2] . '.' . (int)$gwm[1];
+                }
+            }
+            if (($gatewayIp === null || !filter_var($gatewayIp, FILTER_VALIDATE_IP)) && !empty($ips)) {
                 $gatewayIp = $ips[0];
             }
 
