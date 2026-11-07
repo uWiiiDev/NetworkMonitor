@@ -200,12 +200,39 @@ class SnmpClient
             $ifNames = $this->walkOid('1.3.6.1.2.1.2.2.1.2', 108);
         }
         $ifStatus    = $this->walkOid('1.3.6.1.2.1.2.2.1.8', 108);
+        $ifAdminWalk = $this->walkOid('1.3.6.1.2.1.2.2.1.7', 108);
         $ifAliasWalk = $this->walkOid('1.3.6.1.2.1.31.1.1.1.18', 108);
         $ifHighSpeed = $this->walkOid('1.3.6.1.2.1.31.1.1.1.15', 108);
         $ifSpeedWalk = empty($ifHighSpeed) ? $this->walkOid('1.3.6.1.2.1.2.2.1.5', 108) : array();
         $ifInOctets  = $this->walkOid('1.3.6.1.2.1.2.2.1.10', 108);
         $ifOutOctets = $this->walkOid('1.3.6.1.2.1.2.2.1.16', 108);
         $ifInErrors  = $this->walkOid('1.3.6.1.2.1.2.2.1.14', 108);
+
+        // Q-BRIDGE-MIB (802.1Q VLANs & Port-PVIDs):
+        // dot1qPvid (1.3.6.1.2.1.17.7.1.4.5.1.1), dot1qVlanFdbId (.4.2.1.3), dot1qVlanStaticName (.4.3.1.1)
+        $pvidWalk       = $this->walkOid('1.3.6.1.2.1.17.7.1.4.5.1.1', 108);
+        $vlanCurWalk    = $this->walkOid('1.3.6.1.2.1.17.7.1.4.2.1.3', 64);
+        $vlanStaticName = $this->walkOid('1.3.6.1.2.1.17.7.1.4.3.1.1', 64);
+
+        $vlansById = array(1 => array('id' => 1, 'name' => 'Default'));
+        foreach ($vlanCurWalk as $vOid => $vVal) {
+            $vParts = explode('.', $vOid);
+            $vid = (int)end($vParts);
+            if ($vid >= 1 && $vid <= 4094 && !isset($vlansById[$vid])) {
+                $vlansById[$vid] = array('id' => $vid, 'name' => ($vid === 1 ? 'Default' : ('VLAN ' . $vid)));
+            }
+        }
+        foreach ($vlanStaticName as $vOid => $vName) {
+            $vParts = explode('.', $vOid);
+            $vid = (int)end($vParts);
+            $cleanVName = $this->cleanSnmpValue($vName);
+            if ($vid >= 1 && $vid <= 4094) {
+                $vlansById[$vid] = array(
+                    'id'   => $vid,
+                    'name' => ($cleanVName !== '' && $cleanVName !== (string)$vid) ? $cleanVName : ($vid === 1 ? 'Default' : ('VLAN ' . $vid)),
+                );
+            }
+        }
 
         // Erwartete Portanzahl aus sysDescr / Modellnamen erkennen (z.B. "28-Port Gigabit Stackable Managed Switch")
         $expectedPorts = 0;
@@ -276,19 +303,30 @@ class SnmpClient
                 $inBytes  = isset($ifInOctets['1.3.6.1.2.1.2.2.1.10.' . $ifIndex]) ? (float)$this->cleanSnmpValue($ifInOctets['1.3.6.1.2.1.2.2.1.10.' . $ifIndex]) : 0;
                 $outBytes = isset($ifOutOctets['1.3.6.1.2.1.2.2.1.16.' . $ifIndex]) ? (float)$this->cleanSnmpValue($ifOutOctets['1.3.6.1.2.1.2.2.1.16.' . $ifIndex]) : 0;
                 $inErr    = isset($ifInErrors['1.3.6.1.2.1.2.2.1.14.' . $ifIndex]) ? (int)$this->cleanSnmpValue($ifInErrors['1.3.6.1.2.1.2.2.1.14.' . $ifIndex]) : 0;
+                $adminVal = isset($ifAdminWalk['1.3.6.1.2.1.2.2.1.7.' . $ifIndex]) ? trim((string)$ifAdminWalk['1.3.6.1.2.1.2.2.1.7.' . $ifIndex]) : '1';
+                $pvidVal  = isset($pvidWalk['1.3.6.1.2.1.17.7.1.4.5.1.1.' . $ifIndex]) ? (int)$this->cleanSnmpValue($pvidWalk['1.3.6.1.2.1.17.7.1.4.5.1.1.' . $ifIndex]) : 1;
+                if ($pvidVal < 1 || $pvidVal > 4094) {
+                    $pvidVal = 1;
+                }
+                if (!isset($vlansById[$pvidVal])) {
+                    $vlansById[$pvidVal] = array('id' => $pvidVal, 'name' => 'VLAN ' . $pvidVal);
+                }
 
                 $interfaces[$ifIndex] = array(
-                    'ifIndex'   => $ifIndex,
-                    'name'      => $cleanName,
-                    'alias'     => $aliasVal,
-                    'status'    => ($statusVal === '1' || stripos((string)$statusVal, 'up') !== false) ? 'up' : 'down',
-                    'speed'     => $speedStr,
-                    'rx_mb'     => $inBytes > 0 ? round($inBytes / 1048576, 1) : 0,
-                    'tx_mb'     => $outBytes > 0 ? round($outBytes / 1048576, 1) : 0,
-                    'in_errors' => $inErr,
+                    'ifIndex'      => $ifIndex,
+                    'name'         => $cleanName,
+                    'alias'        => $aliasVal,
+                    'status'       => ($statusVal === '1' || stripos((string)$statusVal, 'up') !== false) ? 'up' : 'down',
+                    'admin_status' => ($adminVal === '1' || stripos((string)$adminVal, 'up') !== false) ? 'up' : 'down',
+                    'vlan'         => $pvidVal,
+                    'speed'        => $speedStr,
+                    'rx_mb'        => $inBytes > 0 ? round($inBytes / 1048576, 1) : 0,
+                    'tx_mb'        => $outBytes > 0 ? round($outBytes / 1048576, 1) : 0,
+                    'in_errors'    => $inErr,
                 );
             }
         }
+        ksort($vlansById);
 
         // Bridge-MIB: dot1dBasePortIfIndex (1.3.6.1.2.1.17.1.4.1.2)
         // Zuordnung BridgePort -> ifIndex
@@ -450,6 +488,7 @@ class SnmpClient
             'serialNumber'   => $this->cleanSnmpValue($serialNumber),
             'firmwareRev'    => $this->cleanSnmpValue($firmwareRev),
             'interfaces'     => array_values($interfaces),
+            'vlans'          => array_values($vlansById),
             'mac_table'      => $macTable,
             'lldp_neighbors' => $lldpNeighbors,
             'stack_members'  => $stackMembers,
@@ -765,5 +804,274 @@ class SnmpClient
             return sprintf('%d.%d.%d.%d', ord($val[0]), ord($val[1]), ord($val[2]), ord($val[3]));
         }
         return $val;
+    }
+
+    /**
+     * Send an SNMPv2c SetRequest (0xA3) over raw UDP socket.
+     * $type: 'i' (INTEGER, 0x02) or 's' (OCTET STRING, 0x04)
+     */
+    public function setOid($oid, $type, $value)
+    {
+        $sock = @fsockopen('udp://' . $this->ip, 161, $errno, $errstr, $this->timeoutSec);
+        if (!$sock) {
+            return false;
+        }
+        stream_set_timeout($sock, $this->timeoutSec, 0);
+
+        $oidBin = $this->encodeOid($oid);
+        if ($type === 'i') {
+            $valBin = $this->encodeInteger((int)$value);
+        } else {
+            $valBin = $this->berEncode(0x04, (string)$value);
+        }
+        $varBind = $this->berEncode(0x30, $oidBin . $valBin);
+        $varBindList = $this->berEncode(0x30, $varBind);
+
+        $reqId = $this->encodeInteger(mt_rand(1000, 999999));
+        $errStatus = $this->encodeInteger(0);
+        $errIndex = $this->encodeInteger(0);
+        // 0xA3 = SetRequest-PDU
+        $pdu = $this->berEncode(0xA3, $reqId . $errStatus . $errIndex . $varBindList);
+
+        $version = $this->encodeInteger(1); // SNMPv2c
+        $comm = $this->berEncode(0x04, $this->community);
+        $packet = $this->berEncode(0x30, $version . $comm . $pdu);
+
+        @fwrite($sock, $packet);
+        $resp = @fread($sock, 8192);
+        @fclose($sock);
+
+        if ($resp === false || strlen($resp) < 10) {
+            return false;
+        }
+        $decoded = $this->decodeSnmpResponse($resp);
+        return $decoded !== null;
+    }
+
+    /**
+     * Configure a managed switch (Cisco SG/SX series & compatible CLI switches) via SSH.
+     * Supports:
+     *  - action_type = 'test' (test SSH login and return hostname/prompt)
+     *  - action_type = 'configure_port' (set access VLAN, create VLAN if needed, set description, set admin UP/DOWN, save config)
+     *
+     * @param string $ip
+     * @param string $user
+     * @param string $pass
+     * @param array  $params
+     * @return array array('success' => bool, 'message' => string, 'output' => string, 'commands' => array)
+     */
+    public static function configureSwitchViaSsh($ip, $user, $pass, array $params = array())
+    {
+        $ip = trim((string)$ip);
+        $user = trim((string)$user);
+        $pass = (string)$pass;
+
+        if ($ip === '' || !filter_var($ip, FILTER_VALIDATE_IP)) {
+            return array('success' => false, 'message' => 'Ungültige Switch-IP-Adresse.');
+        }
+        if ($user === '' || $pass === '') {
+            return array('success' => false, 'message' => 'SSH-Benutzername und Passwort sind erforderlich.');
+        }
+
+        $actionType = isset($params['action_type']) ? $params['action_type'] : 'configure_port';
+        $commands = array();
+
+        if ($actionType === 'configure_port') {
+            $portName = isset($params['port_name']) ? trim((string)$params['port_name']) : '';
+            if ($portName === '' || !preg_match('/^[a-zA-Z0-9\/._-]+$/', $portName)) {
+                return array('success' => false, 'message' => 'Ungültiger Port-Name: ' . $portName);
+            }
+
+            $createVlanId = isset($params['create_vlan_id']) ? (int)$params['create_vlan_id'] : 0;
+            $createVlanName = isset($params['create_vlan_name']) ? trim((string)$params['create_vlan_name']) : '';
+            $vlanId = isset($params['vlan_id']) ? (int)$params['vlan_id'] : 0;
+            if ($createVlanId >= 2 && $createVlanId <= 4094) {
+                $vlanId = $createVlanId;
+            }
+
+            $commands[] = 'configure terminal';
+
+            // 1. Optional: Create new VLAN in VLAN database and name it
+            if ($createVlanId >= 2 && $createVlanId <= 4094) {
+                $commands[] = 'vlan database';
+                $commands[] = 'vlan ' . $createVlanId;
+                $commands[] = 'exit';
+                if ($createVlanName !== '') {
+                    $cleanVlanName = preg_replace('/[^a-zA-Z0-9_-]/', '_', $createVlanName);
+                    $commands[] = 'interface vlan ' . $createVlanId;
+                    $commands[] = 'name ' . substr($cleanVlanName, 0, 32);
+                    $commands[] = 'exit';
+                }
+            }
+
+            // 2. Enter interface configuration
+            $commands[] = 'interface ' . $portName;
+
+            // 3. Set Access VLAN
+            if ($vlanId >= 1 && $vlanId <= 4094) {
+                $commands[] = 'switchport mode access';
+                $commands[] = 'switchport access vlan ' . $vlanId;
+            }
+
+            // 4. Set Port Description / Alias
+            if (array_key_exists('alias', $params)) {
+                $alias = trim((string)$params['alias']);
+                $cleanAlias = preg_replace('/[^a-zA-Z0-9 _.:\/-]/', '', $alias);
+                if ($cleanAlias === '') {
+                    $commands[] = 'no description';
+                } else {
+                    $commands[] = 'description ' . substr($cleanAlias, 0, 64);
+                }
+            }
+
+            // 5. Set Port Admin Status (up / down)
+            if (isset($params['admin_status']) && $params['admin_status'] !== '') {
+                if (strtolower($params['admin_status']) === 'down') {
+                    $commands[] = 'shutdown';
+                } elseif (strtolower($params['admin_status']) === 'up') {
+                    $commands[] = 'no shutdown';
+                }
+            }
+
+            $commands[] = 'exit';
+            $commands[] = 'exit';
+
+            // 6. Save running-config to startup-config unless skipped
+            $saveConfig = !isset($params['save_config']) || !empty($params['save_config']);
+            if ($saveConfig) {
+                $commands[] = 'copy running-config startup-config';
+            }
+        }
+
+        $payload = base64_encode(json_encode(array(
+            'ip'       => $ip,
+            'user'     => $user,
+            'pass'     => $pass,
+            'commands' => $commands
+        )));
+
+        $pyScript = <<<'PY'
+import sys, os, pty, time, select, json, base64
+
+data = json.loads(base64.b64decode(sys.argv[1]).decode('utf-8'))
+ip = data['ip']
+user = data['user']
+pw = data['pass']
+commands = data['commands']
+
+pid, fd = pty.fork()
+if pid == 0:
+    os.execvp('ssh', [
+        'ssh',
+        '-o', 'StrictHostKeyChecking=no',
+        '-o', 'UserKnownHostsFile=/dev/null',
+        '-o', 'ConnectTimeout=8',
+        '-o', 'KexAlgorithms=+diffie-hellman-group1-sha1,diffie-hellman-group14-sha1',
+        '-o', 'HostKeyAlgorithms=+ssh-rsa',
+        '-o', 'Ciphers=+aes128-cbc,3des-cbc,aes192-cbc,aes256-cbc',
+        user + '@' + ip
+    ])
+
+buf = b''
+def read_until(patterns, timeout=10.0):
+    global buf
+    end = time.time() + timeout
+    while time.time() < end:
+        r, _, _ = select.select([fd], [], [], 0.15)
+        if fd in r:
+            try:
+                chunk = os.read(fd, 4096)
+                if not chunk:
+                    break
+                buf += chunk
+                for p in patterns:
+                    if p in buf:
+                        return p
+            except OSError:
+                break
+    return None
+
+matched = read_until([b'Password:', b'password:', b'User Name:', b'Username:', b'#', b'>'], 12.0)
+if matched in [b'User Name:', b'Username:']:
+    os.write(fd, (user + '\r').encode('utf-8'))
+    buf = b''
+    matched = read_until([b'Password:', b'password:'], 8.0)
+
+if matched in [b'Password:', b'password:']:
+    os.write(fd, (pw + '\r').encode('utf-8'))
+    buf = b''
+    matched = read_until([b'#', b'>', b'Password:', b'password:', b'Permission denied', b'Authentication failed'], 10.0)
+
+if matched not in [b'#', b'>']:
+    out_str = buf.decode('utf-8', 'ignore')
+    print(json.dumps({'success': False, 'message': 'SSH-Authentifizierung fehlgeschlagen oder Timeout beim Verbindungsaufbau.', 'output': out_str}))
+    sys.exit(0)
+
+if matched == b'>':
+    os.write(fd, b'enable\r')
+    buf = b''
+    m2 = read_until([b'#', b'Password:', b'password:'], 5.0)
+    if m2 in [b'Password:', b'password:']:
+        os.write(fd, (pw + '\r').encode('utf-8'))
+        buf = b''
+        read_until([b'#'], 5.0)
+
+full_log = buf.decode('utf-8', 'ignore')
+buf = b''
+
+os.write(fd, b'terminal datadump\r')
+read_until([b'#'], 3.0)
+buf = b''
+
+for cmd in commands:
+    os.write(fd, (cmd + '\r').encode('utf-8'))
+    m = read_until([b'(Y/N)', b'[Y/N]', b'Overwrite file', b'#'], 12.0)
+    full_log += buf.decode('utf-8', 'ignore')
+    buf = b''
+    if m in [b'(Y/N)', b'[Y/N]', b'Overwrite file']:
+        os.write(fd, b'Y\r')
+        read_until([b'#'], 20.0)
+        full_log += buf.decode('utf-8', 'ignore')
+        buf = b''
+
+try:
+    os.write(fd, b'exit\r')
+    os.close(fd)
+except Exception:
+    pass
+
+print(json.dumps({'success': True, 'message': 'SSH-Befehle erfolgreich ausgeführt.', 'output': full_log}))
+PY;
+
+        $pyBin = 'python3';
+        $checkPy = @shell_exec('which python3 2>/dev/null');
+        if (!$checkPy || trim($checkPy) === '') {
+            $pyBin = 'python';
+        }
+
+        $tmpFile = tempnam(sys_get_temp_dir(), 'nm_ssh_');
+        file_put_contents($tmpFile, $pyScript);
+        $cmdLine = $pyBin . ' ' . escapeshellarg($tmpFile) . ' ' . escapeshellarg($payload) . ' 2>&1';
+        $rawOut = @shell_exec($cmdLine);
+        @unlink($tmpFile);
+
+        if (!$rawOut) {
+            return array('success' => false, 'message' => 'Fehler beim Starten des SSH-Clients.', 'commands' => $commands);
+        }
+
+        // Find the last JSON line in output
+        $lines = explode("\n", trim($rawOut));
+        $lastLine = end($lines);
+        $res = @json_decode($lastLine, true);
+        if (!is_array($res)) {
+            return array(
+                'success'  => false,
+                'message'  => 'Unerwartete SSH-Antwort vom Switch.',
+                'output'   => $rawOut,
+                'commands' => $commands
+            );
+        }
+        $res['commands'] = $commands;
+        return $res;
     }
 }

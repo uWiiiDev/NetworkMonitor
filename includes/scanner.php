@@ -133,7 +133,7 @@ class NetworkScanner
             }
 
             // Vorherigen Gerätestand dieses Scopes für die Alarm-Auswertung merken
-            $prevStmt = $this->pdo->prepare("SELECT id, ip_address, hostname, custom_name, status, alert_mode, last_alert_state FROM devices WHERE scope_id = :sid");
+            $prevStmt = $this->pdo->prepare("SELECT id, ip_address, hostname, custom_name, status, alert_mode, last_alert_state, switch_snmp_community FROM devices WHERE scope_id = :sid");
             $prevStmt->execute(array(':sid' => $scope['id']));
             $prevDevicesByIp = array();
             while ($pr = $prevStmt->fetch()) {
@@ -226,9 +226,13 @@ class NetworkScanner
                     $hasBridgeTable = false;
 
                     // Detail-SNMP-Abfrage (Interfaces, Bridge-MIB MAC-Tabelle, LLDP) NUR für Geräte,
-                    // die beim schnellen Multi-Host-UDP-Check geantwortet haben!
-                    if (isset($responsiveSnmpIps[$ip])) {
-                        $snmpClient = new SnmpClient($ip, $community, $this->config['snmp_timeout_ms']);
+                    // die beim schnellen Multi-Host-UDP-Check geantwortet haben oder eine eigene Switch-SNMP-Community besitzen!
+                    $customSnmpComm = (isset($prevDevicesByIp[$ip]) && !empty($prevDevicesByIp[$ip]['switch_snmp_community']))
+                        ? trim($prevDevicesByIp[$ip]['switch_snmp_community'])
+                        : '';
+                    if (isset($responsiveSnmpIps[$ip]) || $customSnmpComm !== '') {
+                        $devComm = ($customSnmpComm !== '') ? $customSnmpComm : $community;
+                        $snmpClient = new SnmpClient($ip, $devComm, $this->config['snmp_timeout_ms']);
                         $snmpData = $snmpClient->probeDevice();
                         if ($snmpData !== null) {
                             $snmpEnabled = 1;

@@ -2637,6 +2637,33 @@ function renderInventoryTable() {
     tbody.innerHTML = html;
 }
 
+function normalizeSwitchVlansMap(rawVlans) {
+    var out = {};
+    if (Array.isArray(rawVlans)) {
+        for (var i = 0; i < rawVlans.length; i++) {
+            var item = rawVlans[i];
+            if (item && item.id !== undefined) {
+                out[String(item.id)] = item.name || ('VLAN ' + item.id);
+            }
+        }
+    } else if (rawVlans && typeof rawVlans === 'object') {
+        var keys = Object.keys(rawVlans);
+        for (var k = 0; k < keys.length; k++) {
+            var key = keys[k];
+            var val = rawVlans[key];
+            if (val && typeof val === 'object' && val.id !== undefined) {
+                out[String(val.id)] = val.name || ('VLAN ' + val.id);
+            } else {
+                out[String(key)] = String(val || ('VLAN ' + key));
+            }
+        }
+    }
+    if (Object.keys(out).length === 0) {
+        out['1'] = 'Default';
+    }
+    return out;
+}
+
 function openSnmpModal(devId) {
     var dev = null;
     for (var i = 0; i < AppState.devices.length; i++) {
@@ -2722,20 +2749,45 @@ function openSnmpModal(devId) {
         html += '</div>';
     }
 
+    // 2b. Konfigurierte VLANs auf dem Switch (Q-BRIDGE-MIB)
+    var normVlans = normalizeSwitchVlansMap(snmp.vlans);
+    var vKeys = Object.keys(normVlans);
+    if (vKeys.length > 0) {
+        var vlanPills = '';
+        for (var vk = 0; vk < vKeys.length; vk++) {
+            var vid = vKeys[vk];
+            var vname = normVlans[vid] || ('VLAN ' + vid);
+            vlanPills += '<span class="badge" style="background:rgba(59,130,246,0.18);border:1px solid rgba(59,130,246,0.45);color:#93c5fd;font-family:monospace;padding:4px 10px;font-size:12px;">VLAN ' + escapeHtml(String(vid)) + ': <b style="color:#f8fafc;">' + escapeHtml(String(vname)) + '</b></span>';
+        }
+        html += '<div style="background:rgba(15,23,42,0.7);border:1px solid var(--border-color);border-radius:8px;padding:14px;">' +
+            '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;flex-wrap:wrap;gap:8px;">' +
+                '<div class="panel-title" style="margin-bottom:0;color:#93c5fd;">Eingerichtete VLANs auf diesem Switch (Q-BRIDGE-MIB – ' + vKeys.length + ' VLANs)</div>' +
+                '<button class="btn btn-sm" style="border-color:#3b82f6;color:#93c5fd;" onclick="closeSnmpModal(); openSwitchGraphicModal(' + dev.id + ', false);">⚙️ VLANs &amp; Ports per SSH verwalten</button>' +
+            '</div>' +
+            '<div style="display:flex;gap:8px;flex-wrap:wrap;">' + vlanPills + '</div>' +
+        '</div>';
+    }
+
     // 3. Netzwerk-Interfaces & Switch-Ports (IF-MIB)
     var ifs = snmp.interfaces || [];
     html += '<div style="background:rgba(15,23,42,0.7);border:1px solid var(--border-color);border-radius:8px;padding:14px;">' +
         '<div class="panel-title" style="margin-bottom:10px;color:#60a5fa;">Netzwerk-Interfaces &amp; Switch-Ports (IF-MIB – ' + ifs.length + ' Ports)</div>';
     if (ifs.length > 0) {
         html += '<table class="data-table"><thead><tr>' +
-            '<th>Index</th><th>Port / Interface</th><th>Beschreibung (Alias)</th><th>Status</th><th>Speed</th><th>Traffic RX</th><th>Traffic TX</th><th>Pakete-Fehler</th>' +
+            '<th>Index</th><th>Port / Interface</th><th>VLAN (PVID)</th><th>Beschreibung (Alias)</th><th>Status</th><th>Speed</th><th>Traffic RX</th><th>Traffic TX</th><th>Pakete-Fehler</th>' +
             '</tr></thead><tbody>';
         for (var idx = 0; idx < ifs.length; idx++) {
             var inf = ifs[idx];
             var stBadge = (inf.status === 'up') ? '<span class="badge badge-online">UP</span>' : '<span class="badge badge-offline">DOWN</span>';
+            if (inf.admin_status === 'down') {
+                stBadge = '<span class="badge badge-offline" title="Port administrativ abgeschaltet (shutdown)">ADMIN OFF</span>';
+            }
+            var pVlan = inf.vlan ? parseInt(inf.vlan, 10) : 1;
+            var vlanBadge = '<span class="badge" style="font-family:monospace;background:' + (pVlan !== 1 ? 'rgba(245,158,11,0.22);color:#fcd34d;border:1px solid #f59e0b;' : 'rgba(148,163,184,0.15);color:#cbd5e1;') + '">VLAN ' + pVlan + '</span>';
             html += '<tr>' +
                 '<td style="font-family:monospace;">#' + escapeHtml(String(inf.ifIndex)) + '</td>' +
                 '<td style="font-weight:600;font-family:monospace;color:#93c5fd;">' + escapeHtml(inf.name || '-') + '</td>' +
+                '<td>' + vlanBadge + '</td>' +
                 '<td>' + escapeHtml(inf.alias || '-') + '</td>' +
                 '<td>' + stBadge + '</td>' +
                 '<td>' + escapeHtml(inf.speed || '-') + '</td>' +
@@ -3087,8 +3139,11 @@ function buildRealSwitchGraphicModel(dev) {
                 shortName: String(pNo),
                 isSfp: isSfpPort,
                 status: (pi.status === 'up' || (mapped && mapped.list.length > 0)) ? 'up' : 'down',
+                admin_status: pi.admin_status || 'up',
+                vlan: pi.vlan ? parseInt(pi.vlan, 10) : 1,
                 speed: pi.speed || ((mapped && mapped.list.length > 0) ? '1 Gbps' : 'Down'),
                 alias: pi.alias || (mapped && mapped.list.length > 0 ? mapped.list[0].name : ''),
+                rawAlias: pi.alias || '',
                 rx_mb: pi.rx_mb || 0,
                 tx_mb: pi.tx_mb || 0,
                 in_errors: pi.in_errors || 0,
@@ -3141,8 +3196,11 @@ function buildRealSwitchGraphicModel(dev) {
                 shortName: String(pNumber),
                 isSfp: isSfpFallback,
                 status: 'up',
+                admin_status: 'up',
+                vlan: 1,
                 speed: pInfo.isUplink ? '1 Gbps Uplink' : '1 Gbps',
                 alias: pInfo.list.length > 0 ? pInfo.list[0].name : pLabel,
+                rawAlias: '',
                 rx_mb: 0,
                 tx_mb: 0,
                 in_errors: 0,
@@ -3165,8 +3223,11 @@ function buildRealSwitchGraphicModel(dev) {
                     shortName: String(fp),
                     isSfp: isSfpSlot,
                     status: 'down',
+                    admin_status: 'up',
+                    vlan: 1,
                     speed: 'Down',
                     alias: 'Freier Port',
+                    rawAlias: '',
                     rx_mb: 0,
                     tx_mb: 0,
                     in_errors: 0,
@@ -3202,13 +3263,18 @@ function buildRealSwitchGraphicModel(dev) {
         switchIp: dev.ip_address,
         vendor: dev.vendor || 'Managed Switch',
         model: snmp.deviceModel || dev.snmp_sysdescr || dev.vendor || 'Netzwerk-Switch',
+        vlans: normalizeSwitchVlansMap(snmp.vlans),
+        sshUser: dev.switch_ssh_user || '',
+        hasSshPass: parseInt(dev.has_ssh_pass || 0, 10) === 1,
+        snmpCommunity: dev.switch_snmp_community || 'public',
+        hasSnmpWrite: parseInt(dev.has_snmp_write || 0, 10) === 1,
         upstreamLinks: upstreamLinks,
         downstreamSwitches: downstreamSwitches,
         units: units
     };
 }
 
-function openSwitchGraphicModal(devId, isDemoPreview) {
+function openSwitchGraphicModal(devId, isDemoPreview, keepSelectedPortName) {
     var modal = document.getElementById('switch-graphic-modal');
     var titleEl = document.getElementById('switch-graphic-title');
     var bodyEl = document.getElementById('switch-graphic-body');
@@ -3234,6 +3300,7 @@ function openSwitchGraphicModal(devId, isDemoPreview) {
 
     SwitchGraphicState.currentDevId = devId;
     SwitchGraphicState.isDemo = model.isDemo;
+    SwitchGraphicState.currentModel = model;
     SwitchGraphicState.portsByKey = {};
     SwitchGraphicState.selectedPortKey = null;
 
@@ -3242,6 +3309,58 @@ function openSwitchGraphicModal(devId, isDemoPreview) {
         (isStacked ? (' <span class="badge" style="background:rgba(168,85,247,0.25);border:1px solid #a855f7;color:#e9d5ff;margin-left:8px;">📚 STACK: ' + model.units.length + ' SWITCHE</span>') : '');
 
     var html = '';
+
+    // =========================================================================
+    // 0. SSH / SNMP ZUGANGSDATEN & KONFIGURATIONS-LEISTE (für Operator / Admin)
+    // =========================================================================
+    if (!model.isDemo && userCanEdit()) {
+        var sshBadge = model.hasSshPass
+            ? '<span class="badge" style="background:rgba(16,185,129,0.22);border:1px solid #10b981;color:#34d399;">🟢 SSH-Zugang hinterlegt (' + escapeHtml(model.sshUser || 'admin') + ')</span>'
+            : '<span class="badge" style="background:rgba(245,158,11,0.22);border:1px solid #f59e0b;color:#fcd34d;">🟡 Noch kein SSH-Zugang für diesen Switch hinterlegt</span>';
+
+        var vlanCount = model.vlans ? Object.keys(model.vlans).length : 1;
+        var vlanSummaryPills = '';
+        if (model.vlans) {
+            var vIds = Object.keys(model.vlans);
+            for (var vi = 0; vi < vIds.length; vi++) {
+                var vId = vIds[vi];
+                vlanSummaryPills += '<span class="badge" style="background:rgba(59,130,246,0.18);border:1px solid rgba(59,130,246,0.45);color:#93c5fd;font-family:monospace;font-size:11px;">VLAN ' + escapeHtml(String(vId)) + ' (' + escapeHtml(String(model.vlans[vId])) + ')</span>';
+            }
+        }
+
+        html += '<div style="background:rgba(15,23,42,0.85);border:1px solid rgba(59,130,246,0.38);border-radius:10px;padding:10px 14px;display:flex;flex-direction:column;gap:10px;">' +
+            '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">' +
+                '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">' +
+                    '<span style="font-size:12.5px;font-weight:700;color:#f8fafc;">🔑 Switch-Steuerung (Hybrid SNMP + SSH):</span>' +
+                    sshBadge +
+                    '<span style="font-size:11.5px;color:var(--text-secondary);">Aktive VLANs (' + vlanCount + '):</span>' +
+                    vlanSummaryPills +
+                '</div>' +
+                '<button class="btn btn-sm" style="border-color:#60a5fa;color:#93c5fd;" onclick="toggleSwitchCredsForm()">🔑 SSH- &amp; SNMP-Zugangsdaten ' + (model.hasSshPass ? 'ändern / testen' : 'jetzt hinterlegen') + '</button>' +
+            '</div>' +
+            '<div id="sw-creds-form-box" style="display:' + (model.hasSshPass ? 'none' : 'block') + ';border-top:1px dashed rgba(148,163,184,0.25);padding-top:10px;">' +
+                '<div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(190px, 1fr));gap:10px;align-items:end;">' +
+                    '<div class="form-group" style="margin:0;">' +
+                        '<label>SSH-Benutzername (Switch CLI)</label>' +
+                        '<input type="text" id="sw-cred-ssh-user" class="form-input" value="' + escapeHtml(model.sshUser || 'cisco') + '" placeholder="z.B. cisco oder admin">' +
+                    '</div>' +
+                    '<div class="form-group" style="margin:0;">' +
+                        '<label>SSH-Passwort ' + (model.hasSshPass ? '<span style="color:#34d399;">(gespeichert – leer lassen zum Behalten)</span>' : '') + '</label>' +
+                        '<input type="password" id="sw-cred-ssh-pass" class="form-input" value="" placeholder="' + (model.hasSshPass ? '•••••••• (unverändert)' : 'SSH-Passwort eingeben') + '">' +
+                    '</div>' +
+                    '<div class="form-group" style="margin:0;">' +
+                        '<label>SNMPv2c Lese-Community</label>' +
+                        '<input type="text" id="sw-cred-snmp-comm" class="form-input" value="' + escapeHtml(model.snmpCommunity || 'public') + '" placeholder="public">' +
+                    '</div>' +
+                    '<div style="display:flex;gap:8px;flex-wrap:wrap;">' +
+                        '<button id="btn-save-sw-creds" class="btn btn-primary btn-sm" style="padding:8px 12px;" onclick="saveSwitchCredentials(' + devId + ', true)">🔌 Speichern &amp; SSH/SNMP testen</button>' +
+                        '<button class="btn btn-sm" style="padding:8px 10px;" onclick="saveSwitchCredentials(' + devId + ', false)">💾 Nur speichern</button>' +
+                    '</div>' +
+                '</div>' +
+                '<div id="sw-creds-status-msg" style="margin-top:8px;font-size:12px;display:none;"></div>' +
+            '</div>' +
+        '</div>';
+    }
 
     if (model.isDemo) {
         html += '<div style="background:rgba(168,85,247,0.12);border:1px solid rgba(168,85,247,0.45);border-radius:8px;padding:10px 14px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">' +
@@ -3372,7 +3491,9 @@ function openSwitchGraphicModal(devId, isDemoPreview) {
         for (var pi = 0; pi < unitObj.ports.length; pi++) {
             var prt = unitObj.ports[pi];
             SwitchGraphicState.portsByKey[prt.key] = prt;
-            if (!SwitchGraphicState.selectedPortKey && prt.status === 'up') {
+            if (keepSelectedPortName && prt.name === keepSelectedPortName) {
+                SwitchGraphicState.selectedPortKey = prt.key;
+            } else if (!SwitchGraphicState.selectedPortKey && prt.status === 'up') {
                 SwitchGraphicState.selectedPortKey = prt.key;
             }
             if (prt.isSfp) {
@@ -3476,7 +3597,7 @@ function openSwitchGraphicModal(devId, isDemoPreview) {
     }
 
     // =========================================================================
-    // 3. INTERAKTIVE PORT-INSPEKTOR-BOX (Detailansicht bei Klick auf einen Port)
+    // 3. INTERAKTIVE PORT-INSPEKTOR-BOX (Detailansicht & SSH-Steuerung bei Klick auf einen Port)
     // =========================================================================
     html += '<div id="switch-graphic-port-inspector" style="background:rgba(15,23,42,0.9);border:1px solid var(--border-color);border-radius:10px;padding:14px;"></div>';
 
@@ -3493,6 +3614,8 @@ function renderSwitchPortRowHtml(portList, rowPosition) {
     for (var i = 0; i < portList.length; i++) {
         var p = portList[i];
         var isUp = (p.status === 'up');
+        var isAdmDown = (p.admin_status === 'down');
+        var pVlan = p.vlan ? parseInt(p.vlan, 10) : 1;
         var spLower = String(p.speed || '').toLowerCase();
         var isFastEth = (isUp && (spLower.indexOf('100 ') !== -1 || spLower.indexOf('10 ') === 0));
 
@@ -3501,7 +3624,12 @@ function renderSwitchPortRowHtml(portList, rowPosition) {
         var ledCol = '#475569';
         var badgeCol = '#94a3b8';
 
-        if (p.isStackPort) {
+        if (isAdmDown) {
+            borderCol = '#ef4444';
+            bgCol = 'rgba(239, 68, 68, 0.14)';
+            ledCol = '#ef4444';
+            badgeCol = '#fca5a5';
+        } else if (p.isStackPort) {
             borderCol = '#a855f7';
             bgCol = 'rgba(168, 85, 247, 0.22)';
             ledCol = '#c084fc';
@@ -3523,10 +3651,7 @@ function renderSwitchPortRowHtml(portList, rowPosition) {
             badgeCol = '#a7f3d0';
         }
 
-        // Kleiner optischer Abstand nach jeweils 4 Spalten (= 8 Ports wie bei echten Switch-Portblöcken)
-        var groupMargin = (rowPosition !== 'sfp' && i > 0 && i % 4 === 0) ? 'margin-left:8px;' : '';
-
-        var devLabel = 'Frei';
+        var devLabel = isAdmDown ? 'OFF' : 'Frei';
         if (p.isStackPort) {
             devLabel = 'STACK';
         } else if (p.connectedDevices && p.connectedDevices.length > 0) {
@@ -3536,22 +3661,28 @@ function renderSwitchPortRowHtml(portList, rowPosition) {
             }
         } else if (isUp) {
             devLabel = p.alias || 'Aktiv';
+        } else if (p.rawAlias) {
+            devLabel = p.rawAlias;
         }
         if (devLabel.length > 9) {
             devLabel = devLabel.substring(0, 8) + '…';
         }
 
+        var vlanPillStyle = (pVlan !== 1)
+            ? 'background:rgba(245,158,11,0.3);color:#fde68a;border:1px solid #f59e0b;'
+            : 'background:rgba(15,23,42,0.75);color:#94a3b8;border:1px solid rgba(148,163,184,0.25);';
+
         var errDot = (p.in_errors && p.in_errors > 0)
             ? '<span title="' + p.in_errors + ' Paketfehler auf diesem Port!" style="width:7px;height:7px;border-radius:50%;background:#ef4444;box-shadow:0 0 6px #ef4444;display:inline-block;"></span>'
-            : '';
+            : '<span style="font-family:monospace;font-size:8.5px;font-weight:700;padding:0 3px;border-radius:3px;' + vlanPillStyle + '">V' + pVlan + '</span>';
 
         out += '<div id="swport_' + p.key + '" class="sw-front-port" onclick="selectSwitchGraphicPort(\'' + p.key + '\')" ' +
-            'title="Port ' + escapeHtml(p.name) + ' (' + escapeHtml(p.speed) + ') – ' + escapeHtml(p.alias || 'Klicken für Details') + '" ' +
+            'title="Port ' + escapeHtml(p.name) + ' | VLAN ' + pVlan + ' | ' + escapeHtml(p.speed) + ' – ' + escapeHtml(p.alias || 'Klicken zum Konfigurieren') + '" ' +
             'style="min-width:0;background:' + bgCol + ';border:2px solid ' + borderCol + ';border-radius:6px;padding:5px 3px;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:space-between;transition:transform 0.12s, box-shadow 0.12s;user-select:none;">' +
-                // Kopfzeile im Port: LED + Portnummer
-                '<div style="width:100%;display:flex;justify-content:space-between;align-items:center;margin-bottom:3px;">' +
-                    '<span style="width:7px;height:7px;border-radius:50%;background:' + ledCol + ';' + (isUp ? ('box-shadow:0 0 6px ' + ledCol + ';') : '') + '"></span>' +
-                    '<span style="font-family:monospace;font-size:10.5px;font-weight:800;color:#f8fafc;">#' + escapeHtml(p.shortName) + '</span>' +
+                // Kopfzeile im Port: LED + Portnummer + VLAN-Tag
+                '<div style="width:100%;display:flex;justify-content:space-between;align-items:center;margin-bottom:3px;gap:2px;">' +
+                    '<span style="width:7px;height:7px;border-radius:50%;flex-shrink:0;background:' + ledCol + ';' + (isUp ? ('box-shadow:0 0 6px ' + ledCol + ';') : '') + '"></span>' +
+                    '<span style="font-family:monospace;font-size:10px;font-weight:800;color:#f8fafc;">#' + escapeHtml(p.shortName) + '</span>' +
                     errDot +
                 '</div>' +
                 // Stilisierte RJ45 / SFP Buchsen-Kontur
@@ -3575,6 +3706,7 @@ function selectSwitchGraphicPort(portKey) {
     if (!p || !box) return;
 
     SwitchGraphicState.selectedPortKey = portKey;
+    var model = SwitchGraphicState.currentModel || {};
 
     // Optische Hervorhebung des angeklickten Ports in der 19"-Blende
     var allTiles = document.querySelectorAll('#switch-graphic-body .sw-front-port');
@@ -3591,6 +3723,14 @@ function selectSwitchGraphicPort(portKey) {
     var stBadge = (p.status === 'up')
         ? '<span class="badge badge-online">ONLINE / LINK UP (' + escapeHtml(p.speed) + ')</span>'
         : '<span class="badge badge-offline">FREI / LINK DOWN</span>';
+    if (p.admin_status === 'down') {
+        stBadge = '<span class="badge badge-offline">🔴 ADMINISTRATIV ABGESCHALTET (SHUTDOWN)</span>';
+    }
+
+    var curVlan = p.vlan ? parseInt(p.vlan, 10) : 1;
+    var vlanMap = model.vlans || { '1': 'default' };
+    var curVlanName = vlanMap[curVlan] || ('VLAN ' + curVlan);
+    var vlanBadge = '<span class="badge" style="font-family:monospace;font-size:12px;background:' + (curVlan !== 1 ? 'rgba(245,158,11,0.25);border:1px solid #f59e0b;color:#fde68a;' : 'rgba(59,130,246,0.2);border:1px solid #3b82f6;color:#93c5fd;') + '">🏷 VLAN ' + curVlan + ' (' + escapeHtml(String(curVlanName)) + ')</span>';
 
     var roleBadge = '<span class="badge" style="background:rgba(148,163,184,0.18);color:#cbd5e1;">Access-Port</span>';
     if (p.isStackPort) {
@@ -3619,10 +3759,77 @@ function selectSwitchGraphicPort(portKey) {
         devsHtml = '<div style="font-size:12.5px;color:var(--text-secondary);margin-top:6px;">An diesem Port wurde aktuell kein aktives Endgerät in der MAC-/Topologie-Tabelle gemeldet.</div>';
     }
 
+    // Interaktives SSH Port- & VLAN-Konfigurationspanel für Operatoren & Admins
+    var sshConfigHtml = '';
+    if (!SwitchGraphicState.isDemo && userCanEdit()) {
+        var vKeys = Object.keys(vlanMap).map(function (k) { return parseInt(k, 10); }).sort(function (a, b) { return a - b; });
+        if (vKeys.indexOf(curVlan) === -1) {
+            vKeys.push(curVlan);
+            vKeys.sort(function (a, b) { return a - b; });
+        }
+        var vlanOpts = '';
+        for (var vk = 0; vk < vKeys.length; vk++) {
+            var vid = vKeys[vk];
+            var vlbl = vlanMap[vid] ? ('VLAN ' + vid + ' – ' + vlanMap[vid]) : ('VLAN ' + vid);
+            var vsel = (vid === curVlan) ? 'selected' : '';
+            vlanOpts += '<option value="' + vid + '" ' + vsel + '>' + escapeHtml(vlbl) + '</option>';
+        }
+        vlanOpts += '<option value="__new__">➕ Neues VLAN auf Switch anlegen &amp; zuweisen...</option>';
+
+        var uplinkWarnHtml = p.isUplink
+            ? '<div style="background:rgba(239,68,68,0.16);border:1px solid #ef4444;border-radius:6px;padding:8px 12px;margin-bottom:10px;font-size:12px;color:#fecaca;">' +
+                '⚠️ <b>Achtung – Uplink-Schutz aktiv:</b> Über Port <b>' + escapeHtml(p.name) + '</b> ist dieser Switch mit dem übergeordneten Gateway/Netzwerk verbunden! Eine Änderung des Access-VLANs oder das Abschalten dieses Ports kann die Verbindung zum Switch trennen.' +
+              '</div>'
+            : '';
+
+        sshConfigHtml =
+            '<div style="margin-top:14px;padding-top:12px;border-top:1px solid rgba(59,130,246,0.35);">' +
+                '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px;">' +
+                    '<div style="font-size:12.5px;font-weight:700;color:#60a5fa;text-transform:uppercase;letter-spacing:0.04em;">⚙️ Live Port- &amp; VLAN-Konfiguration per SSH (Port ' + escapeHtml(p.name) + ')</div>' +
+                    '<span style="font-size:11.5px;color:var(--text-secondary);">Änderungen werden direkt per SSH auf <b>' + escapeHtml(model.switchIp || '') + '</b> ausgeführt</span>' +
+                '</div>' +
+                uplinkWarnHtml +
+                '<div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));gap:10px;align-items:end;">' +
+                    '<div class="form-group" style="margin:0;">' +
+                        '<label>Access-VLAN (PVID) auf Port ' + escapeHtml(p.name) + '</label>' +
+                        '<select id="sw-port-vlan-select" class="select-input" onchange="onSwitchVlanSelectChange()">' + vlanOpts + '</select>' +
+                    '</div>' +
+                    '<div id="sw-new-vlan-id-wrap" class="form-group" style="margin:0;display:none;">' +
+                        '<label style="color:#fcd34d;">Neue VLAN-ID (2–4094)</label>' +
+                        '<input type="number" id="sw-new-vlan-id" class="form-input" min="2" max="4094" placeholder="z.B. 20">' +
+                    '</div>' +
+                    '<div id="sw-new-vlan-name-wrap" class="form-group" style="margin:0;display:none;">' +
+                        '<label style="color:#fcd34d;">Neuer VLAN-Name</label>' +
+                        '<input type="text" id="sw-new-vlan-name" class="form-input" placeholder="z.B. Gaeste, IoT, VoIP">' +
+                    '</div>' +
+                    '<div class="form-group" style="margin:0;">' +
+                        '<label>Port-Beschreibung (Switch Alias)</label>' +
+                        '<input type="text" id="sw-port-alias-input" class="form-input" value="' + escapeHtml(p.rawAlias || '') + '" placeholder="z.B. Buero-EG, Drucker, AP">' +
+                    '</div>' +
+                    '<div class="form-group" style="margin:0;">' +
+                        '<label>Port Admin-Status (PoE / Link)</label>' +
+                        '<select id="sw-port-admin-status" class="select-input">' +
+                            '<option value="up" ' + (p.admin_status !== 'down' ? 'selected' : '') + '>🟢 Aktiv (no shutdown)</option>' +
+                            '<option value="down" ' + (p.admin_status === 'down' ? 'selected' : '') + '>🔴 Deaktiviert (shutdown)</option>' +
+                        '</select>' +
+                    '</div>' +
+                '</div>' +
+                '<div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px;flex-wrap:wrap;gap:10px;">' +
+                    '<label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#cbd5e1;cursor:pointer;">' +
+                        '<input type="checkbox" id="sw-port-save-flash" checked> ' +
+                        '<span>Dauerhaft im Switch-Flash sichern (<code>copy running-config startup-config</code>)</span>' +
+                    '</label>' +
+                    '<button id="btn-apply-sw-port" class="btn btn-primary" onclick="applySwitchPortConfig(\'' + p.key + '\')">⚡ Jetzt per SSH auf Switch anwenden</button>' +
+                '</div>' +
+                '<div id="sw-port-config-status" style="margin-top:10px;font-size:12px;display:none;"></div>' +
+            '</div>';
+    }
+
     box.innerHTML =
         '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;border-bottom:1px solid var(--border-color);padding-bottom:10px;margin-bottom:10px;">' +
             '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">' +
                 '<span style="font-family:monospace;font-size:16px;font-weight:800;color:#60a5fa;">Port ' + escapeHtml(p.name) + ' (Unit #' + p.unit + ')</span>' +
+                vlanBadge +
                 stBadge +
                 roleBadge +
             '</div>' +
@@ -3633,7 +3840,207 @@ function selectSwitchGraphicPort(portKey) {
             '</div>' +
         '</div>' +
         '<div style="font-size:12px;font-weight:700;color:var(--text-secondary);text-transform:uppercase;">Angeschlossene Geräte / Gegenstelle an Buchse #' + escapeHtml(p.shortName) + ':</div>' +
-        devsHtml;
+        devsHtml +
+        sshConfigHtml;
+}
+
+function toggleSwitchCredsForm() {
+    var box = document.getElementById('sw-creds-form-box');
+    if (!box) return;
+    box.style.display = (box.style.display === 'none') ? 'block' : 'none';
+}
+
+function onSwitchVlanSelectChange() {
+    var sel = document.getElementById('sw-port-vlan-select');
+    var idWrap = document.getElementById('sw-new-vlan-id-wrap');
+    var nameWrap = document.getElementById('sw-new-vlan-name-wrap');
+    if (!sel || !idWrap || !nameWrap) return;
+    var isNew = (sel.value === '__new__');
+    idWrap.style.display = isNew ? 'block' : 'none';
+    nameWrap.style.display = isNew ? 'block' : 'none';
+}
+
+function saveSwitchCredentials(devId, testConn) {
+    var userEl = document.getElementById('sw-cred-ssh-user');
+    var passEl = document.getElementById('sw-cred-ssh-pass');
+    var commEl = document.getElementById('sw-cred-snmp-comm');
+    var msgEl = document.getElementById('sw-creds-status-msg');
+    var btnEl = document.getElementById('btn-save-sw-creds');
+
+    var payload = {
+        device_id: devId,
+        switch_ssh_user: userEl ? userEl.value : '',
+        switch_ssh_pass: passEl ? passEl.value : '',
+        switch_snmp_community: commEl ? commEl.value : 'public',
+        test_connection: testConn ? 1 : 0
+    };
+
+    if (msgEl) {
+        msgEl.style.display = 'block';
+        msgEl.style.color = '#93c5fd';
+        msgEl.innerHTML = testConn
+            ? '⏳ Speichere Zugangsdaten und teste SSH- &amp; SNMP-Verbindung zum Switch...'
+            : '⏳ Speichere Zugangsdaten...';
+    }
+    if (btnEl) btnEl.disabled = true;
+
+    fetch('api.php?action=save_switch_credentials', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (res) {
+        if (btnEl) btnEl.disabled = false;
+        if (!res.ok) {
+            if (msgEl) {
+                msgEl.style.color = '#fca5a5';
+                msgEl.textContent = '❌ Fehler: ' + (res.error || 'Unbekannter Fehler');
+            }
+            return;
+        }
+
+        // Aktualisiere Gerätedaten im lokalen AppState
+        for (var i = 0; i < AppState.devices.length; i++) {
+            if (parseInt(AppState.devices[i].id, 10) === parseInt(devId, 10)) {
+                AppState.devices[i].switch_ssh_user = payload.switch_ssh_user;
+                AppState.devices[i].switch_snmp_community = payload.switch_snmp_community;
+                AppState.devices[i].has_ssh_pass = res.has_ssh_pass ? 1 : 0;
+                if (res.snmp_data) {
+                    AppState.devices[i].snmp_enabled = 1;
+                    AppState.devices[i].snmp_ports_json = JSON.stringify(res.snmp_data);
+                }
+                break;
+            }
+        }
+
+        if (testConn && res.ssh_test) {
+            if (res.ssh_test.success) {
+                showToast('✅ SSH- & SNMP-Verbindung zum Switch erfolgreich getestet!');
+                openSwitchGraphicModal(devId, false);
+            } else {
+                if (msgEl) {
+                    msgEl.style.color = '#fca5a5';
+                    msgEl.textContent = '❌ SSH-Test fehlgeschlagen: ' + (res.ssh_test.message || '');
+                }
+            }
+        } else {
+            showToast('Switch-Zugangsdaten gespeichert.');
+            openSwitchGraphicModal(devId, false);
+        }
+    })
+    .catch(function (err) {
+        if (btnEl) btnEl.disabled = false;
+        if (msgEl) {
+            msgEl.style.color = '#fca5a5';
+            msgEl.textContent = '❌ Netzwerkfehler: ' + err.message;
+        }
+    });
+}
+
+function applySwitchPortConfig(portKey) {
+    var p = SwitchGraphicState.portsByKey[portKey];
+    if (!p || !SwitchGraphicState.currentDevId) return;
+
+    var vlanSel = document.getElementById('sw-port-vlan-select');
+    var newVlanIdEl = document.getElementById('sw-new-vlan-id');
+    var newVlanNameEl = document.getElementById('sw-new-vlan-name');
+    var aliasEl = document.getElementById('sw-port-alias-input');
+    var admEl = document.getElementById('sw-port-admin-status');
+    var saveEl = document.getElementById('sw-port-save-flash');
+    var statusBox = document.getElementById('sw-port-config-status');
+    var btn = document.getElementById('btn-apply-sw-port');
+
+    var selectedVlanVal = vlanSel ? vlanSel.value : String(p.vlan || 1);
+    var createVlanId = 0;
+    var createVlanName = '';
+    var targetVlanId = parseInt(selectedVlanVal, 10) || 1;
+
+    if (selectedVlanVal === '__new__') {
+        createVlanId = newVlanIdEl ? parseInt(newVlanIdEl.value, 10) : 0;
+        createVlanName = newVlanNameEl ? newVlanNameEl.value.trim() : '';
+        if (!createVlanId || createVlanId < 2 || createVlanId > 4094) {
+            showToast('Bitte eine gültige neue VLAN-ID zwischen 2 und 4094 eingeben.');
+            return;
+        }
+        targetVlanId = createVlanId;
+    }
+
+    var targetAdm = admEl ? admEl.value : 'up';
+
+    // Sicherheitsabfrage bei Änderungen am Uplink-Port
+    if (p.isUplink && (targetVlanId !== (p.vlan || 1) || targetAdm === 'down')) {
+        var okUplink = confirm(
+            'WARNUNG: Port ' + p.name + ' ist der Uplink-Port dieses Switches!\n\n' +
+            'Wenn du das VLAN auf diesem Port änderst oder den Port abschaltest, ist der Switch möglicherweise über das Netzwerk nicht mehr erreichbar.\n\n' +
+            'Möchtest du die Änderung trotzdem auf Port ' + p.name + ' anwenden?'
+        );
+        if (!okUplink) return;
+    }
+
+    var payload = {
+        device_id: SwitchGraphicState.currentDevId,
+        port_name: p.name,
+        vlan_id: targetVlanId,
+        create_vlan_id: createVlanId,
+        create_vlan_name: createVlanName,
+        alias: aliasEl ? aliasEl.value.trim() : '',
+        admin_status: targetAdm,
+        save_config: saveEl ? (saveEl.checked ? 1 : 0) : 1
+    };
+
+    if (statusBox) {
+        statusBox.style.display = 'block';
+        statusBox.style.padding = '8px 12px';
+        statusBox.style.borderRadius = '6px';
+        statusBox.style.background = 'rgba(59,130,246,0.16)';
+        statusBox.style.border = '1px solid #3b82f6';
+        statusBox.style.color = '#93c5fd';
+        statusBox.innerHTML = '⏳ Verbinde per SSH mit Switch und übertrage Konfiguration auf Port <b>' + escapeHtml(p.name) + '</b> (inkl. SNMP-Verifikation)...';
+    }
+    if (btn) btn.disabled = true;
+
+    fetch('api.php?action=configure_switch_port', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (res) {
+        if (btn) btn.disabled = false;
+        if (!res.ok) {
+            if (statusBox) {
+                statusBox.style.background = 'rgba(239,68,68,0.16)';
+                statusBox.style.border = '1px solid #ef4444';
+                statusBox.style.color = '#fca5a5';
+                statusBox.textContent = '❌ Fehler: ' + (res.error || 'SSH-Befehl fehlgeschlagen');
+            }
+            return;
+        }
+
+        // Aktualisiere SNMP-Daten im lokalen AppState, damit die 19"-Grafik sofort das neue VLAN, den Alias & Status zeigt!
+        if (res.snmp_data) {
+            for (var i = 0; i < AppState.devices.length; i++) {
+                if (parseInt(AppState.devices[i].id, 10) === parseInt(SwitchGraphicState.currentDevId, 10)) {
+                    AppState.devices[i].snmp_enabled = 1;
+                    AppState.devices[i].snmp_ports_json = JSON.stringify(res.snmp_data);
+                    break;
+                }
+            }
+        }
+
+        showToast('✅ Port ' + p.name + ' erfolgreich auf VLAN ' + targetVlanId + ' umgestellt & gespeichert!');
+        openSwitchGraphicModal(SwitchGraphicState.currentDevId, false, p.name);
+    })
+    .catch(function (err) {
+        if (btn) btn.disabled = false;
+        if (statusBox) {
+            statusBox.style.background = 'rgba(239,68,68,0.16)';
+            statusBox.style.border = '1px solid #ef4444';
+            statusBox.style.color = '#fca5a5';
+            statusBox.textContent = '❌ Netzwerkfehler: ' + err.message;
+        }
+    });
 }
 
 function exportInventoryCsv() {

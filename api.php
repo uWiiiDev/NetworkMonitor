@@ -33,6 +33,13 @@ try {
                 LEFT JOIN scopes s ON d.scope_id = s.id
                 ORDER BY d.scope_id ASC, d.ip_address ASC
             ")->fetchAll();
+            foreach ($devices as &$dRow) {
+                $dRow['has_ssh_pass'] = !empty($dRow['switch_ssh_pass']) ? 1 : 0;
+                $dRow['has_snmp_write'] = !empty($dRow['switch_snmp_write_community']) ? 1 : 0;
+                unset($dRow['switch_ssh_pass']);
+                unset($dRow['switch_snmp_write_community']);
+            }
+            unset($dRow);
             $links = $pdo->query("SELECT * FROM links ORDER BY id ASC")->fetchAll();
             $logs = $pdo->query("
                 SELECT l.*, s.name AS scope_name, s.cidr AS scope_cidr
@@ -259,6 +266,132 @@ try {
             }
 
             echo json_encode(array('ok' => true));
+            break;
+
+        case 'save_switch_credentials':
+            Auth::requireRole(array('operator', 'admin'));
+            $id = isset($input['device_id']) ? (int)$input['device_id'] : 0;
+            if ($id <= 0) {
+                throw new InvalidArgumentException('Ungültige Switch-Geräte-ID.');
+            }
+            $devStmt = $pdo->prepare("SELECT * FROM devices WHERE id = :id");
+            $devStmt->execute(array(':id' => $id));
+            $dev = $devStmt->fetch();
+            if (!$dev) {
+                throw new InvalidArgumentException('Switch nicht in der Datenbank gefunden.');
+            }
+
+            $sshUser = isset($input['switch_ssh_user']) ? trim($input['switch_ssh_user']) : '';
+            $sshPass = isset($input['switch_ssh_pass']) ? (string)$input['switch_ssh_pass'] : '';
+            $snmpComm = isset($input['switch_snmp_community']) ? trim($input['switch_snmp_community']) : '';
+            $snmpWrite = isset($input['switch_snmp_write_community']) ? trim($input['switch_snmp_write_community']) : '';
+
+            // Bestehendes Passwort beibehalten, falls leer gelassen (und nicht explizit gelöscht)
+            $finalSshPass = ($sshPass !== '') ? $sshPass : (isset($dev['switch_ssh_pass']) ? $dev['switch_ssh_pass'] : null);
+            $finalSnmpWrite = ($snmpWrite !== '') ? $snmpWrite : (isset($dev['switch_snmp_write_community']) ? $dev['switch_snmp_write_community'] : null);
+
+            $upd = $pdo->prepare("
+                UPDATE devices
+                SET switch_ssh_user = :u,
+                    switch_ssh_pass = :p,
+                    switch_snmp_community = :sc,
+                    switch_snmp_write_community = :sw
+                WHERE id = :id
+            ");
+            $upd->execute(array(
+                ':u'  => $sshUser !== '' ? $sshUser : null,
+                ':p'  => $finalSshPass,
+                ':sc' => $snmpComm !== '' ? $snmpComm : null,
+                ':sw' => $finalSnmpWrite,
+                ':id' => $id,
+            ));
+
+            $sshTestResult = null;
+            if (!empty($input['test_connection']) && $sshUser !== '' && !empty($finalSshPass)) {
+                @set_time_limit(45);
+                $sshTestResult = SnmpClient::configureSwitchViaSsh($dev['ip_address'], $sshUser, $finalSshPass, array(
+                    'action_type' => 'test'
+                ));
+            }
+
+            // Aktualisiere SNMP-Daten des Switches direkt mit der (ggf. neuen) Community
+            $commToUse = $snmpComm !== '' ? $snmpComm : 'public';
+            $snmpClient = new SnmpClient($dev['ip_address'], $commToUse, 1500);
+            $freshSnmp = $snmpClient->probeDevice();
+            if ($freshSnmp !== null) {
+                $pdo->prepare("UPDATE devices SET snmp_enabled = 1, snmp_ports_json = :j WHERE id = :id")
+                    ->execute(array(':j' => json_encode($freshSnmp), ':id' => $id));
+            }
+
+            echo json_encode(array(
+                'ok'           => true,
+                'has_ssh_pass' => !empty($finalSshPass) ? 1 : 0,
+                'ssh_test'     => $sshTestResult,
+                'snmp_data'    => $freshSnmp,
+            ));
+            break;
+
+        case 'configure_switch_port':
+            Auth::requireRole(array('operator', 'admin'));
+            @set_time_limit(60);
+            $id = isset($input['device_id']) ? (int)$input['device_id'] : 0;
+            if ($id <= 0) {
+                throw new InvalidArgumentException('Ungültige Switch-Geräte-ID.');
+            }
+            $devStmt = $pdo->prepare("SELECT d.*, s.snmp_community AS scope_snmp_comm FROM devices d LEFT JOIN scopes s ON d.scope_id = s.id WHERE d.id = :id");
+            $devStmt->execute(array(':id' => $id));
+            $dev = $devStmt->fetch();
+            if (!$dev) {
+                throw new InvalidArgumentException('Switch nicht gefunden.');
+            }
+
+            $sshUser = !empty($input['switch_ssh_user']) ? trim($input['switch_ssh_user']) : (!empty($dev['switch_ssh_user']) ? $dev['switch_ssh_user'] : '');
+            $sshPass = !empty($input['switch_ssh_pass']) ? (string)$input['switch_ssh_pass'] : (!empty($dev['switch_ssh_pass']) ? $dev['switch_ssh_pass'] : '');
+
+            if ($sshUser === '' || $sshPass === '') {
+                throw new InvalidArgumentException('Für diesen Switch sind noch keine SSH-Zugangsdaten hinterlegt. Bitte zuerst über "🔑 Zugangsdaten" speichern.');
+            }
+
+            $portName = isset($input['port_name']) ? trim($input['port_name']) : '';
+            if ($portName === '') {
+                throw new InvalidArgumentException('Bitte einen Switch-Port auswählen.');
+            }
+
+            $params = array(
+                'action_type'      => 'configure_port',
+                'port_name'        => $portName,
+                'vlan_id'          => isset($input['vlan_id']) ? (int)$input['vlan_id'] : 0,
+                'create_vlan_id'   => isset($input['create_vlan_id']) ? (int)$input['create_vlan_id'] : 0,
+                'create_vlan_name' => isset($input['create_vlan_name']) ? trim($input['create_vlan_name']) : '',
+                'admin_status'     => isset($input['admin_status']) ? trim($input['admin_status']) : '',
+                'save_config'      => isset($input['save_config']) ? (bool)$input['save_config'] : true,
+            );
+            if (array_key_exists('alias', $input)) {
+                $params['alias'] = trim((string)$input['alias']);
+            }
+
+            $sshRes = SnmpClient::configureSwitchViaSsh($dev['ip_address'], $sshUser, $sshPass, $params);
+            if (empty($sshRes['success'])) {
+                throw new RuntimeException(isset($sshRes['message']) ? $sshRes['message'] : 'SSH-Konfiguration fehlgeschlagen.');
+            }
+
+            // Sofortiger Live-Re-Probe per SNMP, damit VLANs, PVID, Alias und Port-Status in der Oberfläche aktualisiert sind
+            $commToUse = !empty($dev['switch_snmp_community'])
+                ? $dev['switch_snmp_community']
+                : (!empty($dev['scope_snmp_comm']) ? $dev['scope_snmp_comm'] : 'public');
+            $snmpClient = new SnmpClient($dev['ip_address'], $commToUse, 1500);
+            $freshSnmp = $snmpClient->probeDevice();
+            if ($freshSnmp !== null) {
+                $pdo->prepare("UPDATE devices SET snmp_enabled = 1, snmp_ports_json = :j WHERE id = :id")
+                    ->execute(array(':j' => json_encode($freshSnmp), ':id' => $id));
+            }
+
+            echo json_encode(array(
+                'ok'        => true,
+                'message'   => $sshRes['message'],
+                'commands'  => isset($sshRes['commands']) ? $sshRes['commands'] : array(),
+                'snmp_data' => $freshSnmp,
+            ));
             break;
 
         case 'delete_device':
