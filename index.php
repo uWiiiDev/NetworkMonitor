@@ -386,11 +386,13 @@ $isAdmin = ($userRole === 'admin');
                                 </div>
                             </div>
                             <div style="background:var(--bg-card);border:1px solid var(--border-color);border-radius:8px;padding:12px;font-size:12px;color:var(--text-secondary);margin-top:auto;">
-                                <b style="color:var(--text-primary);">Übersicht der 4 Berechtigungs-Rollen:</b><br>
-                                • <b>ADMIN (Administrator):</b> Vollzugriff inkl. Core-Switches, Datenbank-Konfiguration, SMTP &amp; Benutzerverwaltung.<br>
-                                • <b style="color:#c084fc;">NETADMIN (Netzwerkexperte):</b> Sieht und administriert <b>alle Switches inkl. Core-Switches</b>, 802.1Q Trunks, VLANs &amp; Switch-Zugangsdaten.<br>
-                                • <b>OPERATOR (Techniker):</b> Darf Scans starten und normale Access-Switch-Ports patchen, sieht und verwaltet aber <b>keine Core-Switches</b>.<br>
-                                • <b>VIEWER (Betrachter):</b> Nur Lesen &amp; Exportieren (keine Core-Switches sichtbar, keine Änderungen).
+                                <b style="color:var(--text-primary);">⚡ Multi-Host-Batch-Architektur:</b><br>
+                                • <b>Ping-Sweep:</b> Prüft bis zu 128 IPs gleichzeitig per ICMP/ARP.<br>
+                                • <b>TCP-Port- &amp; Banner-Batch:</b> Prüft offene Ports und HTTP/SSH-Banner asynchron für 32 Hosts parallel.<br>
+                                • <b>SNMP-Vorfilter:</b> Sendet schnelle UDP-Probes an 100 Hosts gleichzeitig, bevor Switch-Tabellen abgefragt werden.
+                            </div>
+                            <div style="display:flex;justify-content:flex-end;margin-top:4px;">
+                                <button class="btn btn-primary" style="width:100%;justify-content:center;" onclick="saveAdminDbAndScannerConfig()">Scanner-Performance speichern</button>
                             </div>
                         </div>
                     </div>
@@ -517,12 +519,19 @@ $isAdmin = ($userRole === 'admin');
 
                     <!-- 3. Benutzer- & Rechteverwaltung -->
                     <div style="background:var(--bg-panel);border:1px solid var(--border-color);border-radius:10px;padding:18px;">
-                        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+                        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
                             <div>
                                 <h3 style="font-size:15px;">3. Benutzer- &amp; Rechteverwaltung</h3>
-                                <div style="font-size:12.5px;color:var(--text-secondary);">Verwalte Zugänge und weise Berechtigungsstufen (Admin, Operator, Viewer) zu.</div>
+                                <div style="font-size:12.5px;color:var(--text-secondary);">Verwalte Zugänge und weise Berechtigungsstufen (Admin, NetAdmin, Operator, Viewer) zu.</div>
                             </div>
                             <button class="btn btn-sm btn-primary" onclick="openUserModal(0)">+ Neuer Benutzer</button>
+                        </div>
+                        <div style="background:var(--bg-card);border:1px solid var(--border-color);border-radius:8px;padding:12px;font-size:12px;color:var(--text-secondary);margin-bottom:14px;">
+                            <b style="color:var(--text-primary);">Übersicht der 4 Berechtigungs-Rollen:</b><br>
+                            • <b>ADMIN (Administrator):</b> Vollzugriff inkl. Core-Switches, Datenbank-Konfiguration, SMTP &amp; Benutzerverwaltung.<br>
+                            • <b style="color:#c084fc;">NETADMIN (Netzwerkexperte):</b> Sieht und administriert <b>alle Switches inkl. Core-Switches</b>, 802.1Q Trunks, VLANs &amp; Switch-Zugangsdaten.<br>
+                            • <b>OPERATOR (Techniker):</b> Darf Scans starten und normale Access-Switch-Ports patchen, sieht und verwaltet aber <b>keine Core-Switches</b>.<br>
+                            • <b>VIEWER (Betrachter):</b> Nur Lesen &amp; Exportieren (keine Core-Switches sichtbar, keine Änderungen).
                         </div>
                         <table class="data-table">
                             <thead>
