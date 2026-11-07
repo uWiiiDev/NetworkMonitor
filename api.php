@@ -220,6 +220,8 @@ try {
                 'mac_watchlist' => $macWatchlist,
                 'admin'         => $adminData,
                 'system'       => array(
+                    'app_version'    => Database::getAppVersion(),
+                    'git_commit'     => Database::getGitCommitShort(),
                     'php_version'    => PHP_VERSION,
                     'db_driver'      => strtoupper($db->getActiveDriver()),
                     'nmap_found'     => ($nmapPath !== ''),
@@ -862,6 +864,129 @@ try {
             );
             Database::saveCustomConfig(array(), $anomalySettings);
             echo json_encode(array('ok' => true, 'anomaly_config' => $anomalySettings));
+            break;
+
+        case 'admin_check_update':
+            Auth::requireRole(array('admin'));
+            $rootDir = __DIR__;
+            $localVersion = Database::getAppVersion();
+            $localCommit = Database::getGitCommitShort();
+            $remoteVersion = '';
+            $remoteCommit = '';
+            $commitsBehind = 0;
+            $changelog = array();
+
+            if (is_dir($rootDir . '/.git')) {
+                @shell_exec('git -C ' . escapeshellarg($rootDir) . ' fetch origin main --quiet 2>&1');
+                $remoteCommit = trim((string)@shell_exec('git -C ' . escapeshellarg($rootDir) . ' rev-parse --short origin/main 2>/dev/null'));
+                $remoteVersion = trim((string)@shell_exec('git -C ' . escapeshellarg($rootDir) . ' show origin/main:VERSION 2>/dev/null'));
+                $behindStr = trim((string)@shell_exec('git -C ' . escapeshellarg($rootDir) . ' rev-list --count HEAD..origin/main 2>/dev/null'));
+                if ($behindStr !== '' && is_numeric($behindStr)) {
+                    $commitsBehind = (int)$behindStr;
+                }
+                if ($commitsBehind > 0) {
+                    $rawLog = trim((string)@shell_exec('git -C ' . escapeshellarg($rootDir) . ' log HEAD..origin/main --oneline -n 15 2>/dev/null'));
+                    if ($rawLog !== '') {
+                        $changelog = preg_split('/\r?\n/', $rawLog);
+                    }
+                }
+            }
+
+            if ($remoteVersion === '') {
+                $ctx = stream_context_create(array(
+                    'http' => array('timeout' => 5, 'user_agent' => 'NetworkMonitor-Updater/' . $localVersion),
+                ));
+                $rawVer = @file_get_contents('https://raw.githubusercontent.com/uWiiiDev/NetworkMonitor/main/VERSION', false, $ctx);
+                if ($rawVer !== false && trim($rawVer) !== '') {
+                    $remoteVersion = trim($rawVer);
+                } else {
+                    $remoteVersion = $localVersion;
+                }
+            }
+
+            if ($remoteCommit === '') {
+                $ctxApi = stream_context_create(array(
+                    'http' => array('timeout' => 5, 'user_agent' => 'NetworkMonitor-Updater/' . $localVersion),
+                ));
+                $apiJson = @file_get_contents('https://api.github.com/repos/uWiiiDev/NetworkMonitor/commits/main', false, $ctxApi);
+                if ($apiJson !== false) {
+                    $apiArr = @json_decode($apiJson, true);
+                    if (!empty($apiArr['sha'])) {
+                        $remoteCommit = substr($apiArr['sha'], 0, 7);
+                    }
+                }
+            }
+
+            $updateAvailable = ($commitsBehind > 0)
+                || ($remoteVersion !== '' && version_compare($remoteVersion, $localVersion, '>'))
+                || ($localCommit !== '' && $remoteCommit !== '' && $localCommit !== $remoteCommit && $commitsBehind > 0);
+
+            echo json_encode(array(
+                'ok'               => true,
+                'local_version'    => $localVersion,
+                'local_commit'     => $localCommit,
+                'remote_version'   => $remoteVersion !== '' ? $remoteVersion : $localVersion,
+                'remote_commit'    => $remoteCommit,
+                'commits_behind'   => $commitsBehind,
+                'update_available' => $updateAvailable ? 1 : 0,
+                'changelog'        => $changelog,
+                'checked_at'       => date('d.m.Y H:i:s'),
+            ));
+            break;
+
+        case 'admin_run_update':
+            Auth::requireRole(array('admin'));
+            @set_time_limit(180);
+            $rootDir = __DIR__;
+            $customConfPath = $rootDir . '/data/custom_config.json';
+            $backupCustomConf = is_readable($customConfPath) ? @file_get_contents($customConfPath) : null;
+
+            $outputLines = array();
+            if (is_dir($rootDir . '/.git')) {
+                $fetchOut = trim((string)@shell_exec('git -C ' . escapeshellarg($rootDir) . ' fetch origin main 2>&1'));
+                if ($fetchOut !== '') {
+                    $outputLines[] = $fetchOut;
+                }
+                $pullOut = trim((string)@shell_exec('git -C ' . escapeshellarg($rootDir) . ' pull --ff-only origin main 2>&1'));
+                if (stripos($pullOut, 'fatal:') !== false || stripos($pullOut, 'error:') !== false) {
+                    $resetOut = trim((string)@shell_exec('git -C ' . escapeshellarg($rootDir) . ' reset --hard origin/main 2>&1'));
+                    $outputLines[] = $resetOut;
+                } else {
+                    $outputLines[] = $pullOut !== '' ? $pullOut : 'Already up to date.';
+                }
+            } else {
+                // Fallback für Installationen ohne .git Verzeichnis (Tarball-Update direkt von GitHub)
+                $tmpTar = sys_get_temp_dir() . '/nm_update_' . getmypid() . '.tar.gz';
+                $tmpExtract = sys_get_temp_dir() . '/nm_extract_' . getmypid();
+                $ctxDl = stream_context_create(array(
+                    'http' => array('timeout' => 25, 'user_agent' => 'NetworkMonitor-Updater'),
+                ));
+                $tarBytes = @file_get_contents('https://codeload.github.com/uWiiiDev/NetworkMonitor/tar.gz/refs/heads/main', false, $ctxDl);
+                if ($tarBytes === false || strlen($tarBytes) < 1000) {
+                    throw new RuntimeException('Konnte Update-Archiv nicht von GitHub herunterladen.');
+                }
+                @file_put_contents($tmpTar, $tarBytes);
+                @mkdir($tmpExtract, 0755, true);
+                @shell_exec('tar -xzf ' . escapeshellarg($tmpTar) . ' -C ' . escapeshellarg($tmpExtract) . ' --strip-components=1 2>&1');
+                @shell_exec('cp -rf ' . escapeshellarg($tmpExtract) . '/* ' . escapeshellarg($rootDir) . '/ 2>&1');
+                @shell_exec('rm -rf ' . escapeshellarg($tmpTar) . ' ' . escapeshellarg($tmpExtract));
+                $outputLines[] = 'Update-Archiv von GitHub (main) erfolgreich heruntergeladen und entpackt.';
+            }
+
+            if ($backupCustomConf !== null && !file_exists($customConfPath)) {
+                @file_put_contents($customConfPath, $backupCustomConf);
+            }
+
+            $newVersion = Database::getAppVersion();
+            $newCommit = Database::getGitCommitShort();
+
+            echo json_encode(array(
+                'ok'          => true,
+                'new_version' => $newVersion,
+                'new_commit'  => $newCommit,
+                'output'      => implode("\n", $outputLines),
+                'updated_at'  => date('d.m.Y H:i:s'),
+            ));
             break;
 
         case 'save_user':

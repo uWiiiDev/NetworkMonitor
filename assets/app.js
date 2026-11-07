@@ -4920,6 +4920,16 @@ function renderSystemInfo() {
     document.getElementById('sys-snmp').textContent = sys.snmp_mode || '-';
     document.getElementById('sys-cron-cmd').textContent = sys.cron_cmd || '';
 
+    if (sys.app_version) {
+        var verStr = 'v' + sys.app_version + (sys.git_commit ? (' (Commit ' + sys.git_commit + ')') : '');
+        var appVerEl = document.getElementById('sys-app-version');
+        if (appVerEl) appVerEl.textContent = verStr;
+        var verPill = document.getElementById('sys-version-pill');
+        if (verPill) verPill.textContent = 'v' + sys.app_version + (sys.git_commit ? (' (' + sys.git_commit + ')') : '');
+        var topBadge = document.getElementById('topbar-version-badge');
+        if (topBadge) topBadge.textContent = 'v' + sys.app_version;
+    }
+
     var cronBadge = document.getElementById('sys-cron-status-badge');
     if (cronBadge) {
         if (parseInt(sys.cron_active || 0, 10) === 1 && parseInt(sys.cron_interval || 0, 10) > 0) {
@@ -4955,6 +4965,133 @@ function renderSystemInfo() {
             '</tr>';
     }
     logBody.innerHTML = lhtml || '<tr><td colspan="6">Noch keine Scans durchgeführt.</td></tr>';
+}
+
+function checkGithubUpdate() {
+    var box = document.getElementById('adm-update-status-box');
+    var btn = document.getElementById('btn-check-gh-update');
+    if (box) {
+        box.style.display = 'block';
+        box.style.background = 'rgba(59,130,246,0.12)';
+        box.style.border = '1px solid rgba(59,130,246,0.4)';
+        box.style.color = '#93c5fd';
+        box.innerHTML = '🔍 Verbinde mit GitHub (<code>uWiiiDev/NetworkMonitor</code>) und prüfe auf neue Versionen / Commits...';
+    }
+    if (btn) btn.disabled = true;
+
+    fetch('api.php?action=admin_check_update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({})
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (res) {
+        if (btn) btn.disabled = false;
+        if (!res.ok) {
+            if (box) {
+                box.style.background = 'rgba(239,68,68,0.15)';
+                box.style.border = '1px solid rgba(239,68,68,0.45)';
+                box.style.color = '#fca5a5';
+                box.textContent = '✕ Fehler bei der Update-Prüfung: ' + (res.error || 'Unbekannt');
+            }
+            return;
+        }
+        var locTxt = 'v' + escapeHtml(res.local_version) + (res.local_commit ? (' (<code>' + escapeHtml(res.local_commit) + '</code>)') : '');
+        var remTxt = 'v' + escapeHtml(res.remote_version) + (res.remote_commit ? (' (<code>' + escapeHtml(res.remote_commit) + '</code>)') : '');
+
+        if (parseInt(res.update_available, 10) === 1) {
+            var logHtml = '';
+            if (res.changelog && res.changelog.length > 0) {
+                logHtml = '<div style="margin-top:8px;padding:8px;background:rgba(15,23,42,0.75);border-radius:6px;font-family:monospace;font-size:11px;color:#cbd5e1;">' +
+                    '<div style="color:#fcd34d;font-weight:700;margin-bottom:4px;">Neue Änderungen auf GitHub (' + res.commits_behind + ' Commit(s)):</div>';
+                for (var c = 0; c < res.changelog.length; c++) {
+                    logHtml += '• ' + escapeHtml(res.changelog[c]) + '<br>';
+                }
+                logHtml += '</div>';
+            }
+            if (box) {
+                box.style.background = 'rgba(245,158,11,0.15)';
+                box.style.border = '1px solid rgba(245,158,11,0.5)';
+                box.style.color = '#fde68a';
+                box.innerHTML = '🔔 <b>Neues Update auf GitHub verfügbar!</b><br>' +
+                    'Installiert: <b>' + locTxt + '</b> &rarr; Verfügbar auf GitHub: <b style="color:#34d399;">' + remTxt + '</b>' +
+                    logHtml +
+                    '<div style="margin-top:8px;"><button class="btn btn-sm btn-primary" onclick="runGithubUpdate()">⬇️ Update jetzt installieren</button></div>';
+            }
+        } else {
+            if (box) {
+                box.style.background = 'rgba(16,185,129,0.14)';
+                box.style.border = '1px solid rgba(16,185,129,0.45)';
+                box.style.color = '#6ee7b7';
+                box.innerHTML = '✅ <b>Deine Installation ist auf dem neuesten Stand!</b><br>' +
+                    'Installierte Version: <b>' + locTxt + '</b> • GitHub-Stand (<code>origin/main</code>): <b>' + remTxt + '</b> (Geprüft am ' + escapeHtml(res.checked_at) + ')';
+            }
+        }
+    })
+    .catch(function (err) {
+        if (btn) btn.disabled = false;
+        if (box) {
+            box.style.background = 'rgba(239,68,68,0.15)';
+            box.style.border = '1px solid rgba(239,68,68,0.45)';
+            box.style.color = '#fca5a5';
+            box.textContent = '✕ Verbindungsfehler: ' + err.message;
+        }
+    });
+}
+
+function runGithubUpdate() {
+    if (!confirm('Möchtest du NetworkMonitor jetzt direkt über GitHub (origin/main) auf die neueste Version aktualisieren?\n\nDeine lokalen Datenbanken und Einstellungen in data/ bleiben vollständig erhalten.')) {
+        return;
+    }
+    var box = document.getElementById('adm-update-status-box');
+    var btn = document.getElementById('btn-run-gh-update');
+    if (box) {
+        box.style.display = 'block';
+        box.style.background = 'rgba(59,130,246,0.12)';
+        box.style.border = '1px solid rgba(59,130,246,0.4)';
+        box.style.color = '#93c5fd';
+        box.innerHTML = '⏳ Lade neueste Programmdateien von GitHub (<code>origin/main</code>) und aktualisiere Installation...';
+    }
+    if (btn) btn.disabled = true;
+
+    fetch('api.php?action=admin_run_update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({})
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (res) {
+        if (btn) btn.disabled = false;
+        if (!res.ok) {
+            if (box) {
+                box.style.background = 'rgba(239,68,68,0.15)';
+                box.style.border = '1px solid rgba(239,68,68,0.45)';
+                box.style.color = '#fca5a5';
+                box.textContent = '✕ Update fehlgeschlagen: ' + (res.error || 'Unbekannt');
+            }
+            return;
+        }
+        showToast('✅ Update auf Version v' + res.new_version + ' erfolgreich abgeschlossen!');
+        if (box) {
+            box.style.background = 'rgba(16,185,129,0.16)';
+            box.style.border = '1px solid rgba(16,185,129,0.5)';
+            box.style.color = '#6ee7b7';
+            box.innerHTML = '✅ <b>Update erfolgreich abgeschlossen!</b><br>' +
+                'Aktuelle Version: <b>v' + escapeHtml(res.new_version) + '</b>' + (res.new_commit ? (' (Commit <code>' + escapeHtml(res.new_commit) + '</code>)') : '') + '<br>' +
+                '<div style="margin-top:6px;padding:6px 8px;background:rgba(15,23,42,0.75);border-radius:6px;font-family:monospace;font-size:11px;color:#cbd5e1;white-space:pre-wrap;">' + escapeHtml(res.output || 'OK') + '</div>' +
+                '<div style="margin-top:8px;"><button class="btn btn-sm btn-success" onclick="window.location.reload()">🔄 Anwendung jetzt neu laden</button></div>';
+        }
+        loadTopologyData();
+    })
+    .catch(function (err) {
+        if (btn) btn.disabled = false;
+        if (box) {
+            box.style.background = 'rgba(239,68,68,0.15)';
+            box.style.border = '1px solid rgba(239,68,68,0.45)';
+            box.style.color = '#fca5a5';
+            box.textContent = '✕ Verbindungsfehler beim Update: ' + err.message;
+        }
+    });
 }
 
 function switchTab(tabName, btn) {

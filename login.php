@@ -107,7 +107,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         <div class="login-header">
             <div class="brand-logo" style="width:40px;height:40px;font-size:17px;">NM</div>
             <div>
-                <div style="font-size:18px;font-weight:700;">NetworkMonitor</div>
+                <div style="display:flex;align-items:center;gap:8px;">
+                    <span style="font-size:18px;font-weight:700;">NetworkMonitor</span>
+                    <span class="badge" style="background:rgba(59,130,246,0.18);border:1px solid rgba(59,130,246,0.45);color:#93c5fd;font-family:monospace;font-size:11px;">v<?php echo htmlspecialchars(Database::getAppVersion(), ENT_QUOTES, 'UTF-8'); ?></span>
+                </div>
                 <div style="font-size:12.5px;color:var(--text-secondary);">Geschützter Netzwerkplan &amp; SNMP Discovery</div>
             </div>
         </div>

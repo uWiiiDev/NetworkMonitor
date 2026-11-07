@@ -114,6 +114,36 @@ class Database
     }
 
     /**
+     * Liest die aktuelle Software-Versionsnummer aus der Datei VERSION im Projektstamm
+     */
+    public static function getAppVersion()
+    {
+        $verFile = __DIR__ . '/../VERSION';
+        if (is_readable($verFile)) {
+            $v = trim((string)@file_get_contents($verFile));
+            if ($v !== '') {
+                return $v;
+            }
+        }
+        return '1.8.0';
+    }
+
+    /**
+     * Liefert den kurzen Git-Commit-Hash des lokalen Projektverzeichnisses (falls Git installiert ist)
+     */
+    public static function getGitCommitShort()
+    {
+        $rootDir = realpath(__DIR__ . '/..');
+        if ($rootDir && is_dir($rootDir . '/.git')) {
+            $hash = trim((string)@shell_exec('git -C ' . escapeshellarg($rootDir) . ' rev-parse --short HEAD 2>/dev/null'));
+            if ($hash !== '' && preg_match('/^[0-9a-f]{6,12}$/i', $hash)) {
+                return $hash;
+            }
+        }
+        return '';
+    }
+
+    /**
      * Testet eine MySQL-Datenbankverbindung ohne die aktuelle Konfiguration zu überschreiben
      */
     public static function testMysqlConnection(array $params)

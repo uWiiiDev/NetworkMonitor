@@ -16,6 +16,8 @@ $userRole = $currentUser['role']; // 'viewer', 'operator', 'netadmin', 'admin'
 $canEdit = ($userRole === 'operator' || $userRole === 'netadmin' || $userRole === 'admin');
 $isNetExpert = ($userRole === 'netadmin' || $userRole === 'admin');
 $isAdmin = ($userRole === 'admin');
+$appVersion = Database::getAppVersion();
+$gitShort = Database::getGitCommitShort();
 ?>
 <!DOCTYPE html>
 <html lang="de">
@@ -32,8 +34,9 @@ $isAdmin = ($userRole === 'admin');
     <header class="topbar">
         <div class="brand">
             <div class="brand-logo">NM</div>
-            <div>
+            <div style="display:flex;align-items:center;gap:7px;">
                 <div class="brand-title">NetworkMonitor</div>
+                <span id="topbar-version-badge" class="badge" style="background:rgba(59,130,246,0.18);border:1px solid rgba(59,130,246,0.45);color:#93c5fd;font-family:monospace;font-size:10.5px;padding:2px 6px;" title="Installierte Software-Version<?php echo $gitShort ? (' (Commit ' . htmlspecialchars($gitShort, ENT_QUOTES, 'UTF-8') . ')') : ''; ?>">v<?php echo htmlspecialchars($appVersion, ENT_QUOTES, 'UTF-8'); ?></span>
             </div>
         </div>
 
@@ -551,12 +554,32 @@ $isAdmin = ($userRole === 'admin');
                     <!-- 4. Cronjob & System-Status -->
                     <div style="display:grid;grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));gap:20px;">
                         <div style="background:var(--bg-panel);border:1px solid var(--border-color);border-radius:10px;padding:18px;display:flex;flex-direction:column;gap:12px;">
-                            <h3 style="font-size:15px;">4. System-Umgebung &amp; Diagnose</h3>
+                            <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+                                <h3 style="font-size:15px;">4. System-Umgebung, Version &amp; GitHub-Update</h3>
+                                <span id="sys-version-pill" class="badge" style="background:rgba(59,130,246,0.2);border:1px solid #3b82f6;color:#93c5fd;font-family:monospace;">v<?php echo htmlspecialchars($appVersion, ENT_QUOTES, 'UTF-8'); ?><?php echo $gitShort ? (' (' . htmlspecialchars($gitShort, ENT_QUOTES, 'UTF-8') . ')') : ''; ?></span>
+                            </div>
                             <div class="kv-grid" style="grid-template-columns: 200px 1fr;">
+                                <div class="kv-label">Installierte Version</div><div class="kv-val" id="sys-app-version" style="font-family:monospace;font-weight:700;color:#60a5fa;">v<?php echo htmlspecialchars($appVersion, ENT_QUOTES, 'UTF-8'); ?></div>
+                                <div class="kv-label">GitHub-Repository</div><div class="kv-val"><a href="https://github.com/uWiiiDev/NetworkMonitor" target="_blank" style="color:#93c5fd;text-decoration:underline;font-family:monospace;">github.com/uWiiiDev/NetworkMonitor</a> (Branch <code>main</code>)</div>
                                 <div class="kv-label">PHP-Version</div><div class="kv-val" id="sys-php">-</div>
                                 <div class="kv-label">Aktive Datenbank-Engine</div><div class="kv-val" id="sys-db">-</div>
                                 <div class="kv-label">Netzwerk-Scanner Engine</div><div class="kv-val" id="sys-nmap">-</div>
                                 <div class="kv-label">SNMP Switch-Abfrage</div><div class="kv-val" id="sys-snmp">-</div>
+                            </div>
+
+                            <!-- GitHub 1-Klick Online-Updater -->
+                            <div style="margin-top:4px;padding-top:12px;border-top:1px dashed var(--border-color);display:flex;flex-direction:column;gap:10px;">
+                                <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+                                    <div style="font-size:13px;font-weight:700;color:#f8fafc;">🔄 Software-Update über GitHub</div>
+                                    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                                        <button id="btn-check-gh-update" class="btn btn-sm" style="border-color:#60a5fa;color:#93c5fd;" onclick="checkGithubUpdate()">🔍 Auf Updates prüfen</button>
+                                        <button id="btn-run-gh-update" class="btn btn-sm btn-primary" onclick="runGithubUpdate()">⬇️ Jetzt von GitHub aktualisieren</button>
+                                    </div>
+                                </div>
+                                <div style="font-size:11.5px;color:var(--text-secondary);">
+                                    Lädt den neuesten Programmstand direkt aus dem offiziellen GitHub-Repository (<code>origin/main</code>) und führt eventuelle Datenbank-Migrationen automatisch aus. Deine lokalen Datenbanken (<code>data/*.sqlite</code> / MySQL) und Einstellungen (<code>data/custom_config.json</code>) bleiben dabei vollständig erhalten.
+                                </div>
+                                <div id="adm-update-status-box" style="display:none;padding:10px 12px;border-radius:8px;font-size:12px;line-height:1.5;"></div>
                             </div>
                         </div>
 
