@@ -115,6 +115,16 @@ try {
             }
             $unackCount = (int)$pdo->query("SELECT COUNT(*) FROM device_alerts WHERE is_acknowledged = 0")->fetchColumn();
 
+            $macHistory = array();
+            try {
+                $rawHistory = $pdo->query("SELECT * FROM mac_port_history ORDER BY last_seen DESC, id DESC LIMIT 600")->fetchAll();
+                foreach ($rawHistory as $mhRow) {
+                    if (!isset($hiddenCoreIds[(int)$mhRow['switch_id']])) {
+                        $macHistory[] = $mhRow;
+                    }
+                }
+            } catch (Exception $e) {}
+
             $nmapPath = trim((string)@shell_exec('which nmap 2>/dev/null'));
             $snmpExt = extension_loaded('snmp');
 
@@ -188,6 +198,7 @@ try {
                 'logs'         => $logs,
                 'alerts'       => $alerts,
                 'unack_alerts' => $unackCount,
+                'mac_history'  => $macHistory,
                 'admin'        => $adminData,
                 'system'       => array(
                     'php_version'   => PHP_VERSION,
@@ -351,6 +362,7 @@ try {
             // Falls eine manuelle Uplink-/Switch-Port-Zuordnung angegeben wurde
             if ($parentDeviceId > 0 && $parentDeviceId !== $id) {
                 $scopeId = (int)$existingDev['scope_id'];
+                $portLabelToSave = ($parentPort !== null && $parentPort !== '') ? $parentPort : 'Port';
                 $pdo->prepare("DELETE FROM links WHERE target_device_id = :tid")->execute(array(':tid' => $id));
                 $ins = $pdo->prepare("
                     INSERT INTO links (scope_id, source_device_id, target_device_id, source_port, target_port, link_type, is_manual, updated_at)
@@ -360,9 +372,31 @@ try {
                     ':sid'   => $scopeId,
                     ':src'   => $parentDeviceId,
                     ':dst'   => $id,
-                    ':sport' => $parentPort !== '' ? $parentPort : 'Port',
+                    ':sport' => $portLabelToSave,
                     ':now'   => date('Y-m-d H:i:s'),
                 ));
+
+                if (!empty($existingDev['mac_address']) && $portLabelToSave !== 'Port') {
+                    $pDevStmt = $pdo->prepare("SELECT id, ip_address, custom_name, hostname, snmp_sysname FROM devices WHERE id = :pid");
+                    $pDevStmt->execute(array(':pid' => $parentDeviceId));
+                    $pSw = $pDevStmt->fetch();
+                    if ($pSw) {
+                        $swLbl = !empty($pSw['custom_name']) ? $pSw['custom_name'] : (!empty($pSw['snmp_sysname']) ? $pSw['snmp_sysname'] : (!empty($pSw['hostname']) ? $pSw['hostname'] : $pSw['ip_address']));
+                        $dLbl = ($customName !== null && $customName !== '') ? $customName : (!empty($existingDev['hostname']) ? $existingDev['hostname'] : $existingDev['ip_address']);
+                        $scanner = new NetworkScanner();
+                        $scanner->recordMacPortSighting(array(
+                            'mac_address' => strtoupper($existingDev['mac_address']),
+                            'ip_address'  => $existingDev['ip_address'],
+                            'device_name' => $dLbl,
+                            'vendor'      => $existingDev['vendor'],
+                            'switch_id'   => (int)$pSw['id'],
+                            'switch_name' => $swLbl,
+                            'switch_ip'   => $pSw['ip_address'],
+                            'port_name'   => $portLabelToSave,
+                            'vlan_id'     => 1,
+                        ));
+                    }
+                }
             }
 
             echo json_encode(array('ok' => true, 'is_core' => $isCore));
@@ -852,6 +886,7 @@ try {
             Auth::requireRole(array('admin'));
             $scopeId = isset($input['scope_id']) ? $input['scope_id'] : 0;
             if ($scopeId === 'all') {
+                $pdo->exec("DELETE FROM mac_port_history");
                 $pdo->exec("DELETE FROM device_alerts");
                 $pdo->exec("DELETE FROM links");
                 $pdo->exec("DELETE FROM devices");
@@ -874,6 +909,7 @@ try {
 
         case 'admin_delete_all_scopes':
             Auth::requireRole(array('admin'));
+            $pdo->exec("DELETE FROM mac_port_history");
             $pdo->exec("DELETE FROM device_alerts");
             $pdo->exec("DELETE FROM links");
             $pdo->exec("DELETE FROM devices");

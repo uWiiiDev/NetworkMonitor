@@ -444,6 +444,14 @@ class NetworkScanner
                 }
             }
 
+            // Bereinige auch sehr alte MAC-Port-Historien-Einträge (Standard: max(retention_days, stale_offline_days))
+            $histRetDays = max($retentionDays, $staleOfflineDays);
+            if ($histRetDays > 0) {
+                $cutoffHist = date('Y-m-d H:i:s', time() - ($histRetDays * 86400));
+                $stmtHist = $this->pdo->prepare("DELETE FROM mac_port_history WHERE last_seen < :cutoff");
+                $stmtHist->execute(array(':cutoff' => $cutoffHist));
+            }
+
             // Rotiere / kürze auch die lokale Cron-Logdatei (data/cron_scan.log), falls > 512 KB
             $cronLogFile = dirname(__DIR__) . '/data/cron_scan.log';
             if (is_file($cronLogFile) && @filesize($cronLogFile) > 524288) {
@@ -766,11 +774,18 @@ class NetworkScanner
                 }
             }
 
+            $swDisplayName = !empty($sw['custom_name']) ? $sw['custom_name'] : (!empty($sw['snmp_sysname']) ? $sw['snmp_sysname'] : (!empty($sw['hostname']) ? $sw['hostname'] : $sw['ip_address']));
+            $portVlanByName = array();
+            if (!empty($snmp['interfaces']) && is_array($snmp['interfaces'])) {
+                foreach ($snmp['interfaces'] as $ifRow) {
+                    if (!empty($ifRow['name']) && !empty($ifRow['vlan'])) {
+                        $portVlanByName[$ifRow['name']] = (int)$ifRow['vlan'];
+                    }
+                }
+            }
+
             foreach ($snmp['mac_table'] as $macAddr => $portInfo) {
                 $macKey = strtoupper($macAddr);
-                if (!isset($byMac[$macKey])) {
-                    continue;
-                }
                 // Überspringe MAC-Einträge, die auf dem Uplink-Port Richtung FRITZ!Box / Gateway liegen
                 if ($uplinkBridgePort !== null && isset($portInfo['bridge_port']) && (int)$portInfo['bridge_port'] === $uplinkBridgePort) {
                     continue;
@@ -779,6 +794,29 @@ class NetworkScanner
                     continue;
                 }
 
+                $portLabel = isset($portInfo['port_name']) ? $portInfo['port_name'] : ('Port ' . $portInfo['bridge_port']);
+                $pVlanId = isset($portVlanByName[$portLabel]) ? $portVlanByName[$portLabel] : 1;
+
+                // Protokolliere gelernte MAC-Port-Zuordnung in der historischen Tabelle (mac_port_history)
+                $knDev = isset($byMac[$macKey]) ? $byMac[$macKey] : null;
+                if (!$knDev || ((int)$knDev['id'] !== (int)$sw['id'] && (int)$knDev['id'] !== (int)$routerDevice['id'] && $knDev['device_type'] !== 'switch')) {
+                    $this->recordMacPortSighting(array(
+                        'mac_address' => $macKey,
+                        'ip_address'  => $knDev ? $knDev['ip_address'] : null,
+                        'device_name' => $knDev ? (!empty($knDev['custom_name']) ? $knDev['custom_name'] : (!empty($knDev['hostname']) ? $knDev['hostname'] : $knDev['ip_address'])) : null,
+                        'vendor'      => $knDev && !empty($knDev['vendor']) ? $knDev['vendor'] : OuiLookup::lookupVendor($macKey),
+                        'switch_id'   => (int)$sw['id'],
+                        'switch_name' => $swDisplayName,
+                        'switch_ip'   => $sw['ip_address'],
+                        'port_name'   => $portLabel,
+                        'vlan_id'     => $pVlanId,
+                        'seen_at'     => $now,
+                    ));
+                }
+
+                if (!isset($byMac[$macKey])) {
+                    continue;
+                }
                 $targetDev = $byMac[$macKey];
                 if ((int)$targetDev['id'] === (int)$sw['id'] || (int)$targetDev['id'] === (int)$routerDevice['id']) {
                     continue;
@@ -789,7 +827,6 @@ class NetworkScanner
                 if (isset($linkedTargets[$targetDev['id']])) {
                     continue;
                 }
-                $portLabel = isset($portInfo['port_name']) ? $portInfo['port_name'] : ('Port ' . $portInfo['bridge_port']);
                 $insertLink->execute(array(
                     ':sid'   => $scopeId,
                     ':src'   => $sw['id'],
@@ -824,6 +861,87 @@ class NetworkScanner
                 ':now'   => $now,
             ));
             $linkedTargets[$dev['id']] = true;
+        }
+    }
+
+    /**
+     * Speichert oder aktualisiert einen Eintrag in der historischen MAC-Port-Tabelle (mac_port_history).
+     * Dedupliziert: Solange eine MAC am selben Switch und selben Port bleibt, wird nur last_seen + sightings_count
+     * hochgezählt. Erst wenn die MAC an einem anderen Port oder Switch auftaucht, wird ein neuer Historien-Eintrag angelegt!
+     */
+    public function recordMacPortSighting(array $entry)
+    {
+        if (empty($entry['mac_address']) || empty($entry['switch_id']) || empty($entry['port_name'])) {
+            return;
+        }
+        $mac = strtoupper(trim($entry['mac_address']));
+        $swId = (int)$entry['switch_id'];
+        $portName = trim($entry['port_name']);
+        $now = !empty($entry['seen_at']) ? $entry['seen_at'] : date('Y-m-d H:i:s');
+        $vlanId = !empty($entry['vlan_id']) ? (int)$entry['vlan_id'] : 1;
+
+        try {
+            $stmt = $this->pdo->prepare("
+                SELECT id, switch_id, port_name
+                FROM mac_port_history
+                WHERE mac_address = :mac
+                ORDER BY id DESC
+                LIMIT 1
+            ");
+            $stmt->execute(array(':mac' => $mac));
+            $last = $stmt->fetch();
+
+            if ($last && (int)$last['switch_id'] === $swId && (string)$last['port_name'] === $portName) {
+                $upd = $this->pdo->prepare("
+                    UPDATE mac_port_history
+                    SET last_seen = :now,
+                        sightings_count = sightings_count + 1,
+                        ip_address = COALESCE(:ip, ip_address),
+                        device_name = COALESCE(:dname, device_name),
+                        vendor = COALESCE(:vend, vendor),
+                        switch_name = COALESCE(:swname, switch_name),
+                        switch_ip = COALESCE(:swip, switch_ip),
+                        vlan_id = :vlan
+                    WHERE id = :id
+                ");
+                $upd->execute(array(
+                    ':now'    => $now,
+                    ':ip'     => !empty($entry['ip_address']) ? $entry['ip_address'] : null,
+                    ':dname'  => !empty($entry['device_name']) ? $entry['device_name'] : null,
+                    ':vend'   => !empty($entry['vendor']) ? $entry['vendor'] : null,
+                    ':swname' => !empty($entry['switch_name']) ? $entry['switch_name'] : null,
+                    ':swip'   => !empty($entry['switch_ip']) ? $entry['switch_ip'] : null,
+                    ':vlan'   => $vlanId,
+                    ':id'     => (int)$last['id'],
+                ));
+            } else {
+                $ins = $this->pdo->prepare("
+                    INSERT INTO mac_port_history (
+                        mac_address, ip_address, device_name, vendor,
+                        switch_id, switch_name, switch_ip, port_name, vlan_id,
+                        first_seen, last_seen, sightings_count
+                    ) VALUES (
+                        :mac, :ip, :dname, :vend,
+                        :swid, :swname, :swip, :pname, :vlan,
+                        :fseen, :lseen, 1
+                    )
+                ");
+                $ins->execute(array(
+                    ':mac'    => $mac,
+                    ':ip'     => !empty($entry['ip_address']) ? $entry['ip_address'] : null,
+                    ':dname'  => !empty($entry['device_name']) ? $entry['device_name'] : null,
+                    ':vend'   => !empty($entry['vendor']) ? $entry['vendor'] : null,
+                    ':swid'   => $swId,
+                    ':swname' => !empty($entry['switch_name']) ? $entry['switch_name'] : null,
+                    ':swip'   => !empty($entry['switch_ip']) ? $entry['switch_ip'] : null,
+                    ':pname'  => $portName,
+                    ':vlan'   => $vlanId,
+                    ':fseen'  => $now,
+                    ':lseen'  => $now,
+                ));
+            }
+        } catch (Exception $e) {
+            // Ignorieren falls Tabelle noch nicht initialisiert
         }
     }
 

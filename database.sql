@@ -131,3 +131,24 @@ CREATE TABLE IF NOT EXISTS `device_alerts` (
   KEY `idx_ack` (`is_acknowledged`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8;
 
+-- 7. Historische MAC-zu-Switch-Port Zuordnung (Port-Tracking / MAC-Historie)
+CREATE TABLE IF NOT EXISTS `mac_port_history` (
+  `id` INT(11) NOT NULL AUTO_INCREMENT,
+  `mac_address` VARCHAR(32) NOT NULL,
+  `ip_address` VARCHAR(45) DEFAULT NULL,
+  `device_name` VARCHAR(190) DEFAULT NULL,
+  `vendor` VARCHAR(190) DEFAULT NULL,
+  `switch_id` INT(11) NOT NULL,
+  `switch_name` VARCHAR(190) DEFAULT NULL,
+  `switch_ip` VARCHAR(45) DEFAULT NULL,
+  `port_name` VARCHAR(64) NOT NULL,
+  `vlan_id` INT(11) DEFAULT 1,
+  `first_seen` DATETIME NOT NULL,
+  `last_seen` DATETIME NOT NULL,
+  `sightings_count` INT(11) NOT NULL DEFAULT 1,
+  PRIMARY KEY (`id`),
+  KEY `idx_mac` (`mac_address`),
+  KEY `idx_switch_port` (`switch_id`, `port_name`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8;
+
+

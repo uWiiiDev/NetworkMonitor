@@ -397,10 +397,54 @@ function renderMacFinderResults() {
         }
     }
 
+    // Gruppiere historische MAC-Port-Einträge nach normalisierter MAC-Adresse
+    var histByMacHex = {};
+    var histList = AppState.macHistory || [];
+    for (var hi = 0; hi < histList.length; hi++) {
+        var hRow = histList[hi];
+        var hHex = normalizeMacHex(hRow.mac_address);
+        if (!hHex) continue;
+        if (!histByMacHex[hHex]) {
+            histByMacHex[hHex] = [];
+        }
+        histByMacHex[hHex].push(hRow);
+    }
+
+    // Prüfe auch rein historische MAC-Einträge (Geräte, die früher gesteckt waren und aktuell komplett abgesteckt sind)
+    var seenMacHexInMatches = {};
+    for (var mi = 0; mi < matchedItems.length; mi++) {
+        var mh = normalizeMacHex(matchedItems[mi].mac);
+        if (mh) seenMacHexInMatches[mh] = true;
+    }
+    var hMacKeys = Object.keys(histByMacHex);
+    for (var hk = 0; hk < hMacKeys.length; hk++) {
+        var hKey = hMacKeys[hk];
+        if (seenMacHexInMatches[hKey] || devByMacHex[hKey]) continue;
+        var latestH = histByMacHex[hKey][0];
+        var hayHist = ((latestH.mac_address || '') + ' ' + (latestH.ip_address || '') + ' ' + (latestH.device_name || '') + ' ' + (latestH.vendor || '') + ' ' + (latestH.switch_name || '') + ' ' + (latestH.port_name || '')).toLowerCase();
+        var histMatch = false;
+        if (qRaw === '') {
+            histMatch = true;
+        } else if (hayHist.indexOf(qRaw) !== -1) {
+            histMatch = true;
+        } else if (isMacQuery && hKey.indexOf(qHex) !== -1) {
+            histMatch = true;
+        }
+        if (histMatch) {
+            matchedItems.push({
+                kind: 'historical_only',
+                dev: null,
+                mac: latestH.mac_address,
+                histLatest: latestH,
+                spInfo: null
+            });
+        }
+    }
+
     // Sortiere Treffer mit echtem Switch-Port zuerst
     matchedItems.sort(function (a, b) {
-        var aSw = (a.spInfo && a.spInfo.isSwitchPort) ? 1 : 0;
-        var bSw = (b.spInfo && b.spInfo.isSwitchPort) ? 1 : 0;
+        var aSw = (a.spInfo && a.spInfo.isSwitchPort) ? 2 : (a.kind === 'historical_only' ? 1 : 0);
+        var bSw = (b.spInfo && b.spInfo.isSwitchPort) ? 2 : (b.kind === 'historical_only' ? 1 : 0);
         if (aSw !== bSw) return bSw - aSw;
         var aIp = a.dev ? ipToNumeric(a.dev.ip_address) : 9999999999;
         var bIp = b.dev ? ipToNumeric(b.dev.ip_address) : 9999999999;
@@ -408,22 +452,29 @@ function renderMacFinderResults() {
     });
 
     if (matchedItems.length === 0) {
-        container.innerHTML = '<div style="padding:24px;text-align:center;color:var(--text-secondary);background:rgba(15,23,42,0.5);border-radius:8px;border:1px solid var(--border-color);">Keine passende MAC-Adresse, IP oder Switch-Port für <b>' + escapeHtml(inp.value) + '</b> gefunden.</div>';
+        container.innerHTML = '<div style="padding:24px;text-align:center;color:var(--text-secondary);background:rgba(15,23,42,0.5);border-radius:8px;border:1px solid var(--border-color);">Keine passende MAC-Adresse, IP oder Switch-Port (auch nicht in der Port-Historie) für <b>' + escapeHtml(inp.value) + '</b> gefunden.</div>';
         return;
     }
 
-    var html = '<div style="font-size:12px;color:var(--text-secondary);font-weight:600;">' + matchedItems.length + ' Treffer gefunden' + (qRaw === '' ? ' (Übersicht aller bekannten MAC-Adressen &amp; Switch-Port-Zuordnungen)' : '') + ':</div>';
+    var html = '<div style="font-size:12px;color:var(--text-secondary);font-weight:600;">' + matchedItems.length + ' Treffer gefunden' + (qRaw === '' ? ' (Übersicht aller bekannten MAC-Adressen, aktuellen Steckplätze &amp; Port-Historie)' : '') + ':</div>';
 
     for (var r = 0; r < matchedItems.length; r++) {
         var item = matchedItems[r];
         var dObj = item.dev;
         var sp = item.spInfo;
-        var dTitle = dObj ? (dObj.custom_name || dObj.hostname || dObj.snmp_sysname || dObj.ip_address) : 'Unbekanntes Layer-2 Gerät (Nur MAC in Switch-Tabelle)';
-        var dIp = dObj ? dObj.ip_address : 'Keine IP im ARP';
-        var dVendor = dObj ? (dObj.vendor || 'Unbekannt') : 'Über Switch Bridge-MIB gelernt';
+        var itemMacHex = normalizeMacHex(item.mac);
+        var itemHistory = itemMacHex && histByMacHex[itemMacHex] ? histByMacHex[itemMacHex] : [];
+
+        var dTitle = dObj
+            ? (dObj.custom_name || dObj.hostname || dObj.snmp_sysname || dObj.ip_address)
+            : (item.histLatest && item.histLatest.device_name ? item.histLatest.device_name : 'Layer-2 Gerät (MAC in Switch-Tabelle)');
+        var dIp = dObj ? dObj.ip_address : (item.histLatest && item.histLatest.ip_address ? item.histLatest.ip_address : 'Keine IP im ARP');
+        var dVendor = dObj ? (dObj.vendor || 'Unbekannt') : (item.histLatest && item.histLatest.vendor ? item.histLatest.vendor : 'Über Switch Bridge-MIB gelernt');
         var stBadge = dObj
             ? ('<span class="badge badge-' + dObj.status + '">' + escapeHtml(dObj.status.toUpperCase()) + '</span>')
-            : '<span class="badge badge-snmp">L2 MAC AKTIV</span>';
+            : (item.kind === 'historical_only'
+                ? '<span class="badge" style="background:rgba(168,85,247,0.22);border:1px solid #a855f7;color:#e9d5ff;">🕓 HISTORISCH</span>'
+                : '<span class="badge badge-snmp">L2 MAC AKTIV</span>');
         var coreTag = (dObj && parseInt(dObj.is_core || 0, 10) === 1)
             ? ' <span class="badge" style="background:rgba(168,85,247,0.25);border:1px solid #a855f7;color:#e9d5ff;">🔒 CORE-SWITCH</span>'
             : '';
@@ -434,7 +485,7 @@ function renderMacFinderResults() {
             var aliasTxt = sp.alias ? (' <span style="color:#cbd5e1;">(' + escapeHtml(sp.alias) + ')</span>') : '';
             portSectionHtml += '<div style="background:rgba(16,185,129,0.14);border:1px solid rgba(16,185,129,0.45);border-radius:6px;padding:7px 11px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-top:6px;">' +
                 '<div style="font-size:12.5px;">' +
-                    '<span style="color:#34d399;font-weight:700;">🟢 Gesteckt auf Switch:</span> ' +
+                    '<span style="color:#34d399;font-weight:700;">🟢 Aktuell gesteckt auf Switch:</span> ' +
                     '<b style="color:#f8fafc;">' + escapeHtml(sp.switchName) + '</b> <span style="font-family:monospace;color:#93c5fd;">(' + escapeHtml(sp.switchIp) + ')</span> ' +
                     '➔ <span class="badge" style="background:#065f46;border:1px solid #10b981;color:#a7f3d0;font-family:monospace;font-size:12.5px;padding:3px 8px;">Port ' + escapeHtml(sp.portName) + '</span>' +
                     vlanTxt + aliasTxt +
@@ -455,8 +506,36 @@ function renderMacFinderResults() {
             portSectionHtml += '<div style="font-size:12px;color:var(--text-secondary);margin-top:6px;">' +
                 '🌐 Verbunden über Gateway / Subnetz: <b>' + escapeHtml(sp.switchName) + '</b> (' + escapeHtml(sp.switchIp) + ')' +
             '</div>';
-        } else {
+        } else if (item.kind !== 'historical_only') {
             portSectionHtml += '<div style="font-size:12px;color:var(--text-secondary);margin-top:6px;">Kein untergeordneter Switch-Port (Root-/Infrastruktur-Knoten).</div>';
+        }
+
+        // Historische Port-Einträge für diese MAC-Adresse rendern
+        if (itemHistory.length > 0) {
+            var histRowsHtml = '';
+            for (var hIdx = 0; hIdx < itemHistory.length; hIdx++) {
+                var he = itemHistory[hIdx];
+                var isCurrentSame = (sp && sp.isSwitchPort && parseInt(sp.switchId, 10) === parseInt(he.switch_id, 10) && String(sp.portName) === String(he.port_name) && hIdx === 0);
+                var statusPill = isCurrentSame
+                    ? '<span class="badge" style="background:rgba(16,185,129,0.2);color:#34d399;font-size:10px;">AKTUELL</span>'
+                    : '<span class="badge" style="background:rgba(168,85,247,0.2);color:#e9d5ff;font-size:10px;">FRÜHERER PORT</span>';
+                histRowsHtml += '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;padding:4px 8px;background:rgba(15,23,42,0.65);border:1px solid rgba(148,163,184,0.2);border-radius:5px;font-size:11.5px;">' +
+                    '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">' +
+                        statusPill +
+                        '<b style="color:#f8fafc;">' + escapeHtml(he.switch_name || he.switch_ip || ('Switch #' + he.switch_id)) + '</b>' +
+                        '<span style="font-family:monospace;color:#93c5fd;">Port <b>' + escapeHtml(he.port_name) + '</b></span>' +
+                        '<span style="font-family:monospace;color:#fcd34d;">VLAN ' + (he.vlan_id || 1) + '</span>' +
+                    '</div>' +
+                    '<div style="display:flex;align-items:center;gap:8px;color:var(--text-secondary);font-size:11px;">' +
+                        '<span>🕓 ' + escapeHtml(he.first_seen || '-') + ' bis <b>' + escapeHtml(he.last_seen || '-') + '</b> (' + (he.sightings_count || 1) + '× gesehen)</span>' +
+                        '<button type="button" class="btn btn-sm" style="padding:1px 6px;font-size:10.5px;" onclick="closeMacFinderModal(); openSwitchGraphicModal(' + parseInt(he.switch_id, 10) + ', false, \'' + escapeHtml(he.port_name) + '\');">🎛 Port zeigen</button>' +
+                    '</div>' +
+                '</div>';
+            }
+            portSectionHtml += '<div style="margin-top:8px;display:flex;flex-direction:column;gap:4px;">' +
+                '<div style="font-size:11px;font-weight:700;color:#c084fc;text-transform:uppercase;">🕓 Port-Historie dieser MAC-Adresse (' + itemHistory.length + ' Stationen):</div>' +
+                histRowsHtml +
+            '</div>';
         }
 
         html += '<div style="background:var(--bg-panel);border:1px solid var(--border-color);border-radius:8px;padding:12px;">' +
@@ -466,7 +545,9 @@ function renderMacFinderResults() {
                     '<span style="font-weight:700;font-size:14px;color:#f8fafc;">' + escapeHtml(dTitle) + '</span>' +
                     coreTag +
                     '<span style="font-family:monospace;font-weight:700;color:#93c5fd;">IP: ' + escapeHtml(dIp) + '</span>' +
+                    (dIp && dIp !== 'Keine IP im ARP' ? '<button type="button" class="btn btn-sm" style="padding:1px 5px;font-size:10px;" onclick="copyToClipboard(\'' + escapeHtml(dIp) + '\', \'IP-Adresse\')" title="IP kopieren">📋</button>' : '') +
                     '<span class="badge" style="background:rgba(59,130,246,0.18);border:1px solid rgba(59,130,246,0.4);color:#bfdbfe;font-family:monospace;font-size:12px;">MAC: ' + escapeHtml(item.mac) + '</span>' +
+                    (item.mac && item.mac !== '-' ? '<button type="button" class="btn btn-sm" style="padding:1px 5px;font-size:10px;" onclick="copyToClipboard(\'' + escapeHtml(item.mac) + '\', \'MAC-Adresse\')" title="MAC kopieren">📋</button>' : '') +
                     '<span style="font-size:12px;color:var(--text-secondary);">(' + escapeHtml(dVendor) + ')</span>' +
                 '</div>' +
                 (dObj ? ('<button class="btn btn-sm" onclick="closeMacFinderModal(); selectDevice(' + dObj.id + ');">📍 Im Plan zeigen</button>') : '') +
@@ -499,6 +580,7 @@ function loadTopologyData(callback) {
             AppState.logs = data.logs || [];
             AppState.alerts = data.alerts || [];
             AppState.unackAlerts = parseInt(data.unack_alerts || 0, 10);
+            AppState.macHistory = data.mac_history || [];
             AppState.system = data.system || {};
             AppState.admin = data.admin || null;
 
@@ -2390,6 +2472,49 @@ function selectDevice(deviceId) {
             '</div>';
     }
 
+    var macHistoryBoxHtml = '';
+    var devMacHex = normalizeMacHex(dev.mac_address);
+    var allHist = AppState.macHistory || [];
+    var devHist = [];
+    if (devMacHex && devMacHex.length === 12) {
+        for (var mh = 0; mh < allHist.length; mh++) {
+            if (normalizeMacHex(allHist[mh].mac_address) === devMacHex) {
+                devHist.push(allHist[mh]);
+            }
+        }
+    }
+    if (devHist.length > 0) {
+        var histRows = '';
+        for (var hr = 0; hr < devHist.length; hr++) {
+            var he = devHist[hr];
+            var isCurPort = (hr === 0 && spInfo && parseInt(he.switch_id, 10) === parseInt(spInfo.switchId, 10) && String(he.port_name).toLowerCase() === String(spInfo.portName).toLowerCase());
+            var hTime = (he.first_seen || '-').substring(0, 16);
+            if (he.last_seen && he.last_seen !== he.first_seen) {
+                hTime += ' bis ' + he.last_seen.substring(0, 16);
+            }
+            var hBtn = parseInt(he.switch_id, 10) > 0
+                ? '<button type="button" class="btn btn-sm" style="padding:1px 6px;font-size:10.5px;border-color:rgba(96,165,250,0.45);color:#93c5fd;" onclick="openSwitchGraphicModal(' + parseInt(he.switch_id, 10) + ', false, \'' + escapeHtml(he.port_name || '') + '\')">🎛 Port</button>'
+                : '';
+            histRows +=
+                '<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap;padding:5px 8px;border-radius:6px;background:' + (isCurPort ? 'rgba(16,185,129,0.12);border:1px solid rgba(16,185,129,0.35)' : 'rgba(15,23,42,0.55);border:1px solid var(--border-color)') + ';font-size:11.5px;">' +
+                    '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">' +
+                        '<span style="font-weight:700;color:' + (isCurPort ? '#34d399' : '#cbd5e1') + ';">' + (isCurPort ? '🟢 ' : '🕓 ') + escapeHtml(he.switch_name || 'Switch') + '</span>' +
+                        '<span class="badge" style="font-family:monospace;font-size:10.5px;background:rgba(59,130,246,0.2);color:#93c5fd;">Port ' + escapeHtml(he.port_name || '-') + '</span>' +
+                        (parseInt(he.vlan_id, 10) > 0 ? '<span class="badge" style="font-family:monospace;font-size:10px;background:rgba(245,158,11,0.18);color:#fcd34d;">VLAN ' + parseInt(he.vlan_id, 10) + '</span>' : '') +
+                        hBtn +
+                    '</div>' +
+                    '<div style="font-family:monospace;font-size:10.5px;color:var(--text-secondary);">' +
+                        escapeHtml(hTime) + ' (' + (parseInt(he.sightings_count, 10) || 1) + '×)' +
+                    '</div>' +
+                '</div>';
+        }
+        macHistoryBoxHtml =
+            '<div style="border-top:1px solid var(--border-color);padding-top:10px;display:flex;flex-direction:column;gap:6px;">' +
+                '<div class="panel-title">🕓 Steckplatz-Historie (' + devHist.length + (devHist.length === 1 ? ' Station' : ' Stationen') + ')</div>' +
+                histRows +
+            '</div>';
+    }
+
     var editFormHtml = '';
     if (userCanEdit()) {
         editFormHtml =
@@ -2478,6 +2603,7 @@ function selectDevice(deviceId) {
             '<div class="kv-label">Offene Ports</div><div class="kv-val">' + renderCopyableValue(dev.open_ports, 'Offene Ports', '') + '</div>' +
             '<div class="kv-label">Scope</div><div class="kv-val">' + escapeHtml(dev.scope_name || '-') + '</div>' +
         '</div>' +
+        macHistoryBoxHtml +
         snmpHtml +
         editFormHtml;
 }
@@ -4259,10 +4385,14 @@ function selectSwitchGraphicPort(portKey) {
     }
 
     var devsHtml = '';
+    var currentPortMacHexMap = {};
     if (p.connectedDevices && p.connectedDevices.length > 0) {
         devsHtml = '<div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(240px, 1fr));gap:10px;margin-top:8px;">';
         for (var d = 0; d < p.connectedDevices.length; d++) {
             var cd = p.connectedDevices[d];
+            if (cd.mac) {
+                currentPortMacHexMap[normalizeMacHex(cd.mac)] = true;
+            }
             var jumpAttr = cd.id ? ('onclick="closeSwitchGraphicModal(); selectDevice(' + cd.id + ');" style="cursor:pointer;"') : '';
             devsHtml += '<div ' + jumpAttr + ' style="background:var(--bg-panel);border:1px solid #3b82f6;border-radius:8px;padding:10px;display:flex;justify-content:space-between;align-items:center;">' +
                 '<div>' +
@@ -4276,6 +4406,55 @@ function selectSwitchGraphicPort(portKey) {
         devsHtml += '</div>';
     } else {
         devsHtml = '<div style="font-size:12.5px;color:var(--text-secondary);margin-top:6px;">An diesem Port wurde aktuell kein aktives Endgerät in der MAC-/Topologie-Tabelle gemeldet.</div>';
+    }
+
+    // Historische MAC-Belegung an diesem spezifischen Switch-Port (mac_port_history)
+    var portHistoryHtml = '';
+    if (!SwitchGraphicState.isDemo && SwitchGraphicState.currentDevId) {
+        var allMacHist = AppState.macHistory || [];
+        var swPortHist = [];
+        var pNameLow = String(p.name || '').toLowerCase();
+        var pShortLow = String(p.shortName || '').toLowerCase();
+        for (var ph = 0; ph < allMacHist.length; ph++) {
+            var mhItem = allMacHist[ph];
+            if (parseInt(mhItem.switch_id, 10) === parseInt(SwitchGraphicState.currentDevId, 10)) {
+                var mhPortLow = String(mhItem.port_name || '').toLowerCase();
+                if (mhPortLow === pNameLow || mhPortLow === pShortLow || mhPortLow === ('port ' + pShortLow)) {
+                    swPortHist.push(mhItem);
+                }
+            }
+        }
+        if (swPortHist.length > 0) {
+            var phRows = '';
+            for (var pi = 0; pi < swPortHist.length; pi++) {
+                var phe = swPortHist[pi];
+                var pheHex = normalizeMacHex(phe.mac_address);
+                var isNowPlugged = !!currentPortMacHexMap[pheHex];
+                var pheTime = (phe.first_seen || '-').substring(0, 16);
+                if (phe.last_seen && phe.last_seen !== phe.first_seen) {
+                    pheTime += ' – ' + phe.last_seen.substring(0, 16);
+                }
+                phRows +=
+                    '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 10px;border-radius:6px;background:' + (isNowPlugged ? 'rgba(16,185,129,0.12);border:1px solid rgba(16,185,129,0.4)' : 'rgba(15,23,42,0.55);border:1px solid var(--border-color)') + ';font-size:12px;">' +
+                        '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">' +
+                            '<span class="badge" style="background:' + (isNowPlugged ? 'rgba(16,185,129,0.22);color:#34d399;border:1px solid #10b981;' : 'rgba(148,163,184,0.18);color:#cbd5e1;') + 'font-size:10.5px;">' + (isNowPlugged ? '🟢 Aktuell gesteckt' : '🕓 Historisch') + '</span>' +
+                            renderCopyableValue(phe.mac_address, 'MAC-Adresse', 'font-family:monospace;font-weight:700;color:#fcd34d;') +
+                            '<span style="font-weight:700;color:#f8fafc;">' + escapeHtml(phe.device_name || phe.ip_address || 'Unbekannter Host') + '</span>' +
+                            (phe.ip_address ? '<span style="font-family:monospace;color:#93c5fd;">(' + escapeHtml(phe.ip_address) + ')</span>' : '') +
+                            (phe.vendor ? '<span style="color:var(--text-secondary);font-size:11px;">• ' + escapeHtml(phe.vendor) + '</span>' : '') +
+                            (parseInt(phe.vlan_id, 10) > 0 ? '<span class="badge" style="font-family:monospace;font-size:10.5px;background:rgba(245,158,11,0.18);color:#fcd34d;">VLAN ' + parseInt(phe.vlan_id, 10) + '</span>' : '') +
+                        '</div>' +
+                        '<div style="font-family:monospace;font-size:11px;color:var(--text-secondary);">' +
+                            'Zeitraum: <b style="color:#e2e8f0;">' + escapeHtml(pheTime) + '</b> (' + (parseInt(phe.sightings_count, 10) || 1) + '× gesehen)' +
+                        '</div>' +
+                    '</div>';
+            }
+            portHistoryHtml =
+                '<div style="margin-top:12px;padding-top:10px;border-top:1px dashed var(--border-color);">' +
+                    '<div style="font-size:11.5px;font-weight:700;color:#fcd34d;text-transform:uppercase;margin-bottom:6px;">🕓 Historische MAC-Belegung an Buchse #' + escapeHtml(p.shortName) + ' (Port ' + escapeHtml(p.name) + ' • ' + swPortHist.length + (swPortHist.length === 1 ? ' MAC-Eintrag' : ' MAC-Einträge') + '):</div>' +
+                    '<div style="display:flex;flex-direction:column;gap:5px;">' + phRows + '</div>' +
+                '</div>';
+        }
     }
 
     // Interaktives SSH Port- & VLAN-Konfigurationspanel für Operatoren & Admins
@@ -4384,6 +4563,7 @@ function selectSwitchGraphicPort(portKey) {
         '</div>' +
         '<div style="font-size:12px;font-weight:700;color:var(--text-secondary);text-transform:uppercase;">Angeschlossene Geräte / Gegenstelle an Buchse #' + escapeHtml(p.shortName) + ':</div>' +
         devsHtml +
+        portHistoryHtml +
         sshConfigHtml;
 }
 

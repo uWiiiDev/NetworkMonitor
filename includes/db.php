@@ -323,6 +323,26 @@ class Database
                 created_at TEXT NOT NULL
             )
         ");
+
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS mac_port_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                mac_address TEXT NOT NULL,
+                ip_address TEXT DEFAULT NULL,
+                device_name TEXT DEFAULT NULL,
+                vendor TEXT DEFAULT NULL,
+                switch_id INTEGER NOT NULL,
+                switch_name TEXT DEFAULT NULL,
+                switch_ip TEXT DEFAULT NULL,
+                port_name TEXT NOT NULL,
+                vlan_id INTEGER DEFAULT 1,
+                first_seen TEXT NOT NULL,
+                last_seen TEXT NOT NULL,
+                sightings_count INTEGER NOT NULL DEFAULT 1
+            )
+        ");
+        $this->pdo->exec("CREATE INDEX IF NOT EXISTS idx_mph_mac ON mac_port_history(mac_address)");
+        $this->pdo->exec("CREATE INDEX IF NOT EXISTS idx_mph_sw_port ON mac_port_history(switch_id, port_name)");
     }
 
     private function ensureColumnExists($table, $column, $definition)
@@ -439,6 +459,45 @@ class Database
                     ));
                 }
             }
+
+            // Einmaliges Backfill für mac_port_history aus bereits vorhandenen Switch-Port-Links, falls Tabelle noch leer ist
+            try {
+                $histCount = (int)$this->pdo->query("SELECT COUNT(*) FROM mac_port_history")->fetchColumn();
+                if ($histCount === 0) {
+                    $existingLinks = $this->pdo->query("
+                        SELECT l.source_device_id, l.source_port, l.updated_at,
+                               d.mac_address, d.ip_address, d.custom_name, d.hostname, d.vendor, d.first_seen, d.last_seen,
+                               sw.custom_name AS sw_custom, sw.hostname AS sw_host, sw.snmp_sysname AS sw_sysname, sw.ip_address AS sw_ip
+                        FROM links l
+                        INNER JOIN devices d ON l.target_device_id = d.id
+                        INNER JOIN devices sw ON l.source_device_id = sw.id
+                        WHERE l.source_port IS NOT NULL AND l.source_port != '' AND l.source_port != 'Trunk' AND l.source_port != 'Uplink'
+                          AND d.mac_address IS NOT NULL AND d.mac_address != ''
+                    ")->fetchAll();
+                    if (!empty($existingLinks)) {
+                        $insH = $this->pdo->prepare("
+                            INSERT INTO mac_port_history (mac_address, ip_address, device_name, vendor, switch_id, switch_name, switch_ip, port_name, vlan_id, first_seen, last_seen, sightings_count)
+                            VALUES (:mac, :ip, :dname, :vend, :swid, :swname, :swip, :pname, 1, :fseen, :lseen, 1)
+                        ");
+                        foreach ($existingLinks as $el) {
+                            $swLabel = !empty($el['sw_custom']) ? $el['sw_custom'] : (!empty($el['sw_sysname']) ? $el['sw_sysname'] : (!empty($el['sw_host']) ? $el['sw_host'] : $el['sw_ip']));
+                            $devLabel = !empty($el['custom_name']) ? $el['custom_name'] : (!empty($el['hostname']) ? $el['hostname'] : $el['ip_address']);
+                            $insH->execute(array(
+                                ':mac'    => strtoupper($el['mac_address']),
+                                ':ip'     => $el['ip_address'],
+                                ':dname'  => $devLabel,
+                                ':vend'   => $el['vendor'],
+                                ':swid'   => (int)$el['source_device_id'],
+                                ':swname' => $swLabel,
+                                ':swip'   => $el['sw_ip'],
+                                ':pname'  => $el['source_port'],
+                                ':fseen'  => !empty($el['first_seen']) ? $el['first_seen'] : $now,
+                                ':lseen'  => !empty($el['last_seen']) ? $el['last_seen'] : $now,
+                            ));
+                        }
+                    }
+                }
+            } catch (Exception $e) {}
         }
     }
 }
