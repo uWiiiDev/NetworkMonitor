@@ -139,9 +139,9 @@ $gitShort = Database::getGitCommitShort();
                             <option value="all">Alle Netzwerk-Scopes</option>
                         </select>
 
-                        <input type="text" id="map-search" class="search-input" placeholder="Suche IP, Name, MAC..." oninput="renderCurrentView()" style="width:175px;">
-                        <button class="btn btn-sm" style="border-color:#3b82f6;background:rgba(59,130,246,0.16);color:#93c5fd;font-weight:600;" onclick="openMacFinderModal(document.getElementById('map-search').value)" title="MAC-Adresse oder Gerät suchen und sofort sehen, an welchem Switch-Port es gesteckt ist">
-                            🔍 MAC / Port-Finder
+                        <input type="text" id="map-search" class="search-input" placeholder="Suche IP, Name, MAC, Dose..." oninput="renderCurrentView()" style="width:190px;">
+                        <button class="btn btn-sm" style="border-color:#3b82f6;background:rgba(59,130,246,0.16);color:#93c5fd;font-weight:600;" onclick="openMacFinderModal(document.getElementById('map-search').value)" title="MAC-Adresse, Netzwerkdose oder Gerät suchen und sofort sehen, an welchem Switch-Port es gesteckt ist">
+                            🔍 MAC / Port / Dosen-Finder
                         </button>
 
                         <!-- Gruppen & Geräte-Filter Dropdown -->
@@ -274,9 +274,9 @@ $gitShort = Database::getGitCommitShort();
                 <div class="map-toolbar">
                     <div class="toolbar-group">
                         <div class="panel-title">Gefundene Hosts &amp; Managed Switches</div>
-                        <input type="text" id="inv-search" class="search-input" placeholder="In Tabelle filtern (IP, MAC, Port)..." oninput="renderInventoryTable()" style="width:210px;">
-                        <button class="btn btn-sm" style="border-color:#3b82f6;background:rgba(59,130,246,0.16);color:#93c5fd;font-weight:600;" onclick="openMacFinderModal(document.getElementById('inv-search').value)" title="Gezielte MAC-Adress- &amp; Switch-Port-Suche öffnen">
-                            🔍 MAC / Port-Finder
+                        <input type="text" id="inv-search" class="search-input" placeholder="In Tabelle filtern (IP, MAC, Port, Dose)..." oninput="renderInventoryTable()" style="width:230px;">
+                        <button class="btn btn-sm" style="border-color:#3b82f6;background:rgba(59,130,246,0.16);color:#93c5fd;font-weight:600;" onclick="openMacFinderModal(document.getElementById('inv-search').value)" title="Gezielte MAC-Adress-, Netzwerkdosen- &amp; Switch-Port-Suche öffnen">
+                            🔍 MAC / Port / Dosen-Finder
                         </button>
                     </div>
                     <div class="toolbar-group">
@@ -925,20 +925,20 @@ $gitShort = Database::getGitCommitShort();
         </div>
     </div>
 
-    <!-- Modal: MAC-Adress- & Switch-Port-Finder ("Wo steckt welches Gerät?") -->
+    <!-- Modal: MAC-Adress-, Dosen- & Switch-Port-Finder ("Wo steckt welches Gerät / welche Netzwerkdose?") -->
     <div id="mac-finder-modal" class="modal-backdrop">
         <div class="modal" style="width:940px;max-width:96vw;max-height:90vh;display:flex;flex-direction:column;">
             <div class="panel-header" style="flex-shrink:0;">
-                <span class="panel-title">🔍 MAC-Adress- &amp; Switch-Port-Finder („Auf welchem Port steckt das Gerät?“)</span>
+                <span class="panel-title">🔍 MAC-, Dosen- &amp; Switch-Port-Finder („Welche Dose / welches Gerät liegt auf welchem Port?“)</span>
                 <button class="btn btn-sm" onclick="closeMacFinderModal()">×</button>
             </div>
             <div class="modal-body" style="overflow-y:auto;flex:1;display:flex;flex-direction:column;gap:14px;">
                 <div style="background:rgba(59,130,246,0.1);border:1px solid rgba(59,130,246,0.35);border-radius:8px;padding:12px;">
                     <div style="font-size:12.5px;color:#bfdbfe;margin-bottom:8px;">
-                        Gib eine <b>MAC-Adresse</b> (beliebiges Format: <code>00:25:90:8A:11:01</code>, <code>00-25-90...</code>, Cisco <code>0025.908a.1101</code> oder Teil-MAC), eine <b>IP-Adresse</b>, einen <b>Hostnamen</b> oder eine <b>Port-Bezeichnung</b> ein:
+                        Gib eine <b>Dosen-Bezeichnung</b> (z.B. <code>Dose 1.12</code>, <code>E1-D14</code>, <code>PF1-08</code>, <code>Büro EG</code>), eine <b>MAC-Adresse</b> (<code>00:25:90...</code>, Cisco <code>0025.908a...</code>), eine <b>IP-Adresse</b>, einen <b>Hostnamen</b> oder einen <b>Switch-Port</b> ein:
                     </div>
                     <div style="display:flex;gap:8px;align-items:center;">
-                        <input type="text" id="mac-finder-input" class="form-input" placeholder="MAC-Adresse, IP, Hostname oder Switch-Port eingeben..." oninput="renderMacFinderResults()" style="font-family:monospace;font-size:14px;flex:1;">
+                        <input type="text" id="mac-finder-input" class="form-input" placeholder="Dosen-Nr. (z.B. Dose 1.12), Raum, Patchfeld, MAC, IP, Hostname oder Switch-Port eingeben..." oninput="renderMacFinderResults()" style="font-family:monospace;font-size:14px;flex:1;">
                         <button class="btn btn-sm" onclick="document.getElementById('mac-finder-input').value=''; renderMacFinderResults();">Leeren</button>
                     </div>
                 </div>

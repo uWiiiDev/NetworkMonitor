@@ -11,6 +11,7 @@ var AppState = {
     alerts: [],
     unackAlerts: 0,
     lastToastAlertCount: 0,
+    portOutlets: [],
     system: {},
     selectedScopeId: 'all',
     selectedDeviceId: null,
@@ -186,8 +187,91 @@ function getSwitchUpstreamPortsMap(sw, snmp) {
     return upMap;
 }
 
+function extractPortNumberFromName(pName) {
+    if (!pName) return null;
+    var s = String(pName).trim();
+    var mStack = s.match(/^(?:Gi|Fa|Te|Tw|Fo|Eth|ge-|xe-|et-|Port)?\s*([1-8])\/(\d+)\/(\d+)$/i);
+    if (mStack) {
+        return { unit: parseInt(mStack[1], 10), port: parseInt(mStack[3], 10) };
+    }
+    var mNum = s.match(/(?:^|\D)(\d+)$/);
+    if (mNum) {
+        return { unit: 1, port: parseInt(mNum[1], 10) };
+    }
+    return null;
+}
+
 /**
- * Ermittelt für ein Gerät (oder eine MAC-Adresse), an welchem Switch und genau welchem Port (+ VLAN) es gesteckt ist.
+ * Ermittelt die hinterlegte Netzwerkdosen- / Patchfeld- / Raum-Zuordnung für einen Switch-Port
+ */
+function getPortOutletInfo(switchId, portName, fallbackAlias) {
+    if (!switchId || !portName) return null;
+    var swId = parseInt(switchId, 10);
+    var pLow = String(portName).trim().toLowerCase();
+    var pNumObj = extractPortNumberFromName(portName);
+    var list = AppState.portOutlets || [];
+    var matchedRow = null;
+
+    for (var i = 0; i < list.length; i++) {
+        var r = list[i];
+        if (parseInt(r.switch_id, 10) !== swId) continue;
+        if (String(r.port_name || '').trim().toLowerCase() === pLow) {
+            matchedRow = r;
+            break;
+        }
+    }
+    if (!matchedRow && pNumObj) {
+        for (var j = 0; j < list.length; j++) {
+            var r2 = list[j];
+            if (parseInt(r2.switch_id, 10) !== swId) continue;
+            var rNumObj = extractPortNumberFromName(r2.port_name);
+            if (rNumObj && rNumObj.unit === pNumObj.unit && rNumObj.port === pNumObj.port) {
+                matchedRow = r2;
+                break;
+            }
+        }
+    }
+
+    if (matchedRow) {
+        var oLbl = matchedRow.outlet_label || '';
+        var pPan = matchedRow.patch_panel || '';
+        var rm = matchedRow.room || '';
+        var nt = matchedRow.notes || '';
+        var parts = [];
+        if (oLbl) parts.push(oLbl);
+        if (pPan) parts.push('PF: ' + pPan);
+        if (rm) parts.push(rm);
+        return {
+            outletLabel: oLbl,
+            patchPanel: pPan,
+            room: rm,
+            notes: nt,
+            isFromDb: true,
+            badgeText: oLbl || pPan || rm,
+            fullText: parts.join(' • '),
+            searchText: (oLbl + ' ' + pPan + ' ' + rm + ' ' + nt).toLowerCase()
+        };
+    }
+
+    var cleanAlias = fallbackAlias ? String(fallbackAlias).trim() : '';
+    if (cleanAlias !== '' && cleanAlias.toLowerCase() !== 'freier port' && cleanAlias.toLowerCase() !== 'aktiv') {
+        return {
+            outletLabel: cleanAlias,
+            patchPanel: '',
+            room: '',
+            notes: '',
+            isFromDb: false,
+            isFromAlias: true,
+            badgeText: cleanAlias,
+            fullText: cleanAlias,
+            searchText: cleanAlias.toLowerCase()
+        };
+    }
+    return null;
+}
+
+/**
+ * Ermittelt für ein Gerät (oder eine MAC-Adresse), an welchem Switch und genau welchem Port (+ VLAN + Dose) es gesteckt ist.
  * Kombiniert Topologie-Links und sämtliche gelernten SNMP Bridge-MIB MAC-Tabellen aller Switches.
  */
 function getDeviceSwitchPortInfo(dev) {
@@ -301,18 +385,28 @@ function getDeviceSwitchPortInfo(dev) {
     }
 
     var isSwitchPort = (primarySwitch.device_type === 'switch' || parseInt(primarySwitch.snmp_enabled || 0, 10) === 1) && primaryPort && primaryPort !== 'Uplink' && primaryLinkType !== 'subnet';
+    var resolvedPortName = primaryPort || (primarySwitch.device_type === 'router' ? 'Gateway / WLAN' : '');
+    var outletInfo = isSwitchPort ? getPortOutletInfo(primarySwitch.id, resolvedPortName, portAlias) : null;
 
     return {
         switchId: primarySwitch.id,
         switchName: swName,
         switchIp: primarySwitch.ip_address,
         switchType: primarySwitch.device_type,
-        portName: primaryPort || (primarySwitch.device_type === 'router' ? 'Gateway / WLAN' : ''),
+        portName: resolvedPortName,
         vlan: vlanId,
         alias: portAlias,
+        outletInfo: outletInfo,
         isSwitchPort: isSwitchPort,
         sightings: sightings,
-        searchString: (swName + ' ' + primarySwitch.ip_address + ' ' + (primaryPort || '') + (vlanId ? (' vlan' + vlanId + ' vlan ' + vlanId) : '')).toLowerCase()
+        searchString: (
+            swName + ' ' +
+            primarySwitch.ip_address + ' ' +
+            resolvedPortName +
+            (vlanId ? (' vlan' + vlanId + ' vlan ' + vlanId) : '') +
+            (portAlias ? (' ' + portAlias) : '') +
+            (outletInfo ? (' ' + outletInfo.searchText) : '')
+        ).toLowerCase()
     };
 }
 
@@ -415,6 +509,7 @@ function renderMacFinderResults() {
             }
 
             if (rawMatch) {
+                var rawOutInfo = getPortOutletInfo(sw.id, pName, '');
                 matchedItems.push({
                     kind: 'raw_mac',
                     dev: null,
@@ -427,6 +522,7 @@ function renderMacFinderResults() {
                         portName: pName,
                         vlan: pVlan,
                         alias: '',
+                        outletInfo: rawOutInfo,
                         isSwitchPort: true,
                         sightings: [{
                             switchId: sw.id,
@@ -440,6 +536,76 @@ function renderMacFinderResults() {
                     }
                 });
             }
+        }
+    }
+
+    // Durchsuche außerdem alle hinterlegten Netzwerkdosen / Patchfeld-Zuordnungen (auch für aktuell freie/unbelegte Dosen!)
+    var coveredSwitchPorts = {};
+    for (var cp = 0; cp < matchedItems.length; cp++) {
+        var csp = matchedItems[cp].spInfo;
+        if (csp && csp.switchId && csp.portName) {
+            coveredSwitchPorts[csp.switchId + '_' + String(csp.portName).toLowerCase()] = true;
+        }
+    }
+    var swMapById = {};
+    for (var sIdx = 0; sIdx < AppState.devices.length; sIdx++) {
+        swMapById[AppState.devices[sIdx].id] = AppState.devices[sIdx];
+    }
+    var outletsList = AppState.portOutlets || [];
+    for (var oi = 0; oi < outletsList.length; oi++) {
+        var po = outletsList[oi];
+        var swDev = swMapById[po.switch_id];
+        if (!swDev) continue;
+        var poKey = po.switch_id + '_' + String(po.port_name || '').toLowerCase();
+        if (coveredSwitchPorts[poKey]) continue;
+
+        var swTitle = swDev.custom_name || swDev.snmp_sysname || swDev.hostname || swDev.ip_address;
+        var poHay = (
+            (po.outlet_label || '') + ' ' +
+            (po.patch_panel || '') + ' ' +
+            (po.room || '') + ' ' +
+            (po.notes || '') + ' ' +
+            (po.port_name || '') + ' ' +
+            swTitle + ' ' +
+            swDev.ip_address
+        ).toLowerCase();
+
+        if (qRaw === '' || poHay.indexOf(qRaw) !== -1) {
+            var poVlan = 1;
+            var poStatus = 'down';
+            if (swDev.snmp_ports_json) {
+                try {
+                    var poSnmp = JSON.parse(swDev.snmp_ports_json);
+                    if (poSnmp && poSnmp.interfaces) {
+                        for (var pif = 0; pif < poSnmp.interfaces.length; pif++) {
+                            if (String(poSnmp.interfaces[pif].name).toLowerCase() === String(po.port_name).toLowerCase()) {
+                                poVlan = poSnmp.interfaces[pif].vlan ? parseInt(poSnmp.interfaces[pif].vlan, 10) : 1;
+                                poStatus = poSnmp.interfaces[pif].status || 'down';
+                                break;
+                            }
+                        }
+                    }
+                } catch (e) {}
+            }
+            matchedItems.push({
+                kind: 'outlet_only',
+                dev: null,
+                mac: '-',
+                outletRow: po,
+                portStatus: poStatus,
+                spInfo: {
+                    switchId: swDev.id,
+                    switchName: swTitle,
+                    switchIp: swDev.ip_address,
+                    switchType: 'switch',
+                    portName: po.port_name,
+                    vlan: poVlan,
+                    alias: '',
+                    outletInfo: getPortOutletInfo(swDev.id, po.port_name, ''),
+                    isSwitchPort: true,
+                    sightings: []
+                }
+            });
         }
     }
 
@@ -534,16 +700,45 @@ function renderMacFinderResults() {
             ? ' <span class="badge" style="background:rgba(168,85,247,0.25);border:1px solid #a855f7;color:#e9d5ff;">🔒 CORE-SWITCH</span>'
             : '';
 
+        if (item.kind === 'outlet_only') {
+            var outObj = sp.outletInfo || {};
+            var isPortUp = (item.portStatus === 'up');
+            html += '<div style="background:var(--bg-panel);border:1px solid rgba(56,189,248,0.45);border-radius:8px;padding:12px;">' +
+                '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">' +
+                    '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">' +
+                        '<span class="badge" style="background:rgba(14,165,233,0.22);border:1px solid #38bdf8;color:#7dd3fc;">🔌 NETZWERKDOSE / PATCHFELD</span>' +
+                        '<span style="font-weight:800;font-size:14.5px;color:#f8fafc;">' + escapeHtml(outObj.outletLabel || ('Port ' + sp.portName)) + '</span>' +
+                        (outObj.patchPanel ? '<span class="badge" style="background:rgba(148,163,184,0.18);color:#e2e8f0;font-family:monospace;">Patchfeld: ' + escapeHtml(outObj.patchPanel) + '</span>' : '') +
+                        (outObj.room ? '<span class="badge" style="background:rgba(245,158,11,0.18);border:1px solid rgba(245,158,11,0.4);color:#fde68a;">📍 Raum: ' + escapeHtml(outObj.room) + '</span>' : '') +
+                        (outObj.notes ? '<span style="font-size:12px;color:var(--text-secondary);">(' + escapeHtml(outObj.notes) + ')</span>' : '') +
+                        (isPortUp ? '<span class="badge badge-online">LINK UP</span>' : '<span class="badge badge-offline">⚪ FREIE DOSE (LINK DOWN)</span>') +
+                    '</div>' +
+                    '<button class="btn btn-sm btn-primary" onclick="closeMacFinderModal(); openSwitchGraphicModal(' + sp.switchId + ', false, \'' + escapeHtml(sp.portName) + '\');">🎛 Dose am Switch öffnen / VLAN ändern</button>' +
+                '</div>' +
+                '<div style="background:rgba(14,165,233,0.1);border:1px solid rgba(56,189,248,0.3);border-radius:6px;padding:7px 11px;margin-top:6px;font-size:12.5px;">' +
+                    '<span style="color:#7dd3fc;font-weight:700;">Aufgelegt auf Switch:</span> ' +
+                    '<b style="color:#f8fafc;">' + escapeHtml(sp.switchName) + '</b> <span style="font-family:monospace;color:#93c5fd;">(' + escapeHtml(sp.switchIp) + ')</span> ' +
+                    '➔ <span class="badge" style="background:#0c4a6e;border:1px solid #38bdf8;color:#bae6fd;font-family:monospace;font-size:12.5px;padding:3px 8px;">Port ' + escapeHtml(sp.portName) + '</span>' +
+                    (sp.vlan ? (' • <b style="color:#fde68a;">VLAN ' + sp.vlan + '</b>') : '') +
+                '</div>' +
+            '</div>';
+            continue;
+        }
+
         var portSectionHtml = '';
         if (sp && sp.isSwitchPort) {
             var vlanTxt = sp.vlan ? (' • <b style="color:#fde68a;">VLAN ' + sp.vlan + '</b>') : '';
             var aliasTxt = sp.alias ? (' <span style="color:#cbd5e1;">(' + escapeHtml(sp.alias) + ')</span>') : '';
+            var outletBadgeHtml = '';
+            if (sp.outletInfo && sp.outletInfo.fullText) {
+                outletBadgeHtml = ' • <span class="badge" style="background:rgba(14,165,233,0.22);border:1px solid #38bdf8;color:#7dd3fc;font-size:12px;padding:2px 8px;">🔌 Dose: <b>' + escapeHtml(sp.outletInfo.fullText) + '</b></span>';
+            }
             portSectionHtml += '<div style="background:rgba(16,185,129,0.14);border:1px solid rgba(16,185,129,0.45);border-radius:6px;padding:7px 11px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-top:6px;">' +
                 '<div style="font-size:12.5px;">' +
                     '<span style="color:#34d399;font-weight:700;">🟢 Aktuell gesteckt auf Switch:</span> ' +
                     '<b style="color:#f8fafc;">' + escapeHtml(sp.switchName) + '</b> <span style="font-family:monospace;color:#93c5fd;">(' + escapeHtml(sp.switchIp) + ')</span> ' +
                     '➔ <span class="badge" style="background:#065f46;border:1px solid #10b981;color:#a7f3d0;font-family:monospace;font-size:12.5px;padding:3px 8px;">Port ' + escapeHtml(sp.portName) + '</span>' +
-                    vlanTxt + aliasTxt +
+                    vlanTxt + outletBadgeHtml + aliasTxt +
                 '</div>' +
                 '<button class="btn btn-sm btn-primary" onclick="closeMacFinderModal(); openSwitchGraphicModal(' + sp.switchId + ', false, \'' + escapeHtml(sp.portName) + '\');">🎛 Port am Switch öffnen / VLAN ändern</button>' +
             '</div>';
@@ -637,6 +832,7 @@ function loadTopologyData(callback) {
             AppState.unackAlerts = parseInt(data.unack_alerts || 0, 10);
             AppState.macHistory = data.mac_history || [];
             AppState.macWatchlist = data.mac_watchlist || [];
+            AppState.portOutlets = data.port_outlets || [];
             AppState.system = data.system || {};
             AppState.admin = data.admin || null;
 
@@ -2517,14 +2713,19 @@ function selectDevice(deviceId) {
     var spInfo = getDeviceSwitchPortInfo(dev);
     var switchPortInspectorHtml = '<span style="color:var(--text-secondary);">Kein Switch-Port zugeordnet</span>';
     if (spInfo && spInfo.switchId) {
-        var spCopyText = spInfo.switchName + ' (' + spInfo.switchIp + ') - Port ' + (spInfo.portName || '-') + (spInfo.vlan ? (' [VLAN ' + spInfo.vlan + ']') : '');
+        var spOutletStr = (spInfo.outletInfo && spInfo.outletInfo.fullText) ? (' [Dose: ' + spInfo.outletInfo.fullText + ']') : '';
+        var spCopyText = spInfo.switchName + ' (' + spInfo.switchIp + ') - Port ' + (spInfo.portName || '-') + (spInfo.vlan ? (' [VLAN ' + spInfo.vlan + ']') : '') + spOutletStr;
+        var spOutletBadge = (spInfo.outletInfo && spInfo.outletInfo.fullText)
+            ? '<span class="badge" style="background:rgba(14,165,233,0.22);border:1px solid #38bdf8;color:#7dd3fc;">🔌 ' + escapeHtml(spInfo.outletInfo.fullText) + '</span>'
+            : '';
         switchPortInspectorHtml =
             '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">' +
                 '<span style="font-weight:700;color:#f8fafc;">' + escapeHtml(spInfo.switchName) + '</span>' +
                 '<span class="badge" style="background:rgba(16,185,129,0.2);border:1px solid #10b981;color:#34d399;font-family:monospace;">Port ' + escapeHtml(spInfo.portName || '-') + '</span>' +
                 (spInfo.vlan ? '<span class="badge" style="background:rgba(245,158,11,0.22);border:1px solid #f59e0b;color:#fcd34d;font-family:monospace;">VLAN ' + spInfo.vlan + '</span>' : '') +
-                '<button class="btn btn-sm" style="padding:2px 7px;font-size:11px;border-color:#10b981;color:#6ee7b7;" onclick="openSwitchGraphicModal(' + spInfo.switchId + ', false, \'' + escapeHtml(spInfo.portName || '') + '\')">🎛 Port öffnen</button>' +
-                '<button type="button" class="btn btn-sm" style="padding:1px 6px;font-size:10.5px;border-color:rgba(148,163,184,0.35);color:#cbd5e1;" onclick="copyToClipboard(\'' + escapeHtml(spCopyText) + '\', \'Switch-Port\')" title="Switch &amp; Port kopieren">📋</button>' +
+                spOutletBadge +
+                '<button class="btn btn-sm" style="padding:2px 7px;font-size:11px;border-color:#10b981;color:#6ee7b7;" onclick="openSwitchGraphicModal(' + spInfo.switchId + ', false, \'' + escapeHtml(spInfo.portName || '') + '\')">🎛 Port / Dose öffnen</button>' +
+                '<button type="button" class="btn btn-sm" style="padding:1px 6px;font-size:10.5px;border-color:rgba(148,163,184,0.35);color:#cbd5e1;" onclick="copyToClipboard(\'' + escapeHtml(spCopyText) + '\', \'Switch-Port &amp; Dose\')" title="Switch, Port &amp; Dose kopieren">📋</button>' +
             '</div>';
     }
 
@@ -3190,11 +3391,17 @@ function renderInventoryTable() {
         if (dev._spInfo && dev._spInfo.switchId) {
             var spObj = dev._spInfo;
             var vlanPart = spObj.vlan ? (' <span style="color:#fcd34d;">(V' + spObj.vlan + ')</span>') : '';
-            spCellHtml = '<button class="btn btn-sm" style="background:rgba(59,130,246,0.15);border-color:rgba(59,130,246,0.45);color:#93c5fd;padding:2px 8px;font-size:11px;font-family:monospace;" ' +
+            var outletPart = (spObj.outletInfo && spObj.outletInfo.badgeText)
+                ? (' <span class="badge" style="background:rgba(14,165,233,0.2);border:1px solid rgba(56,189,248,0.45);color:#7dd3fc;font-size:10.5px;margin-left:4px;" title="' + escapeHtml(spObj.outletInfo.fullText) + '">🔌 ' + escapeHtml(spObj.outletInfo.badgeText) + (spObj.outletInfo.room ? (' (' + escapeHtml(spObj.outletInfo.room) + ')') : '') + '</span>')
+                : '';
+            spCellHtml = '<div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;">' +
+                '<button class="btn btn-sm" style="background:rgba(59,130,246,0.15);border-color:rgba(59,130,246,0.45);color:#93c5fd;padding:2px 8px;font-size:11px;font-family:monospace;" ' +
                 'onclick="event.stopPropagation(); openSwitchGraphicModal(' + spObj.switchId + ', false, \'' + escapeHtml(spObj.portName || '') + '\');" ' +
                 'title="Klicken, um Switch ' + escapeHtml(spObj.switchName) + ' an Port ' + escapeHtml(spObj.portName || '-') + ' zu öffnen">' +
                 '🎛 ' + escapeHtml(spObj.switchName) + ' • <b>' + escapeHtml(spObj.portName || '-') + '</b>' + vlanPart +
-            '</button>';
+                '</button>' +
+                outletPart +
+            '</div>';
         }
 
         var osAndBanner = '<div style="font-weight:600;color:#a7f3d0;">' + escapeHtml(dev.os_guess || '-') + '</div>' +
@@ -3752,6 +3959,7 @@ function buildRealSwitchGraphicModel(dev) {
                 speed: pi.speed || ((mapped && mapped.list.length > 0) ? '1 Gbps' : 'Down'),
                 alias: pi.alias || (mapped && mapped.list.length > 0 ? mapped.list[0].name : ''),
                 rawAlias: pi.alias || '',
+                outletInfo: getPortOutletInfo(dev.id, pNameStr, pi.alias || ''),
                 rx_mb: pi.rx_mb || 0,
                 tx_mb: pi.tx_mb || 0,
                 in_errors: pi.in_errors || 0,
@@ -3809,6 +4017,7 @@ function buildRealSwitchGraphicModel(dev) {
                 speed: pInfo.isUplink ? '1 Gbps Uplink' : '1 Gbps',
                 alias: pInfo.list.length > 0 ? pInfo.list[0].name : pLabel,
                 rawAlias: '',
+                outletInfo: getPortOutletInfo(dev.id, pLabel, ''),
                 rx_mb: 0,
                 tx_mb: 0,
                 in_errors: 0,
@@ -3823,11 +4032,12 @@ function buildRealSwitchGraphicModel(dev) {
         for (var fp = 1; fp <= minPorts; fp++) {
             if (!usedPortNums[fp]) {
                 var isSfpSlot = ((minPorts === 28 && fp > 24) || (minPorts === 52 && fp > 48));
+                var fbName = isSfpSlot ? ('SFP ' + fp) : ('Port ' + fp);
                 unitsMap[1].push({
                     key: 'u1_p' + fp,
                     unit: 1,
                     portNum: fp,
-                    name: isSfpSlot ? ('SFP ' + fp) : ('Port ' + fp),
+                    name: fbName,
                     shortName: String(fp),
                     isSfp: isSfpSlot,
                     status: 'down',
@@ -3836,6 +4046,7 @@ function buildRealSwitchGraphicModel(dev) {
                     speed: 'Down',
                     alias: 'Freier Port',
                     rawAlias: '',
+                    outletInfo: getPortOutletInfo(dev.id, fbName, ''),
                     rx_mb: 0,
                     tx_mb: 0,
                     in_errors: 0,
@@ -4154,6 +4365,64 @@ function openSwitchGraphicModal(devId, isDemoPreview, keepSelectedPortName) {
     // =========================================================================
     // 2. FARB-LEGENDE & 19-ZOLL FRONTBLENDEN PRO STACK-UNIT
     // =========================================================================
+    var allModelPorts = [];
+    for (var mu = 0; mu < model.units.length; mu++) {
+        for (var mp = 0; mp < model.units[mu].ports.length; mp++) {
+            allModelPorts.push(model.units[mu].ports[mp]);
+        }
+    }
+    var mappedOutletsCount = 0;
+    for (var moc = 0; moc < allModelPorts.length; moc++) {
+        if (allModelPorts[moc].outletInfo && allModelPorts[moc].outletInfo.isFromDb) {
+            mappedOutletsCount++;
+        }
+    }
+
+    var bulkOutletsPanelHtml = '';
+    if (!model.isDemo && devId) {
+        var bulkRowsHtml = '';
+        for (var bp = 0; bp < allModelPorts.length; bp++) {
+            var bPort = allModelPorts[bp];
+            var bOut = (bPort.outletInfo && bPort.outletInfo.isFromDb) ? bPort.outletInfo : { outletLabel: '', patchPanel: '', room: '', notes: '' };
+            var curDevStr = '-';
+            if (bPort.connectedDevices && bPort.connectedDevices.length > 0) {
+                curDevStr = bPort.connectedDevices[0].name + ' (' + bPort.connectedDevices[0].ip + ')';
+            } else if (bPort.status === 'up') {
+                curDevStr = 'ONLINE (' + (bPort.speed || 'Link Up') + ')';
+            }
+            var roAttr = userCanEdit() ? '' : 'readonly';
+            bulkRowsHtml += '<tr class="sw-bulk-outlet-row" data-port="' + escapeHtml(bPort.name) + '">' +
+                '<td style="font-family:monospace;font-weight:700;color:#93c5fd;white-space:nowrap;">#' + escapeHtml(bPort.shortName) + ' <span style="color:var(--text-secondary);font-weight:400;">(' + escapeHtml(bPort.name) + ')</span></td>' +
+                '<td style="font-size:11.5px;color:' + (bPort.status === 'up' ? '#34d399' : 'var(--text-secondary)') + ';">' + escapeHtml(curDevStr) + '</td>' +
+                '<td><input type="text" class="form-input sw-bulk-ol" style="padding:4px 7px;font-size:12px;font-family:monospace;" value="' + escapeHtml(bOut.outletLabel || '') + '" placeholder="z.B. Dose 1.12 / E1-D04" ' + roAttr + '></td>' +
+                '<td><input type="text" class="form-input sw-bulk-pp" style="padding:4px 7px;font-size:12px;font-family:monospace;" value="' + escapeHtml(bOut.patchPanel || '') + '" placeholder="z.B. PF1-' + escapeHtml(bPort.shortName) + '" ' + roAttr + '></td>' +
+                '<td><input type="text" class="form-input sw-bulk-rm" style="padding:4px 7px;font-size:12px;" value="' + escapeHtml(bOut.room || '') + '" placeholder="z.B. Büro EG / Raum 104" ' + roAttr + '></td>' +
+                '<td><input type="text" class="form-input sw-bulk-nt" style="padding:4px 7px;font-size:12px;" value="' + escapeHtml(bOut.notes || '') + '" placeholder="Optionaler Hinweis" ' + roAttr + '></td>' +
+            '</tr>';
+        }
+
+        bulkOutletsPanelHtml =
+            '<div id="sw-outlets-bulk-panel" style="display:none;background:rgba(15,23,42,0.92);border:1px solid rgba(56,189,248,0.45);border-radius:10px;padding:14px;margin-bottom:10px;">' +
+                '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:10px;">' +
+                    '<div>' +
+                        '<div style="font-size:13px;font-weight:800;color:#7dd3fc;text-transform:uppercase;">🔌 Patchfeld- &amp; Netzwerkdosen-Zuordnung für ' + escapeHtml(model.switchName) + '</div>' +
+                        '<div style="font-size:11.5px;color:var(--text-secondary);margin-top:2px;">Ordne den Switch-Ports die physischen <b>Dosen-Bezeichnungen</b>, <b>Patchfeld-Ports</b> und <b>Räume</b> zu. Danach kannst du überall nach der Dosen-Nr. suchen!</div>' +
+                    '</div>' +
+                    '<div style="display:flex;gap:8px;flex-wrap:wrap;">' +
+                        '<button type="button" class="btn btn-sm" onclick="exportSwitchOutletsCsv(' + devId + ')">📥 CSV-Patchliste exportieren</button>' +
+                        (userCanEdit() ? '<button type="button" class="btn btn-sm" onclick="importSwitchOutletsCsvPrompt(' + devId + ')">📤 CSV importieren</button>' : '') +
+                        (userCanEdit() ? '<button type="button" class="btn btn-sm btn-primary" onclick="saveSwitchOutletsBulk(' + devId + ')">💾 Alle Dosen-Zuordnungen speichern</button>' : '') +
+                    '</div>' +
+                '</div>' +
+                '<div style="max-height:320px;overflow-y:auto;border:1px solid var(--border-color);border-radius:8px;">' +
+                    '<table class="data-table" style="margin:0;">' +
+                        '<thead><tr><th>Switch-Port</th><th>Aktuell gesteckt / Status</th><th>Dosen-Bezeichnung *</th><th>Patchfeld / Port</th><th>Raum / Abteilung</th><th>Notiz</th></tr></thead>' +
+                        '<tbody>' + bulkRowsHtml + '</tbody>' +
+                    '</table>' +
+                '</div>' +
+            '</div>';
+    }
+
     html += '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;padding:4px 2px;">' +
         '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">' +
             '<div style="font-size:12.5px;font-weight:700;color:#f8fafc;text-transform:uppercase;">🎛 2. Physische 19-Zoll Switch-Frontblende</div>' +
@@ -4161,6 +4430,7 @@ function openSwitchGraphicModal(devId, isDemoPreview, keepSelectedPortName) {
                 '<button type="button" class="btn btn-sm" style="padding:2px 8px;font-size:11px;border:none;' + (portNumberingMode === 'sequential' ? 'background:#3b82f6;color:#fff;font-weight:700;' : 'background:transparent;color:var(--text-secondary);') + '" onclick="setSwitchPortNumberingMode(' + (devId || 0) + ', \'sequential\')">🔢 1–12 oben / 13–24 unten</button>' +
                 '<button type="button" class="btn btn-sm" style="padding:2px 8px;font-size:11px;border:none;' + (portNumberingMode === 'interleaved' ? 'background:#3b82f6;color:#fff;font-weight:700;' : 'background:transparent;color:var(--text-secondary);') + '" onclick="setSwitchPortNumberingMode(' + (devId || 0) + ', \'interleaved\')">🔢 1,3,5 oben / 2,4,6 unten</button>' +
             '</div>' +
+            (!model.isDemo && devId ? '<button type="button" class="btn btn-sm" style="border-color:#38bdf8;background:rgba(14,165,233,0.16);color:#7dd3fc;font-weight:700;" onclick="toggleSwitchOutletsBulkPanel()">🔌 Patchfeld- &amp; Dosen-Liste (' + mappedOutletsCount + ' zugeordnet) ▾</button>' : '') +
         '</div>' +
         '<div style="display:flex;gap:12px;flex-wrap:wrap;font-size:11.5px;color:var(--text-secondary);">' +
             '<span><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:#10b981;margin-right:4px;"></span>1G / 10G Aktiv</span>' +
@@ -4169,7 +4439,8 @@ function openSwitchGraphicModal(devId, isDemoPreview, keepSelectedPortName) {
             '<span><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:#a855f7;margin-right:4px;"></span>Stack-Backplane</span>' +
             '<span><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:#334155;margin-right:4px;"></span>Port Frei (Down)</span>' +
         '</div>' +
-    '</div>';
+    '</div>' +
+    bulkOutletsPanelHtml;
 
     for (var uIdx = 0; uIdx < model.units.length; uIdx++) {
         var unitObj = model.units[uIdx];
@@ -4381,8 +4652,20 @@ function renderSwitchPortRowHtml(portList, rowPosition) {
             ? '<span title="' + p.in_errors + ' Paketfehler auf diesem Port!" style="width:7px;height:7px;border-radius:50%;background:#ef4444;box-shadow:0 0 6px #ef4444;display:inline-block;"></span>'
             : '<span style="font-family:monospace;font-size:8.5px;font-weight:700;padding:0 3px;border-radius:3px;' + vlanPillStyle + '">V' + pVlan + '</span>';
 
+        var outletShort = (p.outletInfo && p.outletInfo.badgeText) ? p.outletInfo.badgeText : '';
+        if (outletShort.length > 9) {
+            outletShort = outletShort.substring(0, 8) + '…';
+        }
+        var outletTileHtml = outletShort
+            ? '<div style="width:100%;text-align:center;font-size:8.5px;font-weight:700;color:#7dd3fc;background:rgba(14,165,233,0.18);border-radius:3px;padding:0 2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px;" title="Dose / Patchfeld: ' + escapeHtml(p.outletInfo.fullText) + '">🔌 ' + escapeHtml(outletShort) + '</div>'
+            : '';
+
+        var portTooltip = 'Port ' + p.name + ' | VLAN ' + pVlan + ' | ' + p.speed +
+            (p.outletInfo && p.outletInfo.fullText ? (' | Dose: ' + p.outletInfo.fullText) : '') +
+            ' – ' + (p.alias || 'Klicken zum Konfigurieren');
+
         out += '<div id="swport_' + p.key + '" class="sw-front-port" onclick="selectSwitchGraphicPort(\'' + p.key + '\')" ' +
-            'title="Port ' + escapeHtml(p.name) + ' | VLAN ' + pVlan + ' | ' + escapeHtml(p.speed) + ' – ' + escapeHtml(p.alias || 'Klicken zum Konfigurieren') + '" ' +
+            'title="' + escapeHtml(portTooltip) + '" ' +
             'style="min-width:0;background:' + bgCol + ';border:2px solid ' + borderCol + ';border-radius:6px;padding:5px 3px;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:space-between;transition:transform 0.12s, box-shadow 0.12s;user-select:none;">' +
                 // Kopfzeile im Port: LED + Portnummer + VLAN-Tag
                 '<div style="width:100%;display:flex;justify-content:space-between;align-items:center;margin-bottom:3px;gap:2px;">' +
@@ -4400,6 +4683,7 @@ function renderSwitchPortRowHtml(portList, rowPosition) {
                 '<div style="width:100%;text-align:center;font-size:9.5px;font-weight:600;color:' + badgeCol + ';white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px;">' +
                     escapeHtml(devLabel) +
                 '</div>' +
+                outletTileHtml +
             '</div>';
     }
     return out;
@@ -4607,6 +4891,48 @@ function selectSwitchGraphicPort(portKey) {
             '</div>';
     }
 
+    var curOut = (p.outletInfo && p.outletInfo.isFromDb) ? p.outletInfo : { outletLabel: '', patchPanel: '', room: '', notes: '' };
+    var outletHeaderBadge = (p.outletInfo && p.outletInfo.fullText)
+        ? '<span class="badge" style="background:rgba(14,165,233,0.22);border:1px solid #38bdf8;color:#7dd3fc;font-size:12px;">🔌 Dose: <b>' + escapeHtml(p.outletInfo.fullText) + '</b></span>'
+        : '';
+
+    var outletEditorHtml = '';
+    if (!SwitchGraphicState.isDemo && SwitchGraphicState.currentDevId) {
+        if (userCanEdit()) {
+            outletEditorHtml =
+                '<div style="margin-top:12px;padding-top:10px;border-top:1px dashed rgba(56,189,248,0.35);">' +
+                    '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;flex-wrap:wrap;gap:6px;">' +
+                        '<div style="font-size:12px;font-weight:700;color:#7dd3fc;text-transform:uppercase;">🔌 Netzwerkdose, Patchfeld &amp; Raum für Buchse #' + escapeHtml(p.shortName) + ' (Port ' + escapeHtml(p.name) + ') hinterlegen</div>' +
+                        '<span style="font-size:11px;color:var(--text-secondary);">Wird lokal in der Datenbank gespeichert &amp; ist sofort im Dosen-/Port-Finder suchbar (auch ohne SSH!)</span>' +
+                    '</div>' +
+                    '<div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(170px, 1fr)) auto;gap:8px;align-items:end;">' +
+                        '<div class="form-group" style="margin:0;">' +
+                            '<label style="color:#7dd3fc;">Dosen-Bezeichnung *</label>' +
+                            '<input type="text" id="sw-outlet-label-input" class="form-input" style="font-family:monospace;" value="' + escapeHtml(curOut.outletLabel || '') + '" placeholder="z.B. Dose 1.12 / E1-D14">' +
+                        '</div>' +
+                        '<div class="form-group" style="margin:0;">' +
+                            '<label>Patchfeld / Port</label>' +
+                            '<input type="text" id="sw-outlet-patch-input" class="form-input" style="font-family:monospace;" value="' + escapeHtml(curOut.patchPanel || '') + '" placeholder="z.B. PF1-' + escapeHtml(p.shortName) + '">' +
+                        '</div>' +
+                        '<div class="form-group" style="margin:0;">' +
+                            '<label>Raum / Abteilung</label>' +
+                            '<input type="text" id="sw-outlet-room-input" class="form-input" value="' + escapeHtml(curOut.room || '') + '" placeholder="z.B. Büro EG / Raum 104">' +
+                        '</div>' +
+                        '<div class="form-group" style="margin:0;">' +
+                            '<label>Notiz (optional)</label>' +
+                            '<input type="text" id="sw-outlet-notes-input" class="form-input" value="' + escapeHtml(curOut.notes || '') + '" placeholder="z.B. Linke Buchse / Fenster">' +
+                        '</div>' +
+                        '<button type="button" class="btn btn-sm btn-primary" style="height:35px;padding:0 12px;" onclick="saveSingleSwitchPortOutlet(\'' + p.key + '\')">💾 Dose speichern</button>' +
+                    '</div>' +
+                '</div>';
+        } else if (p.outletInfo && p.outletInfo.fullText) {
+            outletEditorHtml =
+                '<div style="margin-top:10px;padding:8px 12px;background:rgba(14,165,233,0.1);border:1px solid rgba(56,189,248,0.35);border-radius:6px;font-size:12.5px;color:#bae6fd;">' +
+                    '🔌 <b>Zugeordnete Netzwerkdose / Patchfeld:</b> ' + escapeHtml(p.outletInfo.fullText) + (p.outletInfo.notes ? (' (' + escapeHtml(p.outletInfo.notes) + ')') : '') +
+                '</div>';
+        }
+    }
+
     box.innerHTML =
         '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;border-bottom:1px solid var(--border-color);padding-bottom:10px;margin-bottom:10px;">' +
             '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">' +
@@ -4614,6 +4940,7 @@ function selectSwitchGraphicPort(portKey) {
                 vlanBadge +
                 stBadge +
                 roleBadge +
+                outletHeaderBadge +
             '</div>' +
             '<div style="font-family:monospace;font-size:12px;color:var(--text-secondary);">' +
                 'Traffic RX: <b style="color:#f8fafc;">' + (p.rx_mb ? (p.rx_mb + ' MB') : '0 MB') + '</b> • ' +
@@ -4623,8 +4950,212 @@ function selectSwitchGraphicPort(portKey) {
         '</div>' +
         '<div style="font-size:12px;font-weight:700;color:var(--text-secondary);text-transform:uppercase;">Angeschlossene Geräte / Gegenstelle an Buchse #' + escapeHtml(p.shortName) + ':</div>' +
         devsHtml +
+        outletEditorHtml +
         portHistoryHtml +
         sshConfigHtml;
+}
+
+function toggleSwitchOutletsBulkPanel() {
+    var p = document.getElementById('sw-outlets-bulk-panel');
+    if (!p) return;
+    p.style.display = (p.style.display === 'none' || !p.style.display) ? 'block' : 'none';
+}
+
+function saveSingleSwitchPortOutlet(portKey) {
+    var p = SwitchGraphicState.portsByKey[portKey];
+    var devId = SwitchGraphicState.currentDevId;
+    if (!p || !devId) return;
+
+    var olEl = document.getElementById('sw-outlet-label-input');
+    var ppEl = document.getElementById('sw-outlet-patch-input');
+    var rmEl = document.getElementById('sw-outlet-room-input');
+    var ntEl = document.getElementById('sw-outlet-notes-input');
+
+    var payload = {
+        switch_id: devId,
+        port_name: p.name,
+        outlet_label: olEl ? olEl.value.trim() : '',
+        patch_panel: ppEl ? ppEl.value.trim() : '',
+        room: rmEl ? rmEl.value.trim() : '',
+        notes: ntEl ? ntEl.value.trim() : ''
+    };
+
+    // Wenn im SSH-Formular das Alias-Feld noch leer ist, direkt vorbefüllen
+    var aliasInp = document.getElementById('sw-port-alias-input');
+    if (aliasInp && !aliasInp.value.trim() && payload.outlet_label) {
+        aliasInp.value = payload.outlet_label + (payload.room ? (' ' + payload.room) : '');
+    }
+
+    fetch('api.php?action=save_port_outlet', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (res) {
+        if (!res.ok) {
+            showToast('Fehler: ' + (res.error || 'Unbekannt'));
+            return;
+        }
+        AppState.portOutlets = res.port_outlets || [];
+        showToast('🔌 Dosen-Zuordnung für Port ' + p.name + ' gespeichert!');
+        openSwitchGraphicModal(devId, false, p.name);
+        renderInventoryTable();
+        if (AppState.selectedDeviceId) {
+            selectDevice(AppState.selectedDeviceId);
+        }
+    });
+}
+
+function saveSwitchOutletsBulk(devId) {
+    var rows = document.querySelectorAll('#sw-outlets-bulk-panel .sw-bulk-outlet-row');
+    var entries = [];
+    for (var i = 0; i < rows.length; i++) {
+        var r = rows[i];
+        var pName = r.getAttribute('data-port') || '';
+        if (!pName) continue;
+        var ol = r.querySelector('.sw-bulk-ol');
+        var pp = r.querySelector('.sw-bulk-pp');
+        var rm = r.querySelector('.sw-bulk-rm');
+        var nt = r.querySelector('.sw-bulk-nt');
+        entries.push({
+            port_name: pName,
+            outlet_label: ol ? ol.value.trim() : '',
+            patch_panel: pp ? pp.value.trim() : '',
+            room: rm ? rm.value.trim() : '',
+            notes: nt ? nt.value.trim() : ''
+        });
+    }
+
+    fetch('api.php?action=save_port_outlets_bulk', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            switch_id: devId,
+            entries: entries
+        })
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (res) {
+        if (!res.ok) {
+            showToast('Fehler: ' + (res.error || 'Unbekannt'));
+            return;
+        }
+        AppState.portOutlets = res.port_outlets || [];
+        var curPortName = null;
+        if (SwitchGraphicState.selectedPortKey && SwitchGraphicState.portsByKey[SwitchGraphicState.selectedPortKey]) {
+            curPortName = SwitchGraphicState.portsByKey[SwitchGraphicState.selectedPortKey].name;
+        }
+        showToast('🔌 ' + (res.saved_count || 0) + ' Dosen- & Patchfeld-Zuordnungen erfolgreich gespeichert!');
+        openSwitchGraphicModal(devId, false, curPortName);
+        renderInventoryTable();
+        if (AppState.selectedDeviceId) {
+            selectDevice(AppState.selectedDeviceId);
+        }
+    });
+}
+
+function exportSwitchOutletsCsv(devId) {
+    var model = SwitchGraphicState.currentModel;
+    if (!model || !model.units) return;
+    var rows = [['Switch_Port', 'Buchse_Nr', 'Dosen_Bezeichnung', 'Patchfeld_Port', 'Raum_Abteilung', 'Notiz', 'VLAN', 'Aktuelles_Geraet']];
+    for (var u = 0; u < model.units.length; u++) {
+        var ports = model.units[u].ports || [];
+        for (var p = 0; p < ports.length; p++) {
+            var prt = ports[p];
+            var out = (prt.outletInfo && prt.outletInfo.isFromDb) ? prt.outletInfo : { outletLabel: '', patchPanel: '', room: '', notes: '' };
+            var devStr = (prt.connectedDevices && prt.connectedDevices.length > 0)
+                ? (prt.connectedDevices[0].name + ' (' + prt.connectedDevices[0].ip + ')')
+                : '';
+            rows.push([
+                prt.name,
+                prt.shortName,
+                out.outletLabel || '',
+                out.patchPanel || '',
+                out.room || '',
+                out.notes || '',
+                String(prt.vlan || 1),
+                devStr
+            ]);
+        }
+    }
+    var csv = rows.map(function (r) {
+        return r.map(function (c) { return '"' + String(c).replace(/"/g, '""') + '"'; }).join(';');
+    }).join('\r\n');
+
+    var blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    var link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = 'patchliste_' + (model.switchName || ('switch_' + devId)).replace(/[^a-zA-Z0-9_-]/g, '_') + '.csv';
+    link.click();
+    showToast('📥 Patchfeld- & Dosen-Liste als CSV exportiert.');
+}
+
+function importSwitchOutletsCsvPrompt(devId) {
+    var fileInp = document.createElement('input');
+    fileInp.type = 'file';
+    fileInp.accept = '.csv,.txt';
+    fileInp.onchange = function (ev) {
+        var f = ev.target.files && ev.target.files[0];
+        if (!f) return;
+        var reader = new FileReader();
+        reader.onload = function (e) {
+            var text = String(e.target.result || '');
+            var lines = text.split(/\r?\n/);
+            var byPortLow = {};
+            var byNum = {};
+            for (var i = 0; i < lines.length; i++) {
+                var ln = lines[i].trim();
+                if (!ln) continue;
+                var sep = (ln.indexOf(';') !== -1) ? ';' : ',';
+                var cols = ln.split(sep).map(function (c) { return c.replace(/^"|"$/g, '').replace(/""/g, '"').trim(); });
+                if (i === 0 && (cols[0].toLowerCase().indexOf('port') !== -1 || cols[0].toLowerCase().indexOf('switch') !== -1)) {
+                    continue;
+                }
+                var pCol = cols[0] || '';
+                if (!pCol) continue;
+                var hasBuchseCol = (cols.length >= 6 && /^\d+$/.test(cols[1]));
+                var entry = {
+                    outlet_label: hasBuchseCol ? (cols[2] || '') : (cols[1] || ''),
+                    patch_panel:  hasBuchseCol ? (cols[3] || '') : (cols[2] || ''),
+                    room:         hasBuchseCol ? (cols[4] || '') : (cols[3] || ''),
+                    notes:        hasBuchseCol ? (cols[5] || '') : (cols[4] || '')
+                };
+                byPortLow[pCol.toLowerCase()] = entry;
+                var numM = pCol.match(/(\d+)$/);
+                if (numM) {
+                    byNum[parseInt(numM[1], 10)] = entry;
+                }
+            }
+            var rows = document.querySelectorAll('#sw-outlets-bulk-panel .sw-bulk-outlet-row');
+            var matchedCnt = 0;
+            for (var r = 0; r < rows.length; r++) {
+                var rowEl = rows[r];
+                var pName = rowEl.getAttribute('data-port') || '';
+                var mObj = byPortLow[pName.toLowerCase()];
+                if (!mObj) {
+                    var nm = pName.match(/(\d+)$/);
+                    if (nm && byNum[parseInt(nm[1], 10)]) {
+                        mObj = byNum[parseInt(nm[1], 10)];
+                    }
+                }
+                if (mObj) {
+                    rowEl.querySelector('.sw-bulk-ol').value = mObj.outlet_label;
+                    rowEl.querySelector('.sw-bulk-pp').value = mObj.patch_panel;
+                    rowEl.querySelector('.sw-bulk-rm').value = mObj.room;
+                    rowEl.querySelector('.sw-bulk-nt').value = mObj.notes;
+                    matchedCnt++;
+                }
+            }
+            if (matchedCnt > 0) {
+                saveSwitchOutletsBulk(devId);
+            } else {
+                showToast('Keine passenden Port-Zeilen in der CSV-Datei gefunden.');
+            }
+        };
+        reader.readAsText(f);
+    };
+    fileInp.click();
 }
 
 function toggleSwitchCredsForm() {

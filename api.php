@@ -130,6 +130,16 @@ try {
                 $macWatchlist = $pdo->query("SELECT * FROM mac_watchlist ORDER BY id DESC")->fetchAll();
             } catch (Exception $e) {}
 
+            $portOutlets = array();
+            try {
+                $rawOutlets = $pdo->query("SELECT * FROM switch_port_outlets ORDER BY switch_id ASC, id ASC")->fetchAll();
+                foreach ($rawOutlets as $poRow) {
+                    if (!isset($hiddenCoreIds[(int)$poRow['switch_id']])) {
+                        $portOutlets[] = $poRow;
+                    }
+                }
+            } catch (Exception $e) {}
+
             $nmapPath = trim((string)@shell_exec('which nmap 2>/dev/null'));
             $snmpExt = extension_loaded('snmp');
 
@@ -218,6 +228,7 @@ try {
                 'unack_alerts'  => $unackCount,
                 'mac_history'   => $macHistory,
                 'mac_watchlist' => $macWatchlist,
+                'port_outlets'  => $portOutlets,
                 'admin'         => $adminData,
                 'system'       => array(
                     'app_version'    => Database::getAppVersion(),
@@ -327,6 +338,7 @@ try {
             if ($id <= 0) {
                 throw new InvalidArgumentException('Ungültige Scope-ID.');
             }
+            $pdo->prepare("DELETE FROM switch_port_outlets WHERE switch_id IN (SELECT id FROM devices WHERE scope_id = :id)")->execute(array(':id' => $id));
             $pdo->prepare("DELETE FROM device_alerts WHERE scope_id = :id")->execute(array(':id' => $id));
             $pdo->prepare("DELETE FROM links WHERE scope_id = :id")->execute(array(':id' => $id));
             $pdo->prepare("DELETE FROM devices WHERE scope_id = :id")->execute(array(':id' => $id));
@@ -645,6 +657,7 @@ try {
                 http_response_code(403);
                 throw new RuntimeException('Zugriff verweigert: Core-Switches dürfen nur von Netzwerkexperten oder Administratoren gelöscht werden.');
             }
+            $pdo->prepare("DELETE FROM switch_port_outlets WHERE switch_id = :id")->execute(array(':id' => $id));
             $pdo->prepare("DELETE FROM device_alerts WHERE device_id = :id")->execute(array(':id' => $id));
             $pdo->prepare("DELETE FROM links WHERE source_device_id = :id OR target_device_id = :id")->execute(array(':id' => $id));
             $pdo->prepare("DELETE FROM devices WHERE id = :id")->execute(array(':id' => $id));
@@ -1044,6 +1057,7 @@ try {
             Auth::requireRole(array('admin'));
             $scopeId = isset($input['scope_id']) ? $input['scope_id'] : 0;
             if ($scopeId === 'all') {
+                $pdo->exec("DELETE FROM switch_port_outlets");
                 $pdo->exec("DELETE FROM mac_port_history");
                 $pdo->exec("DELETE FROM device_alerts");
                 $pdo->exec("DELETE FROM links");
@@ -1055,6 +1069,7 @@ try {
                 if ($sid <= 0) {
                     throw new InvalidArgumentException('Ungültige Scope-ID.');
                 }
+                $pdo->prepare("DELETE FROM switch_port_outlets WHERE switch_id IN (SELECT id FROM devices WHERE scope_id = :id)")->execute(array(':id' => $sid));
                 $pdo->prepare("DELETE FROM device_alerts WHERE scope_id = :id")->execute(array(':id' => $sid));
                 $pdo->prepare("DELETE FROM links WHERE scope_id = :id")->execute(array(':id' => $sid));
                 $pdo->prepare("DELETE FROM devices WHERE scope_id = :id")->execute(array(':id' => $sid));
@@ -1067,6 +1082,7 @@ try {
 
         case 'admin_delete_all_scopes':
             Auth::requireRole(array('admin'));
+            $pdo->exec("DELETE FROM switch_port_outlets");
             $pdo->exec("DELETE FROM mac_port_history");
             $pdo->exec("DELETE FROM device_alerts");
             $pdo->exec("DELETE FROM links");
@@ -1114,6 +1130,153 @@ try {
             }
             $pdo->prepare("DELETE FROM mac_watchlist WHERE id = :id")->execute(array(':id' => $wid));
             echo json_encode(array('ok' => true));
+            break;
+
+        case 'save_port_outlet':
+            Auth::requireRole(array('operator', 'netadmin', 'admin'));
+            $switchId = isset($input['switch_id']) ? (int)$input['switch_id'] : 0;
+            $portName = isset($input['port_name']) ? trim($input['port_name']) : '';
+            $outletLabel = isset($input['outlet_label']) ? trim($input['outlet_label']) : '';
+            $patchPanel = isset($input['patch_panel']) ? trim($input['patch_panel']) : '';
+            $room = isset($input['room']) ? trim($input['room']) : '';
+            $notes = isset($input['notes']) ? trim($input['notes']) : '';
+            $now = date('Y-m-d H:i:s');
+
+            if ($switchId <= 0 || $portName === '') {
+                throw new InvalidArgumentException('Bitte einen Switch und einen Port angeben.');
+            }
+
+            $chkSw = $pdo->prepare("SELECT id, is_core FROM devices WHERE id = :id");
+            $chkSw->execute(array(':id' => $switchId));
+            $swRow = $chkSw->fetch();
+            if (!$swRow) {
+                throw new InvalidArgumentException('Switch nicht gefunden.');
+            }
+            if (!empty($swRow['is_core']) && !$isNetExpert) {
+                http_response_code(403);
+                throw new RuntimeException('Zugriff verweigert: Core-Switches dürfen nur von Netzwerkexperten oder Administratoren bearbeitet werden.');
+            }
+
+            if ($outletLabel === '' && $patchPanel === '' && $room === '' && $notes === '') {
+                $pdo->prepare("DELETE FROM switch_port_outlets WHERE switch_id = :sid AND port_name = :pname")
+                    ->execute(array(':sid' => $switchId, ':pname' => $portName));
+            } else {
+                $chkOut = $pdo->prepare("SELECT id FROM switch_port_outlets WHERE switch_id = :sid AND port_name = :pname");
+                $chkOut->execute(array(':sid' => $switchId, ':pname' => $portName));
+                $exOut = $chkOut->fetch();
+                if ($exOut) {
+                    $updOut = $pdo->prepare("
+                        UPDATE switch_port_outlets
+                        SET outlet_label = :ol, patch_panel = :pp, room = :rm, notes = :nt, updated_at = :now
+                        WHERE id = :id
+                    ");
+                    $updOut->execute(array(
+                        ':ol'  => $outletLabel !== '' ? $outletLabel : null,
+                        ':pp'  => $patchPanel !== '' ? $patchPanel : null,
+                        ':rm'  => $room !== '' ? $room : null,
+                        ':nt'  => $notes !== '' ? $notes : null,
+                        ':now' => $now,
+                        ':id'  => (int)$exOut['id'],
+                    ));
+                } else {
+                    $insOut = $pdo->prepare("
+                        INSERT INTO switch_port_outlets (switch_id, port_name, outlet_label, patch_panel, room, notes, updated_at)
+                        VALUES (:sid, :pname, :ol, :pp, :rm, :nt, :now)
+                    ");
+                    $insOut->execute(array(
+                        ':sid'   => $switchId,
+                        ':pname' => $portName,
+                        ':ol'    => $outletLabel !== '' ? $outletLabel : null,
+                        ':pp'    => $patchPanel !== '' ? $patchPanel : null,
+                        ':rm'    => $room !== '' ? $room : null,
+                        ':nt'    => $notes !== '' ? $notes : null,
+                        ':now'   => $now,
+                    ));
+                }
+            }
+
+            $allOutlets = $pdo->query("SELECT * FROM switch_port_outlets ORDER BY switch_id ASC, id ASC")->fetchAll();
+            echo json_encode(array(
+                'ok'           => true,
+                'port_outlets' => $allOutlets,
+            ));
+            break;
+
+        case 'save_port_outlets_bulk':
+            Auth::requireRole(array('operator', 'netadmin', 'admin'));
+            $switchId = isset($input['switch_id']) ? (int)$input['switch_id'] : 0;
+            $entries = isset($input['entries']) && is_array($input['entries']) ? $input['entries'] : array();
+            $now = date('Y-m-d H:i:s');
+
+            if ($switchId <= 0) {
+                throw new InvalidArgumentException('Ungültige Switch-Geräte-ID.');
+            }
+            $chkSw = $pdo->prepare("SELECT id, is_core FROM devices WHERE id = :id");
+            $chkSw->execute(array(':id' => $switchId));
+            $swRow = $chkSw->fetch();
+            if (!$swRow) {
+                throw new InvalidArgumentException('Switch nicht gefunden.');
+            }
+            if (!empty($swRow['is_core']) && !$isNetExpert) {
+                http_response_code(403);
+                throw new RuntimeException('Zugriff verweigert: Core-Switches dürfen nur von Netzwerkexperten oder Administratoren bearbeitet werden.');
+            }
+
+            $savedCount = 0;
+            foreach ($entries as $entry) {
+                $pName = isset($entry['port_name']) ? trim($entry['port_name']) : '';
+                if ($pName === '') {
+                    continue;
+                }
+                $oLbl = isset($entry['outlet_label']) ? trim($entry['outlet_label']) : '';
+                $pPan = isset($entry['patch_panel']) ? trim($entry['patch_panel']) : '';
+                $rm = isset($entry['room']) ? trim($entry['room']) : '';
+                $nt = isset($entry['notes']) ? trim($entry['notes']) : '';
+
+                if ($oLbl === '' && $pPan === '' && $rm === '' && $nt === '') {
+                    $pdo->prepare("DELETE FROM switch_port_outlets WHERE switch_id = :sid AND port_name = :pname")
+                        ->execute(array(':sid' => $switchId, ':pname' => $pName));
+                } else {
+                    $chkOut = $pdo->prepare("SELECT id FROM switch_port_outlets WHERE switch_id = :sid AND port_name = :pname");
+                    $chkOut->execute(array(':sid' => $switchId, ':pname' => $pName));
+                    $exOut = $chkOut->fetch();
+                    if ($exOut) {
+                        $pdo->prepare("
+                            UPDATE switch_port_outlets
+                            SET outlet_label = :ol, patch_panel = :pp, room = :rm, notes = :nt, updated_at = :now
+                            WHERE id = :id
+                        ")->execute(array(
+                            ':ol'  => $oLbl !== '' ? $oLbl : null,
+                            ':pp'  => $pPan !== '' ? $pPan : null,
+                            ':rm'  => $rm !== '' ? $rm : null,
+                            ':nt'  => $nt !== '' ? $nt : null,
+                            ':now' => $now,
+                            ':id'  => (int)$exOut['id'],
+                        ));
+                    } else {
+                        $pdo->prepare("
+                            INSERT INTO switch_port_outlets (switch_id, port_name, outlet_label, patch_panel, room, notes, updated_at)
+                            VALUES (:sid, :pname, :ol, :pp, :rm, :nt, :now)
+                        ")->execute(array(
+                            ':sid'   => $switchId,
+                            ':pname' => $pName,
+                            ':ol'    => $oLbl !== '' ? $oLbl : null,
+                            ':pp'    => $pPan !== '' ? $pPan : null,
+                            ':rm'    => $rm !== '' ? $rm : null,
+                            ':nt'    => $nt !== '' ? $nt : null,
+                            ':now'   => $now,
+                        ));
+                    }
+                    $savedCount++;
+                }
+            }
+
+            $allOutlets = $pdo->query("SELECT * FROM switch_port_outlets ORDER BY switch_id ASC, id ASC")->fetchAll();
+            echo json_encode(array(
+                'ok'           => true,
+                'saved_count'  => $savedCount,
+                'port_outlets' => $allOutlets,
+            ));
             break;
 
         case 'save_smtp_config':

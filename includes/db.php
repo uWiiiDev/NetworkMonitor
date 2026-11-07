@@ -388,6 +388,22 @@ class Database
                 created_at TEXT NOT NULL
             )
         ");
+
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS switch_port_outlets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                switch_id INTEGER NOT NULL,
+                port_name TEXT NOT NULL,
+                outlet_label TEXT DEFAULT NULL,
+                patch_panel TEXT DEFAULT NULL,
+                room TEXT DEFAULT NULL,
+                notes TEXT DEFAULT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(switch_id, port_name)
+            )
+        ");
+        $this->pdo->exec("CREATE INDEX IF NOT EXISTS idx_spo_switch ON switch_port_outlets(switch_id)");
+        $this->pdo->exec("CREATE INDEX IF NOT EXISTS idx_spo_outlet ON switch_port_outlets(outlet_label)");
     }
 
     private function ensureColumnExists($table, $column, $definition)

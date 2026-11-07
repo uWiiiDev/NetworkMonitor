@@ -167,5 +167,21 @@ CREATE TABLE IF NOT EXISTS `mac_watchlist` (
   UNIQUE KEY `uniq_watch_mac` (`mac_address`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8;
 
+-- 9. Patchfeld- & Netzwerkdosen-Zuordnung zu Switch-Ports (Wall Jack / Patch Panel Mapping)
+CREATE TABLE IF NOT EXISTS `switch_port_outlets` (
+  `id` INT(11) NOT NULL AUTO_INCREMENT,
+  `switch_id` INT(11) NOT NULL,
+  `port_name` VARCHAR(64) NOT NULL,
+  `outlet_label` VARCHAR(120) DEFAULT NULL,
+  `patch_panel` VARCHAR(120) DEFAULT NULL,
+  `room` VARCHAR(190) DEFAULT NULL,
+  `notes` VARCHAR(255) DEFAULT NULL,
+  `updated_at` DATETIME NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uniq_sw_port_outlet` (`switch_id`, `port_name`),
+  KEY `idx_outlet_label` (`outlet_label`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8;
+
+
 
 
