@@ -53,9 +53,50 @@ class OuiLookup
         '70:10:6F' => 'Hewlett Packard Enterprise',
         '94:57:A5' => 'Hewlett Packard',
         '00:09:5B' => 'Netgear',
+        '00:0F:B5' => 'Netgear',
         '00:14:6C' => 'Netgear',
+        '00:18:4D' => 'Netgear',
+        '00:1B:2F' => 'Netgear',
+        '00:1E:2A' => 'Netgear',
+        '00:22:3F' => 'Netgear',
+        '00:24:B2' => 'Netgear',
+        '00:26:F2' => 'Netgear',
+        '08:BD:43' => 'Netgear',
+        '10:0C:6B' => 'Netgear',
+        '10:DA:43' => 'Netgear',
+        '20:0C:C8' => 'Netgear',
+        '20:4E:7F' => 'Netgear',
+        '20:E5:2A' => 'Netgear',
+        '28:80:88' => 'Netgear',
         '28:C6:8E' => 'Netgear',
+        '2C:B0:5D' => 'Netgear',
+        '30:46:9A' => 'Netgear',
+        '38:94:ED' => 'Netgear',
+        '44:94:FC' => 'Netgear',
+        '4C:60:DE' => 'Netgear (Switch / Network Device)',
+        '6C:B0:CE' => 'Netgear',
+        '74:44:01' => 'Netgear',
+        '84:1B:5E' => 'Netgear',
+        '8C:3B:AD' => 'Netgear',
         '9C:3D:CF' => 'Netgear',
+        '9C:D3:6D' => 'Netgear',
+        'A0:04:60' => 'Netgear',
+        'A0:21:B7' => 'Netgear',
+        'A0:40:A0' => 'Netgear',
+        'A0:63:91' => 'Netgear',
+        'B0:39:56' => 'Netgear',
+        'B0:7F:B9' => 'Netgear',
+        'B0:B9:8A' => 'Netgear',
+        'C0:3F:0E' => 'Netgear',
+        'C4:04:15' => 'Netgear',
+        'C4:3D:C7' => 'Netgear',
+        'CC:40:D0' => 'Netgear',
+        'DC:EF:09' => 'Netgear',
+        'E0:46:9A' => 'Netgear',
+        'E0:91:F5' => 'Netgear',
+        'E4:F4:C6' => 'Netgear',
+        'F8:73:94' => 'Netgear',
+        '2C:58:B9' => 'HP Inc.',
         '00:1D:AA' => 'D-Link Corporation',
         '1C:7E:E5' => 'D-Link Corporation',
         '28:10:7B' => 'D-Link Corporation',
@@ -207,7 +248,15 @@ class OuiLookup
         $hostShort = preg_replace('/\.(fritz\.box|local|lan)$/i', '', (string)$hostname);
         $descrLower = strtolower((string)$snmpSysDescr . ' ' . (string)$vendor . ' ' . $hostShort . ' ' . (string)$serviceInfo);
 
-        if (strpos($descrLower, 'switch') !== false || strpos($descrLower, 'procurve') !== false || strpos($descrLower, 'catalyst') !== false || strpos($descrLower, 'aruba') !== false) {
+        if (
+            strpos($descrLower, 'switch') !== false ||
+            strpos($descrLower, 'procurve') !== false ||
+            strpos($descrLower, 'catalyst') !== false ||
+            strpos($descrLower, 'aruba') !== false ||
+            strpos($descrLower, 'prosafe') !== false ||
+            preg_match('/\b(gs[0-9]{3}|fs[0-9]{3}|xs[0-9]{3}|jgs[0-9]{3}|sg[0-9]{3}|cbs[0-9]{3})\b/i', $descrLower) ||
+            (strpos($descrLower, 'netgear') !== false && strpos($descrLower, 'repeater') === false && strpos($descrLower, 'orbi') === false && strpos($descrLower, '802.11') === false && strpos($descrLower, 'wlan') === false)
+        ) {
             return 'switch';
         }
         if (strpos($descrLower, 'fortigate') !== false || strpos($descrLower, 'pfsense') !== false || strpos($descrLower, 'opnsense') !== false) {

@@ -142,9 +142,10 @@ class NetworkScanner
                 if (!empty($pr['mac_address'])) {
                     $knownMacsBeforeScan[strtoupper(trim($pr['mac_address']))] = true;
                 }
-                // Sicherheits-Nach-Ping für überwachte Geräte, falls ein einzelnes Ping-Paket verloren ging
+                // Sicherheits-Nach-Ping für überwachte Geräte oder Switches, falls ein einzelnes Ping-Paket verloren ging
                 $am = isset($pr['alert_mode']) ? $pr['alert_mode'] : 'none';
-                if (($am === 'offline' || $am === 'both') && !isset($liveHosts[$pr['ip_address']])) {
+                $isSwOrMon = ($am === 'offline' || $am === 'both' || $pr['device_type'] === 'switch' || $pr['device_type'] === 'router' || $pr['device_type'] === 'ap');
+                if ($isSwOrMon && !isset($liveHosts[$pr['ip_address']])) {
                     $reOut = @shell_exec('ping -n -c 2 -W 1 ' . escapeshellarg($pr['ip_address']) . ' 2>/dev/null');
                     if ($reOut && preg_match('/time[=<]([0-9.]+)\s*ms/i', $reOut, $rm)) {
                         $rTtl = null;
@@ -153,7 +154,7 @@ class NetworkScanner
                         }
                         $liveHosts[$pr['ip_address']] = array(
                             'latency_ms' => (float)$rm[1],
-                            'mac'        => isset($arpMap[$pr['ip_address']]) ? $arpMap[$pr['ip_address']] : null,
+                            'mac'        => isset($arpMap[$pr['ip_address']]) ? $arpMap[$pr['ip_address']] : (!empty($pr['mac_address']) ? $pr['mac_address'] : null),
                             'hostname'   => null,
                             'ttl'        => $rTtl,
                         );
@@ -178,12 +179,38 @@ class NetworkScanner
             $this->pdo->prepare("UPDATE devices SET status = 'offline' WHERE scope_id = :sid")
                       ->execute(array(':sid' => $scope['id']));
 
+            // 2a. FRITZ!Box TR-064 Host-Informationen (Ethernet vs. WLAN 802.11 & hinterlegte FRITZ!Box-Gerätenamen)
+            // Auch bekannte Geräte prüfen, die evtl. ICMP-Ping blockieren/drosseln, aber laut FRITZ!Box aktiv sind
+            $trCheckHosts = $liveHosts;
+            foreach ($prevDevicesByIp as $pIp => $pRow) {
+                if (!isset($trCheckHosts[$pIp]) && !empty($pRow['mac_address'])) {
+                    $trCheckHosts[$pIp] = array('mac' => $pRow['mac_address']);
+                }
+            }
+            $batchTr064 = $this->queryFritzBoxTr064HostsBatch($gatewayIp, $trCheckHosts);
+            foreach ($prevDevicesByIp as $pIp => $pRow) {
+                if (!isset($liveHosts[$pIp]) && !empty($pRow['mac_address'])) {
+                    $pMac = OuiLookup::normalizeMac($pRow['mac_address']);
+                    if ($pMac && isset($batchTr064[$pMac]) && !empty($batchTr064[$pMac]['active'])) {
+                        $liveHosts[$pIp] = array(
+                            'latency_ms' => 2.0,
+                            'mac'        => $pMac,
+                            'hostname'   => null,
+                            'ttl'        => 64,
+                        );
+                    }
+                }
+            }
+
             $switchesFound = 0;
             $hostsUp = count($liveHosts);
             $liveIpList = array_keys($liveHosts);
 
-            // 2. Multi-Host-Batch: Hostnamen für alle aktiven IPs in einem Rutsch auflösen (UDP DNS PTR)
+            // 2b. Multi-Host-Batch: Hostnamen für alle aktiven IPs in einem Rutsch auflösen (UDP DNS PTR)
             $batchHostnames = $this->resolveHostnamesBatch($liveIpList);
+
+            // 2c. Netgear NSDP (Netgear Switch Discovery Protocol, UDP 63322/63324) für Smart Managed Plus/Pro Switches
+            $batchNsdp = $this->probeNetgearNsdpBatch($liveIpList);
 
             // 3. Multi-Host-Batch: NetBIOS Node Status (UDP 137) für Windows-Namen & Arbeitsgruppen
             $batchNetbios = $this->probeNetbiosBatch($liveIpList, 250);
@@ -231,6 +258,25 @@ class NetworkScanner
                         $hostname = $nbInfo['name'];
                     }
 
+                    // FRITZ!Box TR-064 & Netgear NSDP Zusatzinfos auswerten
+                    $trInfo = ($mac && isset($batchTr064[$mac])) ? $batchTr064[$mac] : null;
+                    $nsdpInfo = isset($batchNsdp[$ip]) ? $batchNsdp[$ip] : null;
+                    if ($trInfo && !empty($trInfo['hostname'])) {
+                        $trName = $trInfo['hostname'];
+                        $isGenericDns = empty($hostname) || preg_match('/^(wlan\d+|none|pc-[0-9a-f-]+)(\.fritz\.box)?$/i', $hostname);
+                        $isGenericTr = preg_match('/^(wlan\d+|none|pc-[0-9a-f-]+)$/i', $trName);
+                        if ($isGenericDns && !$isGenericTr) {
+                            $hostname = $trName . '.fritz.box';
+                        } elseif (empty($hostname) && strpos((string)$vendor, 'Netgear') !== false) {
+                            $hostname = 'Netgear-Switch-' . substr(str_replace(':', '', (string)$mac), -6);
+                        }
+                    } elseif (empty($hostname) && strpos((string)$vendor, 'Netgear') !== false && $mac) {
+                        $hostname = 'Netgear-Switch-' . substr(str_replace(':', '', $mac), -6);
+                    }
+                    if ($nsdpInfo && !empty($nsdpInfo['hostname']) && empty($hostname)) {
+                        $hostname = $nsdpInfo['hostname'];
+                    }
+
                     $openPorts = isset($batchOpenPorts[$ip]) ? $batchOpenPorts[$ip] : array();
                     $bannerInfo = isset($batchBanners[$ip]) ? $batchBanners[$ip] : array();
 
@@ -269,6 +315,15 @@ class NetworkScanner
 
                     // Baue kompakten Service-/Fingerprint-String zusammen
                     $infoParts = array();
+                    if ($trInfo && !empty($trInfo['interface_type'])) {
+                        $ifLabel = (stripos($trInfo['interface_type'], '802.11') !== false)
+                            ? 'WLAN (802.11)'
+                            : ((stripos($trInfo['interface_type'], 'Ethernet') !== false) ? 'Ethernet (LAN)' : $trInfo['interface_type']);
+                        $infoParts[] = 'Via: ' . $ifLabel;
+                    }
+                    if ($nsdpInfo && !empty($nsdpInfo['model'])) {
+                        $infoParts[] = 'NSDP: ' . $nsdpInfo['model'] . (!empty($nsdpInfo['firmware']) ? (' (' . $nsdpInfo['firmware'] . ')') : '');
+                    }
                     if ($ttl !== null) {
                         $infoParts[] = 'TTL: ' . (int)$ttl;
                     }
@@ -1209,14 +1264,42 @@ class NetworkScanner
         }
 
         // 2. Verbinde Managed Switches untereinander bzw. mit dem Gateway-Router (inkl. Port-Erkennung aus MAC-Tabelle)
-        $primarySwitch = !empty($switches) ? $switches[0] : null;
+        $coreSwitch = null;
+        foreach ($switches as $candSw) {
+            if ($candSw['status'] === 'online' && !empty($candSw['is_core'])) {
+                $coreSwitch = $candSw;
+                break;
+            }
+        }
         foreach ($switches as $sw) {
             if ((int)$sw['id'] === (int)$routerDevice['id']) {
                 continue;
             }
             if (!isset($linkedTargets[$sw['id']])) {
-                $parent = ($primarySwitch && (int)$primarySwitch['id'] !== (int)$sw['id']) ? $primarySwitch : $routerDevice;
-                $srcPortName = 'Trunk';
+                $parent = $routerDevice;
+                if ($coreSwitch && (int)$coreSwitch['id'] !== (int)$sw['id']) {
+                    $parent = $coreSwitch;
+                } else {
+                    // Prüfe, ob ein anderer aktiver Switch die MAC dieses Switches auf einem Nicht-Uplink-Port gelernt hat
+                    $swMacUpper = !empty($sw['mac_address']) ? strtoupper($sw['mac_address']) : '';
+                    if ($swMacUpper !== '') {
+                        foreach ($switches as $otherSw) {
+                            if ((int)$otherSw['id'] === (int)$sw['id'] || $otherSw['status'] !== 'online' || empty($otherSw['snmp_ports_json'])) {
+                                continue;
+                            }
+                            $oSnmp = @json_decode($otherSw['snmp_ports_json'], true);
+                            if (!empty($oSnmp['mac_table'][$swMacUpper])) {
+                                $gwMacU = !empty($routerDevice['mac_address']) ? strtoupper($routerDevice['mac_address']) : '';
+                                $upPort = ($gwMacU && isset($oSnmp['mac_table'][$gwMacU]['port_name'])) ? $oSnmp['mac_table'][$gwMacU]['port_name'] : null;
+                                if ($upPort === null || $oSnmp['mac_table'][$swMacUpper]['port_name'] !== $upPort) {
+                                    $parent = $otherSw;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                $srcPortName = 'LAN';
                 $dstPortName = 'Uplink';
 
                 // Prüfe ob Parent-Switch die MAC des Ziel-Switches auf einem Port sieht
@@ -1252,9 +1335,9 @@ class NetworkScanner
             }
         }
 
-        // 3. SNMP Bridge-MIB MAC-Adresstabelle der Switches auswerten (Endgeräte -> Switch-Port)
+        // 3. SNMP Bridge-MIB MAC-Adresstabelle der aktiven Switches auswerten (Endgeräte -> Switch-Port)
         foreach ($switches as $sw) {
-            if (empty($sw['snmp_ports_json'])) {
+            if ($sw['status'] !== 'online' || empty($sw['snmp_ports_json'])) {
                 continue;
             }
             $snmp = @json_decode($sw['snmp_ports_json'], true);
@@ -1344,7 +1427,7 @@ class NetworkScanner
         // 4. Alle übrigen Geräte im Scope (WLAN-Clients, weitere FRITZ!Boxen/APs, Geräte ohne SNMP-Switch-Zuordnung)
         // hängen am Gateway-Router (Haupt-FRITZ!Box) und NICHT pauschal an einem Switch!
         // Am Switch hängen nur Geräte, die per SNMP Bridge-MIB (Schritt 3), LLDP (Schritt 1) oder manuell (Schritt 0) dort nachgewiesen wurden.
-        $defaultParent = $routerDevice ? $routerDevice : ($primarySwitch ? $primarySwitch : $devices[0]);
+        $defaultParent = $routerDevice ? $routerDevice : ($coreSwitch ? $coreSwitch : (!empty($switches) ? $switches[0] : $devices[0]));
         foreach ($devices as $dev) {
             if ((int)$dev['id'] === (int)$routerDevice['id'] || isset($linkedTargets[$dev['id']])) {
                 continue;
@@ -1352,12 +1435,22 @@ class NetworkScanner
             if ((int)$dev['id'] === (int)$defaultParent['id']) {
                 continue;
             }
+            $sPort = null;
+            $dPort = null;
+            $sInfo = isset($dev['service_info']) ? (string)$dev['service_info'] : '';
+            if (strpos($sInfo, 'Via: WLAN') !== false) {
+                $sPort = 'WLAN';
+                $dPort = 'wlan0';
+            } elseif (strpos($sInfo, 'Via: Ethernet') !== false) {
+                $sPort = 'LAN';
+                $dPort = 'eth0';
+            }
             $insertLink->execute(array(
                 ':sid'   => $scopeId,
                 ':src'   => $defaultParent['id'],
                 ':dst'   => $dev['id'],
-                ':sport' => null,
-                ':dport' => null,
+                ':sport' => $sPort,
+                ':dport' => $dPort,
                 ':ltype' => 'subnet',
                 ':now'   => $now,
             ));
@@ -2449,6 +2542,12 @@ class NetworkScanner
         if (strpos($combined, 'procurve') !== false || strpos($combined, 'arubaos') !== false) {
             return 'HP ArubaOS / ProCurve';
         }
+        if (strpos($combined, 'netgear') !== false && $deviceType === 'switch') {
+            return 'Netgear Switch Firmware (ProSAFE / Smart)';
+        }
+        if ($deviceType === 'switch' && strpos($combined, 'cisco') !== false) {
+            return 'Cisco Switch OS';
+        }
         if (strpos($combined, 'routeros') !== false || strpos($combined, 'mikrotik') !== false) {
             return 'MikroTik RouterOS';
         }
@@ -2581,5 +2680,187 @@ class NetworkScanner
             return 'Router / Firewall OS';
         }
         return 'Embedded / Unbekannt';
+    }
+
+    /**
+     * Fragt (falls das Gateway eine AVM FRITZ!Box mit TR-064 Port 49000 ist) parallel und ohne Login
+     * die Anschlussart (Ethernet vs. 802.11 WLAN) und den hinterlegten Hostnamen für alle MAC-Adressen ab.
+     */
+    private function queryFritzBoxTr064HostsBatch($gatewayIp, array $liveHosts)
+    {
+        $result = array();
+        if (empty($gatewayIp) || !filter_var($gatewayIp, FILTER_VALIDATE_IP)) {
+            return $result;
+        }
+
+        // Schneller Vorab-Check (120 ms), ob Port 49000 (TR-064 UPnP) am Gateway offen ist
+        $testFp = @stream_socket_client('tcp://' . $gatewayIp . ':49000', $errno, $errstr, 0.12);
+        if (!$testFp) {
+            return $result;
+        }
+        @fclose($testFp);
+
+        $macList = array();
+        foreach ($liveHosts as $ip => $meta) {
+            if (!empty($meta['mac'])) {
+                $norm = OuiLookup::normalizeMac($meta['mac']);
+                if ($norm) {
+                    $macList[$norm] = $norm;
+                }
+            }
+        }
+        if (empty($macList)) {
+            return $result;
+        }
+
+        $chunks = array_chunk(array_values($macList), 3);
+        foreach ($chunks as $batchMacs) {
+            $sockets = array();
+            $buffers = array();
+            foreach ($batchMacs as $mac) {
+                $fp = @stream_socket_client(
+                    'tcp://' . $gatewayIp . ':49000',
+                    $errno,
+                    $errstr,
+                    0.12,
+                    STREAM_CLIENT_CONNECT
+                );
+                if ($fp) {
+                    stream_set_blocking($fp, false);
+                    $xml = '<?xml version="1.0" encoding="utf-8"?>'
+                         . '<s:Envelope s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/" xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">'
+                         . '<s:Body><u:GetSpecificHostEntry xmlns:u="urn:dslforum-org:service:Hosts:1">'
+                         . '<NewMACAddress>' . $mac . '</NewMACAddress>'
+                         . '</u:GetSpecificHostEntry></s:Body></s:Envelope>';
+                    $req = "POST /upnp/control/hosts HTTP/1.0\r\n"
+                         . "Host: " . $gatewayIp . ":49000\r\n"
+                         . "Content-Type: text/xml; charset=\"utf-8\"\r\n"
+                         . "SOAPAction: \"urn:dslforum-org:service:Hosts:1#GetSpecificHostEntry\"\r\n"
+                         . "Content-Length: " . strlen($xml) . "\r\n"
+                         . "Connection: close\r\n\r\n"
+                         . $xml;
+                    @fwrite($fp, $req);
+                    $sockets[$mac] = $fp;
+                    $buffers[$mac] = '';
+                }
+            }
+
+            $deadline = microtime(true) + 0.35;
+            while (!empty($sockets) && microtime(true) < $deadline) {
+                $read = array_values($sockets);
+                $write = null;
+                $except = null;
+                $n = @stream_select($read, $write, $except, 0, 40000);
+                if ($n > 0) {
+                    foreach ($read as $rSock) {
+                        $macKey = array_search($rSock, $sockets, true);
+                        if ($macKey === false) {
+                            continue;
+                        }
+                        $chunk = @fread($rSock, 4096);
+                        if ($chunk !== false && $chunk !== '') {
+                            $buffers[$macKey] .= $chunk;
+                        }
+                        if (feof($rSock) || strpos($buffers[$macKey], '</s:Envelope>') !== false) {
+                            @fclose($rSock);
+                            unset($sockets[$macKey]);
+                        }
+                    }
+                }
+            }
+            foreach ($sockets as $remFp) {
+                @fclose($remFp);
+            }
+
+            foreach ($buffers as $mac => $resp) {
+                if (strpos($resp, 'GetSpecificHostEntryResponse') !== false) {
+                    $ifType = null;
+                    $hName = null;
+                    $active = null;
+                    if (preg_match('/<NewInterfaceType>(.*?)<\/NewInterfaceType>/i', $resp, $m1)) {
+                        $ifType = trim($m1[1]);
+                    }
+                    if (preg_match('/<NewHostName>(.*?)<\/NewHostName>/i', $resp, $m2)) {
+                        $hName = trim($m2[1]);
+                    }
+                    if (preg_match('/<NewActive>(.*?)<\/NewActive>/i', $resp, $m3)) {
+                        $active = (int)$m3[1];
+                    }
+                    $result[$mac] = array(
+                        'interface_type' => $ifType,
+                        'hostname'       => $hName,
+                        'active'         => $active,
+                    );
+                }
+            }
+        }
+
+        return $result;
+    }
+
+    /**
+     * Sucht per Netgear Switch Discovery Protocol (NSDP, UDP Port 63322 / 63324) nach Netgear Smart Switches
+     */
+    private function probeNetgearNsdpBatch(array $ipList)
+    {
+        $result = array();
+        if (!function_exists('socket_create')) {
+            return $result;
+        }
+        $sock = @socket_create(AF_INET, SOCK_DGRAM, SOL_UDP);
+        if (!$sock) {
+            return $result;
+        }
+        @socket_set_option($sock, SOL_SOCKET, SO_BROADCAST, 1);
+        @socket_set_option($sock, SOL_SOCKET, SO_RCVTIMEO, array('sec' => 0, 'usec' => 180000));
+
+        // 32-Byte NSDP v1 Read Request Header + TLVs (Model 0x0001, Name 0x0003, MAC 0x0004, IP 0x0006, Firmware 0x000d)
+        $pkt = "\x01\x01\x00\x00\x00\x00\x00\x00"
+             . "\x00\x00\x00\x00\x00\x00"
+             . "\x00\x00\x00\x00\x00\x00"
+             . "\x00\x00\x00\x01NSDP\x00\x00\x00\x00"
+             . "\x00\x01\x00\x00\x00\x03\x00\x00\x00\x04\x00\x00\x00\x06\x00\x00\x00\x0d\x00\x00\xff\xff\x00\x00";
+
+        @socket_sendto($sock, $pkt, strlen($pkt), 0, '255.255.255.255', 63322);
+        @socket_sendto($sock, $pkt, strlen($pkt), 0, '255.255.255.255', 63324);
+
+        $buf = '';
+        $from = '';
+        $port = 0;
+        while (@socket_recvfrom($sock, $buf, 2048, 0, $from, $port) > 32) {
+            if (substr($buf, 24, 4) !== 'NSDP') {
+                continue;
+            }
+            $pos = 32;
+            $len = strlen($buf);
+            $model = null;
+            $name = null;
+            $fw = null;
+            while ($pos + 4 <= $len) {
+                $t = unpack('ntype/nlen', substr($buf, $pos, 4));
+                $pos += 4;
+                if ($t['type'] === 0xFFFF) {
+                    break;
+                }
+                $val = substr($buf, $pos, $t['len']);
+                $pos += $t['len'];
+                if ($t['type'] === 0x0001) {
+                    $model = trim($val, "\x00 ");
+                } elseif ($t['type'] === 0x0003) {
+                    $name = trim($val, "\x00 ");
+                } elseif ($t['type'] === 0x000D) {
+                    $fw = trim($val, "\x00 ");
+                }
+            }
+            if ($from) {
+                $result[$from] = array(
+                    'model'    => $model,
+                    'hostname' => $name,
+                    'firmware' => $fw,
+                );
+            }
+        }
+        @socket_close($sock);
+        return $result;
     }
 }
