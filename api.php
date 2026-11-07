@@ -1,7 +1,17 @@
 <?php
 /**
- * NetworkMonitor - JSON Backend API
- * Kompatibel mit PHP 5.5+ (Ubuntu 14.04) bis PHP 8.x
+ * NetworkMonitor - Zentraler JSON-Backend-Controller (REST/RPC-API)
+ *
+ * Nimmt sämtliche AJAX-/Fetch-Anfragen des Frontends ('assets/app.js') entgegen,
+ * prüft für jede Aktion ('action') die erforderliche Rollenberechtigung
+ * ('viewer', 'operator', 'netadmin', 'admin') und liefert ein JSON-Objekt zurück.
+ *
+ * Wichtiger Architektur-Hinweis:
+ * Direkt nach der Authentifizierungsprüfung wird '@session_write_close()' aufgerufen,
+ * damit langlaufende Hintergrund-Aktionen (wie Netzwerk-Scans oder SSH-Switch-Befehle)
+ * niemals parallele Leseanfragen derselben Browser-Session blockieren.
+ *
+ * Kompatibel mit PHP 5.5+ (Ubuntu 14.04) bis PHP 8.x.
  */
 
 header('Content-Type: application/json; charset=utf-8');
@@ -30,6 +40,12 @@ $input = array_merge($_GET, $_POST, $jsonBody);
 
 try {
     switch ($action) {
+                // ---------------------------------------------------------------------
+        // ENDPOINT: topology / dashboard
+        // Liefert alle Scopes, Geräte, Links, Alarme, MAC-Historie, Dosen-Mappings
+        // und (für Admins) Benutzer- & Systemeinstellungen. Filtert Core-Switches
+        // und sensible Zugangsdaten abhängig von der Benutzerrolle.
+        // ---------------------------------------------------------------------
         case 'topology':
             $scopes = $pdo->query("SELECT * FROM scopes ORDER BY id ASC")->fetchAll();
             if (!$canEditRole) {
@@ -259,6 +275,10 @@ try {
             ));
             break;
 
+                // ---------------------------------------------------------------------
+        // ENDPOINT: scan
+        // Startet einen manuellen Netzwerk-Scan für einen einzelnen Scope oder alle aktiven Scopes.
+        // ---------------------------------------------------------------------
         case 'scan':
             Auth::requireRole(array('operator', 'netadmin', 'admin'));
             @set_time_limit(300);
@@ -275,6 +295,10 @@ try {
             ));
             break;
 
+                // ---------------------------------------------------------------------
+        // ENDPOINT: save_scope
+        // Erstellt einen neuen IP-Scope (Subnetz/VLAN) oder aktualisiert einen bestehenden Scope.
+        // ---------------------------------------------------------------------
         case 'save_scope':
             Auth::requireRole(array('operator', 'netadmin', 'admin'));
             $id = isset($input['id']) ? (int)$input['id'] : 0;
@@ -344,6 +368,10 @@ try {
             echo json_encode(array('ok' => true, 'scope_id' => $id));
             break;
 
+                // ---------------------------------------------------------------------
+        // ENDPOINT: delete_scope
+        // Löscht einen IP-Scope samt allen zugehörigen Geräten, Links und Scan-Protokollen.
+        // ---------------------------------------------------------------------
         case 'delete_scope':
             Auth::requireRole(array('netadmin', 'admin'));
             $id = isset($input['id']) ? (int)$input['id'] : 0;
@@ -359,6 +387,10 @@ try {
             echo json_encode(array('ok' => true));
             break;
 
+                // ---------------------------------------------------------------------
+        // ENDPOINT: save_device
+        // Speichert manuelle Geräte-Eigenschaften (Name, Gruppe, Typ, Core-Flag, Uplink, Alarm-Modus, Notizen).
+        // ---------------------------------------------------------------------
         case 'save_device':
             Auth::requireRole(array('operator', 'netadmin', 'admin'));
             $id = isset($input['id']) ? (int)$input['id'] : 0;
@@ -448,6 +480,10 @@ try {
             echo json_encode(array('ok' => true, 'is_core' => $isCore));
             break;
 
+                // ---------------------------------------------------------------------
+        // ENDPOINT: save_switch_credentials
+        // Speichert individuelle SSH- und SNMP-Zugangsdaten für einen Managed Switch und führt optional einen Live-Test durch.
+        // ---------------------------------------------------------------------
         case 'save_switch_credentials':
             Auth::requireRole(array('netadmin', 'admin'));
             $id = isset($input['device_id']) ? (int)$input['device_id'] : 0;
@@ -553,6 +589,10 @@ try {
             ));
             break;
 
+                // ---------------------------------------------------------------------
+        // ENDPOINT: configure_switch_port
+        // Konfiguriert einen Switch-Port (Status, Alias, VLAN/PVID, Modus, PoE, Speed) live per SSH-CLI oder SNMP-SET.
+        // ---------------------------------------------------------------------
         case 'configure_switch_port':
             Auth::requireRole(array('operator', 'netadmin', 'admin'));
             @set_time_limit(60);
@@ -659,6 +699,10 @@ try {
             ));
             break;
 
+                // ---------------------------------------------------------------------
+        // ENDPOINT: delete_device
+        // Entfernt ein einzelnes Gerät sowie dessen Topologie-Verknüpfungen aus der Datenbank.
+        // ---------------------------------------------------------------------
         case 'delete_device':
             Auth::requireRole(array('operator', 'netadmin', 'admin'));
             $id = isset($input['id']) ? (int)$input['id'] : 0;
@@ -676,6 +720,10 @@ try {
             echo json_encode(array('ok' => true));
             break;
 
+                // ---------------------------------------------------------------------
+        // ENDPOINT: toggle_device_visibility
+        // Blendet ein einzelnes Gerät auf der Topologie-Karte ein oder aus ('is_hidden').
+        // ---------------------------------------------------------------------
         case 'toggle_device_visibility':
             Auth::requireRole(array('operator', 'netadmin', 'admin'));
             $id = isset($input['id']) ? (int)$input['id'] : 0;
@@ -694,6 +742,10 @@ try {
             echo json_encode(array('ok' => true, 'id' => $id, 'is_hidden' => $isHidden));
             break;
 
+                // ---------------------------------------------------------------------
+        // ENDPOINT: bulk_device_visibility
+        // Aktualisiert die Sichtbarkeit mehrerer Geräte gleichzeitig (Sichtbarkeits-Checkliste).
+        // ---------------------------------------------------------------------
         case 'bulk_device_visibility':
             Auth::requireRole(array('operator', 'netadmin', 'admin'));
             $mode = isset($input['mode']) ? $input['mode'] : 'show_all';
@@ -716,6 +768,10 @@ try {
             echo json_encode(array('ok' => true));
             break;
 
+                // ---------------------------------------------------------------------
+        // ENDPOINT: toggle_group_visibility
+        // Blendet alle Geräte einer Gerätekategorie oder benutzerdefinierten Gruppe gesammelt ein oder aus.
+        // ---------------------------------------------------------------------
         case 'toggle_group_visibility':
             Auth::requireRole(array('operator', 'netadmin', 'admin'));
             $groupKind = isset($input['group_kind']) ? $input['group_kind'] : 'device_type';
@@ -738,12 +794,20 @@ try {
             echo json_encode(array('ok' => true));
             break;
 
+                // ---------------------------------------------------------------------
+        // ENDPOINT: seed_demo
+        // Lädt eine realistische Demo-Netzwerktopologie (inkl. Managed Switch & VLANs) zum Testen.
+        // ---------------------------------------------------------------------
         case 'seed_demo':
             Auth::requireRole(array('operator', 'netadmin', 'admin'));
             seedManagedSwitchDemo($pdo);
             echo json_encode(array('ok' => true));
             break;
 
+                // ---------------------------------------------------------------------
+        // ENDPOINT: change_own_password
+        // Ermöglicht dem aktuell angemeldeten Benutzer das Ändern von eigenem Passwort, E-Mail-Adresse, Alarm-Abo und 2FA.
+        // ---------------------------------------------------------------------
         case 'change_own_password':
             $newPass = isset($input['new_password']) ? $input['new_password'] : '';
             $hasProfileFields = isset($input['email']) || isset($input['receive_alerts']) || isset($input['two_fa_mode']);
@@ -799,6 +863,10 @@ try {
             ));
             break;
 
+                // ---------------------------------------------------------------------
+        // ENDPOINT: generate_totp_secret
+        // Generiert ein neues zufälliges Base32-TOTP-Secret für Authenticator-Apps (RFC 6238).
+        // ---------------------------------------------------------------------
         case 'generate_totp_secret':
             echo json_encode(array(
                 'ok'          => true,
@@ -806,12 +874,20 @@ try {
             ));
             break;
 
+                // ---------------------------------------------------------------------
+        // ENDPOINT: test_db
+        // Prüft im Admin-Bereich eine MySQL/MariaDB-Datenbankverbindung, ohne sie sofort zu aktivieren.
+        // ---------------------------------------------------------------------
         case 'test_db':
             Auth::requireRole(array('admin'));
             $info = Database::testMysqlConnection($input);
             echo json_encode(array('ok' => true, 'info' => $info));
             break;
 
+                // ---------------------------------------------------------------------
+        // ENDPOINT: save_db_config
+        // Speichert Datenbank-Treiber (MySQL/SQLite) sowie Scanner-Performance-Parameter in data/custom_config.json.
+        // ---------------------------------------------------------------------
         case 'save_db_config':
             Auth::requireRole(array('admin'));
             $dbSettings = array(
@@ -854,6 +930,10 @@ try {
             echo json_encode(array('ok' => true));
             break;
 
+                // ---------------------------------------------------------------------
+        // ENDPOINT: admin_save_cron_retention
+        // Speichert Aufbewahrungsfristen (Retention) und richtet auf Wunsch den Linux-Hintergrund-Cronjob ein.
+        // ---------------------------------------------------------------------
         case 'admin_save_cron_retention':
             Auth::requireRole(array('admin'));
             $cronMin = isset($input['cron_interval_minutes']) ? max(0, (int)$input['cron_interval_minutes']) : 15;
@@ -920,6 +1000,10 @@ try {
             ));
             break;
 
+                // ---------------------------------------------------------------------
+        // ENDPOINT: admin_run_retention_cleanup
+        // Führt die Datenbank-Bereinigung alter Scan-Protokolle, Alarme und Offline-Leichen sofort manuell aus.
+        // ---------------------------------------------------------------------
         case 'admin_run_retention_cleanup':
             Auth::requireRole(array('admin'));
             $retDays = isset($input['retention_days']) ? max(0, (int)$input['retention_days']) : null;
@@ -929,6 +1013,10 @@ try {
             echo json_encode(array('ok' => true, 'cleanup' => $stats));
             break;
 
+                // ---------------------------------------------------------------------
+        // ENDPOINT: admin_save_anomaly_config
+        // Speichert die Schwellenwerte für den automatischen Netzwerk-Anomalie-Wächter (ARP-Spoofing, Loops, Port-Fehler).
+        // ---------------------------------------------------------------------
         case 'admin_save_anomaly_config':
             Auth::requireRole(array('admin'));
             $anomalySettings = array(
@@ -942,6 +1030,10 @@ try {
             echo json_encode(array('ok' => true, 'anomaly_config' => $anomalySettings));
             break;
 
+                // ---------------------------------------------------------------------
+        // ENDPOINT: admin_check_update
+        // Prüft über Git bzw. die GitHub-API, ob auf GitHub (origin/main) eine neuere Version verfügbar ist.
+        // ---------------------------------------------------------------------
         case 'admin_check_update':
             Auth::requireRole(array('admin'));
             $rootDir = __DIR__;
@@ -1010,6 +1102,10 @@ try {
             ));
             break;
 
+                // ---------------------------------------------------------------------
+        // ENDPOINT: admin_run_update
+        // Führt ein Live-Update der Anwendung direkt von GitHub durch (via 'git pull' oder GitHub-Tarball-Fallback).
+        // ---------------------------------------------------------------------
         case 'admin_run_update':
             Auth::requireRole(array('admin'));
             @set_time_limit(180);
@@ -1068,6 +1164,10 @@ try {
             ));
             break;
 
+                // ---------------------------------------------------------------------
+        // ENDPOINT: save_user
+        // Legt ein neues Benutzerkonto an oder aktualisiert Rolle, Passwort, E-Mail und 2FA-Einstellungen.
+        // ---------------------------------------------------------------------
         case 'save_user':
             Auth::requireRole(array('admin'));
             $uid = isset($input['id']) ? (int)$input['id'] : 0;
@@ -1147,6 +1247,10 @@ try {
             echo json_encode(array('ok' => true, 'totp_secret' => $totpSecret));
             break;
 
+                // ---------------------------------------------------------------------
+        // ENDPOINT: delete_user
+        // Löscht ein Benutzerkonto (das eigene aktuell angemeldete Konto ist vor Selbstlöschung geschützt).
+        // ---------------------------------------------------------------------
         case 'delete_user':
             Auth::requireRole(array('admin'));
             $uid = isset($input['id']) ? (int)$input['id'] : 0;
@@ -1157,6 +1261,10 @@ try {
             echo json_encode(array('ok' => true));
             break;
 
+                // ---------------------------------------------------------------------
+        // ENDPOINT: admin_clear_scope_scans
+        // Leert die gefundenen Geräte und Scan-Daten eines einzelnen Scopes oder aller Scopes (Scopes selbst bleiben erhalten).
+        // ---------------------------------------------------------------------
         case 'admin_clear_scope_scans':
             Auth::requireRole(array('admin'));
             $scopeId = isset($input['scope_id']) ? $input['scope_id'] : 0;
@@ -1184,6 +1292,10 @@ try {
             echo json_encode(array('ok' => true));
             break;
 
+                // ---------------------------------------------------------------------
+        // ENDPOINT: admin_delete_all_scopes
+        // Setzt sämtliche Scopes, Geräte, Links, Alarme und Historien-Einträge vollständig zurück.
+        // ---------------------------------------------------------------------
         case 'admin_delete_all_scopes':
             Auth::requireRole(array('admin'));
             $pdo->exec("DELETE FROM switch_port_outlets");
@@ -1196,12 +1308,20 @@ try {
             echo json_encode(array('ok' => true));
             break;
 
+                // ---------------------------------------------------------------------
+        // ENDPOINT: admin_clear_scan_logs
+        // Löscht die gesamte Scan-Protokoll-Historie ('scan_logs').
+        // ---------------------------------------------------------------------
         case 'admin_clear_scan_logs':
             Auth::requireRole(array('admin'));
             $pdo->exec("DELETE FROM scan_logs");
             echo json_encode(array('ok' => true));
             break;
 
+                // ---------------------------------------------------------------------
+        // ENDPOINT: save_mac_watchlist
+        // Fügt eine gesuchte MAC-Adresse zur Überwachungs-/Fahndungsliste hinzu oder aktualisiert sie.
+        // ---------------------------------------------------------------------
         case 'save_mac_watchlist':
             Auth::requireRole(array('operator', 'netadmin', 'admin'));
             $rawMac = isset($input['mac_address']) ? trim($input['mac_address']) : '';
@@ -1226,6 +1346,10 @@ try {
             echo json_encode(array('ok' => true, 'mac_address' => $normMac));
             break;
 
+                // ---------------------------------------------------------------------
+        // ENDPOINT: delete_mac_watchlist
+        // Entfernt einen Eintrag von der MAC-Überwachungsliste.
+        // ---------------------------------------------------------------------
         case 'delete_mac_watchlist':
             Auth::requireRole(array('operator', 'netadmin', 'admin'));
             $wid = isset($input['id']) ? (int)$input['id'] : 0;
@@ -1236,6 +1360,10 @@ try {
             echo json_encode(array('ok' => true));
             break;
 
+                // ---------------------------------------------------------------------
+        // ENDPOINT: save_port_outlet
+        // Speichert die Zuordnung eines einzelnen Switch-Ports zu einer Netzwerkdose / Patchfeld / Raum.
+        // ---------------------------------------------------------------------
         case 'save_port_outlet':
             Auth::requireRole(array('operator', 'netadmin', 'admin'));
             $switchId = isset($input['switch_id']) ? (int)$input['switch_id'] : 0;
@@ -1306,6 +1434,10 @@ try {
             ));
             break;
 
+                // ---------------------------------------------------------------------
+        // ENDPOINT: save_port_outlets_bulk
+        // Speichert mehrere Switch-Port-zu-Netzwerkdosen-Zuordnungen (inkl. optionaler Port-Beschreibungen) in einem Rutsch.
+        // ---------------------------------------------------------------------
         case 'save_port_outlets_bulk':
             Auth::requireRole(array('operator', 'netadmin', 'admin'));
             $switchId = isset($input['switch_id']) ? (int)$input['switch_id'] : 0;
@@ -1383,6 +1515,10 @@ try {
             ));
             break;
 
+                // ---------------------------------------------------------------------
+        // ENDPOINT: save_smtp_config
+        // Speichert die SMTP-Postausgangsserver-Konfiguration für Alarm- und 2FA-E-Mails.
+        // ---------------------------------------------------------------------
         case 'save_smtp_config':
             Auth::requireRole(array('admin'));
             $smtpSettings = array(
@@ -1402,6 +1538,10 @@ try {
             echo json_encode(array('ok' => true));
             break;
 
+                // ---------------------------------------------------------------------
+        // ENDPOINT: test_smtp
+        // Sendet eine Test-E-Mail über die angegebenen SMTP-Serverdaten zur Funktionsprüfung.
+        // ---------------------------------------------------------------------
         case 'test_smtp':
             Auth::requireRole(array('admin'));
             $storedSmtp = Database::getInstance()->getConfig('smtp', array());
@@ -1436,6 +1576,11 @@ try {
             echo json_encode(array('ok' => true, 'info' => $info));
             break;
 
+                // ---------------------------------------------------------------------
+        // ENDPOINT: ack_alerts
+        // Quittiert einen einzelnen Alarm oder alle offenen Alarme inklusive optionalem Techniker-Kommentar,
+        // Benutzername ('ack_by') und Zeitstempel ('ack_at').
+        // ---------------------------------------------------------------------
         case 'ack_alerts':
             Auth::requireRole(array('operator', 'netadmin', 'admin'));
             $alertId = isset($input['id']) ? (int)$input['id'] : 0;
@@ -1461,12 +1606,20 @@ try {
             echo json_encode(array('ok' => true, 'ack_by' => $ackBy, 'ack_at' => $now));
             break;
 
+                // ---------------------------------------------------------------------
+        // ENDPOINT: clear_alerts
+        // Löscht die gesamte Alarm-Historie aus der Tabelle 'device_alerts'.
+        // ---------------------------------------------------------------------
         case 'clear_alerts':
             Auth::requireRole(array('operator', 'netadmin', 'admin'));
             $pdo->exec("DELETE FROM device_alerts");
             echo json_encode(array('ok' => true));
             break;
 
+                // ---------------------------------------------------------------------
+        // ENDPOINT: save_layout_positions
+        // Speichert die per Drag & Drop auf der Topologie-Karte verschobenen Knoten-Koordinaten (pos_x, pos_y) dauerhaft.
+        // ---------------------------------------------------------------------
         case 'save_layout_positions':
             Auth::requireRole(array('operator', 'netadmin', 'admin'));
             if (!isset($input['positions']) || !is_array($input['positions'])) {
@@ -1488,6 +1641,10 @@ try {
             echo json_encode(array('ok' => true, 'saved' => $savedCount));
             break;
 
+                // ---------------------------------------------------------------------
+        // ENDPOINT: reset_layout_positions
+        // Setzt alle manuell gespeicherten Knoten-Koordinaten zurück, damit das automatische Layout neu berechnet wird.
+        // ---------------------------------------------------------------------
         case 'reset_layout_positions':
             Auth::requireRole(array('operator', 'netadmin', 'admin'));
             $scopeId = isset($input['scope_id']) && $input['scope_id'] !== 'all' ? (int)$input['scope_id'] : 0;

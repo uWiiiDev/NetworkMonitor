@@ -98,6 +98,12 @@ class Database
         }
     }
 
+    /**
+     * Schützt das data/-Verzeichnis vor direktem HTTP-Abruf über den Browser,
+     * indem automatisch eine .htaccess-Datei (Apache 2.2/2.4) und eine index.php (403 Forbidden) angelegt werden.
+     *
+     * @param string $dataDir Pfad zum Datenverzeichnis
+     */
     public static function protectDataDirectory($dataDir)
     {
         if (!is_dir($dataDir)) {
@@ -113,6 +119,11 @@ class Database
         }
     }
 
+    /**
+     * Liefert die Singleton-Instanz der Datenbankverbindung zurück.
+     *
+     * @return Database
+     */
     public static function getInstance()
     {
         if (self::$instance === null) {
@@ -121,21 +132,43 @@ class Database
         return self::$instance;
     }
 
+    /**
+     * Gibt das zugrundeliegende PDO-Datenbankobjekt zurück.
+     *
+     * @return PDO
+     */
     public function getPdo()
     {
         return $this->pdo;
     }
 
+    /**
+     * Gibt den aktuell aktiven Datenbanktreiber zurück ('mysql' oder 'sqlite').
+     *
+     * @return string
+     */
     public function getActiveDriver()
     {
         return $this->activeDriver;
     }
 
+    /**
+     * Gibt eine eventuelle MySQL-Verbindungsfehlermeldung zurück (falls auf SQLite zurückgefallen wurde).
+     *
+     * @return string|null
+     */
     public function getConnectionError()
     {
         return $this->connectionError;
     }
 
+    /**
+     * Liest die zusammengeführte Konfiguration (aus config.php + data/custom_config.json) oder einen Teilbereich davon.
+     *
+     * @param string|null $section Optionaler Schlüssel ('db', 'scanner', 'smtp')
+     * @param mixed       $default Rückgabewert falls der Bereich nicht existiert
+     * @return array|mixed
+     */
     public function getConfig($section = null, $default = array())
     {
         if ($section !== null) {

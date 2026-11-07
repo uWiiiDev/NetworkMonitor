@@ -1,7 +1,15 @@
 <?php
 /**
  * NetworkMonitor - Login, 2-Faktor-Authentifizierung (2FA) & Passwort-Reset
- * Kompatibel mit PHP 5.5+ (Ubuntu 14.04) bis PHP 8.x
+ *
+ * Verarbeitet den gesamten Anmelde-Workflow der Anwendung:
+ * - Schritt 1 (mode = 'login'): Benutzername/Passwort-Prüfung inkl. Brute-Force-Schutz
+ * - Schritt 2 (mode = '2fa'):   Verifizierung des 6-stelligen Einmalcodes per E-Mail
+ *                               oder Authenticator-App (TOTP nach RFC 6238)
+ * - Passwort-Wiederherstellung ('forgot' / 'reset'):
+ *   Versand und Einlösung eines zeitlich begrenzten 8-stelligen Reset-Codes per E-Mail.
+ *
+ * Kompatibel mit PHP 5.5+ (Ubuntu 14.04) bis PHP 8.x.
  */
 
 require_once __DIR__ . '/includes/auth.php';

@@ -1,7 +1,22 @@
 <?php
 /**
- * NetworkMonitor - Hauptanwendung & Interaktiver Netzwerkplan
- * Kompatibel mit Ubuntu 14.04 (Apache + PHP 5.5 + MySQL 5.5) bis PHP 8.x
+ * NetworkMonitor - Hauptanwendung & Interaktiver Netzwerkplan (Frontend-Shell)
+ *
+ * Dieses Modul bildet das zentrale HTML-Grundgerüst der Webanwendung:
+ * - Prüft die aktive Benutzersitzung und ermittelt die Rollenberechtigungen
+ *   ('viewer', 'operator', 'netadmin', 'admin').
+ * - Rendert die obere Navigationsleiste (Reiter-Umschaltung, Alarm-Badge,
+ *   MAC-/Dosen-Suche, Sprach- & Farbschema-Auswahl, Benutzer-Menü).
+ * - Stellt die Container für die 4 Hauptbereiche bereit:
+ *     1. Interaktive Topologie-Karte (vis.js Graph, Hierarchie, Matrix, 19"-Rack)
+ *     2. Geräte-Inventarliste mit Excel-Spaltenfiltern, Gruppierung & CSV-Export
+ *     3. System-Übersicht, Cronjob-Status & Scan-Protokoll-Historie
+ *     4. Administration (Datenbank, Scanner-Tuning, Anomalie-Wächter, SMTP,
+ *        Benutzerverwaltung, GitHub-Live-Updater & Daten-Bereinigung)
+ * - Enthält sämtliche Modal-Dialoge (Switch-19"-Grafikansicht, SNMP-Details,
+ *   Alarm-Center & MAC-Watchlist, Sichtbarkeits-Checkliste, Scopes, Mein Konto).
+ *
+ * Kompatibel mit Ubuntu 14.04 (Apache + PHP 5.5 + MySQL 5.5) bis PHP 8.x.
  */
 require_once __DIR__ . '/includes/db.php';
 require_once __DIR__ . '/includes/auth.php';

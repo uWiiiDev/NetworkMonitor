@@ -15,6 +15,9 @@ class NetworkScanner
     private $pdo;
     private $config;
 
+        /**
+     * Lädt Datenbank-Instanz, PDO-Objekt und aktuelle Scanner-Konfiguration.
+     */
     public function __construct()
     {
         $this->db = Database::getInstance();
@@ -1089,6 +1092,10 @@ class NetworkScanner
         } catch (Exception $e) {}
     }
 
+        /**
+     * Versendet neu aufgetretene Alarme gesammelt per HTML-E-Mail an die globale Empfängeradresse
+     * sowie an alle aktiven Benutzerkonten mit aktiviertem Alarm-Empfang ('receive_alerts = 1').
+     */
     private function sendAlertEmailsIfConfigured($scope, array $alerts)
     {
         $fullConf = $this->db->getConfig();
@@ -1544,6 +1551,10 @@ class NetworkScanner
         }
     }
 
+        /**
+     * Fügt ein entdecktes Gerät neu in die Tabelle 'devices' ein oder aktualisiert den bestehenden Datensatz.
+     * Respektiert manuell gesetzte Gerätetypen ('is_manual_type = 1').
+     */
     private function upsertDevice($data)
     {
         $scanStartMicro = microtime(true);
@@ -2044,6 +2055,9 @@ class NetworkScanner
         return $map;
     }
 
+        /**
+     * Baut ein binäres DNS-Anfragepaket (RFC 1035) für einen PTR-Record (in-addr.arpa) zusammen.
+     */
     private function buildDnsPtrQuery($domain)
     {
         $txId = mt_rand(1, 65000);
@@ -2057,6 +2071,9 @@ class NetworkScanner
         return $pkt;
     }
 
+        /**
+     * Extrahiert den aufgelösten Hostnamen aus einem binären DNS-PTR-Antwortpaket.
+     */
     private function parseDnsPtrResponse($resp)
     {
         $len = strlen($resp);
@@ -2094,6 +2111,9 @@ class NetworkScanner
         return null;
     }
 
+        /**
+     * Dekodiert einen DNS-Namen aus einem DNS-Paket unter Berücksichtigung von RFC-1035-Pointer-Kompression (0xC0).
+     */
     private function readDnsName($pkt, &$pos)
     {
         $len = strlen($pkt);
@@ -2199,6 +2219,9 @@ class NetworkScanner
         return $open;
     }
 
+        /**
+     * Löst den Hostnamen einer einzelnen IP-Adresse über gethostbyaddr() auf.
+     */
     private function resolveHostname($ip)
     {
         $host = @gethostbyaddr($ip);
@@ -2208,6 +2231,9 @@ class NetworkScanner
         return null;
     }
 
+        /**
+     * Formatiert das Array offener Ports [80 => 'HTTP', 443 => 'HTTPS'] in einen lesbaren String ('80/HTTP, 443/HTTPS').
+     */
     private function formatOpenPorts($openPorts)
     {
         if (empty($openPorts)) {
@@ -2295,6 +2321,9 @@ class NetworkScanner
         return $results;
     }
 
+        /**
+     * Parst ein NetBIOS-Node-Status-Antwortpaket (NBSTAT) und extrahiert Computername sowie Workgroup/Domain.
+     */
     private function parseNetbiosResponse($resp)
     {
         $len = strlen($resp);
@@ -2467,6 +2496,9 @@ class NetworkScanner
         return $banners;
     }
 
+        /**
+     * Extrahiert aus dem empfangenen Socket-Puffer den SSH-Versionsstring bzw. HTTP-Server-Header und HTML-Titel.
+     */
     private function extractBannerFromBuffer(&$banners, $m)
     {
         $ip = $m['ip'];

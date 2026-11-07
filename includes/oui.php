@@ -176,6 +176,13 @@ class OuiLookup
         '48:BA:4E' => 'HP Inc. (LaserJet / OfficeJet Printer)',
     );
 
+    /**
+     * Normalisiert eine beliebige MAC-Adress-Schreibweise (z.B. "00-11-22-aa-bb-cc" oder "001122aabbcc")
+     * in das einheitliche Großbuchstaben-Format "00:11:22:AA:BB:CC".
+     *
+     * @param string $mac Rohe MAC-Adresse
+     * @return string|null Normalisierte MAC-Adresse oder null bei ungültiger Länge
+     */
     public static function normalizeMac($mac)
     {
         $clean = strtoupper(preg_replace('/[^0-9A-Fa-f]/', '', (string)$mac));
@@ -185,6 +192,14 @@ class OuiLookup
         return implode(':', str_split($clean, 2));
     }
 
+    /**
+     * Ermittelt den Hardware-Hersteller (Vendor) anhand der ersten 3 Bytes (OUI) einer MAC-Adresse.
+     * Prüft zuerst die integrierte Schnell-Tabelle, danach lokale Linux-OUI-Datenbanken (/usr/share/ieee-data/oui.txt)
+     * und erkennt schließlich randomisierte Private-WLAN-MAC-Adressen (Locally Administered Bit).
+     *
+     * @param string $mac MAC-Adresse
+     * @return string|null Herstellername oder null falls unbekannt
+     */
     public static function lookupVendor($mac)
     {
         $norm = self::normalizeMac($mac);
@@ -236,6 +251,20 @@ class OuiLookup
         return null;
     }
 
+    /**
+     * Klassifiziert ein entdecktes Netzwerkgerät automatisch in eine Gerätekategorie:
+     * 'router', 'switch', 'ap', 'printer', 'server' oder 'workstation'.
+     *
+     * @param string      $ip                 IP-Adresse des Geräts
+     * @param string|null $gatewayIp          Gateway-IP des aktuellen Scopes
+     * @param string|null $vendor             Ermittelter MAC-Hersteller
+     * @param string|null $hostname           Aufgelöster DNS-/NetBIOS-Hostname
+     * @param array       $openPorts          Offene TCP-Ports als Array [port => label]
+     * @param string|null $snmpSysDescr       SNMP sysDescr-String
+     * @param bool        $hasSnmpBridgeTable True falls das Gerät eine SNMP Bridge-MIB MAC-Tabelle / LLDP liefert
+     * @param string      $serviceInfo        Zusätzliche Banner-/TR-064-/NSDP-Informationen
+     * @return string Gerätekategorie
+     */
     public static function classifyDevice($ip, $gatewayIp, $vendor, $hostname, $openPorts, $snmpSysDescr, $hasSnmpBridgeTable, $serviceInfo = '')
     {
         if ($ip === $gatewayIp) {

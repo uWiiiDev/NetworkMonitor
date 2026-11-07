@@ -15,6 +15,10 @@ require_once __DIR__ . '/mailer.php';
 
 class Auth
 {
+    /**
+     * Initialisiert die PHP-Session inklusive HTTP-Sicherheits-Headern (Clickjacking- & MIME-Sniffing-Schutz)
+     * sowie HttpOnly-Cookie-Einstellungen zum Schutz vor Session-Diebstahl per XSS.
+     */
     public static function startSession()
     {
         if (!headers_sent()) {
@@ -29,6 +33,10 @@ class Auth
         }
     }
 
+    /**
+     * Prüft das Brute-Force-Rate-Limit für Login- und 2FA-Versuche.
+     * Wirft eine RuntimeException, falls die Sitzung wegen zu vieler Fehlversuche temporär gesperrt ist.
+     */
     public static function checkRateLimit()
     {
         self::startSession();
@@ -39,6 +47,10 @@ class Auth
         }
     }
 
+    /**
+     * Registriert einen fehlgeschlagenen Anmelde- oder 2FA-Versuch.
+     * Ab 6 Fehlversuchen innerhalb von 5 Minuten wird eine Sperre von 60 Sekunden aktiviert.
+     */
     public static function recordFailedAttempt()
     {
         self::startSession();
@@ -55,12 +67,23 @@ class Auth
         }
     }
 
+    /**
+     * Setzt den Zähler für fehlgeschlagene Anmeldeversuche nach erfolgreichem Login zurück.
+     */
     public static function clearFailedAttempts()
     {
         self::startSession();
         unset($_SESSION['nm_fail_window'], $_SESSION['nm_fail_count'], $_SESSION['nm_lockout_until']);
     }
 
+    /**
+     * Erzeugt eine kryptographisch sichere Zufallszahl im Bereich [$min, $max].
+     * Nutzt random_int() (PHP 7+) bzw. openssl_random_pseudo_bytes() als Fallback für PHP 5.5+.
+     *
+     * @param int $min Untere Grenze (inklusive)
+     * @param int $max Obere Grenze (inklusive)
+     * @return int
+     */
     public static function secureRandomInt($min, $max)
     {
         if (function_exists('random_int')) {
@@ -82,6 +105,12 @@ class Auth
         return mt_rand((int)$min, (int)$max);
     }
 
+    /**
+     * Lädt den aktuell angemeldeten Benutzer aus der Datenbank anhand der Session-ID.
+     * Falls das Konto zwischenzeitlich deaktiviert oder gelöscht wurde, wird die Sitzung beendet.
+     *
+     * @return array|null Assoziatives Benutzer-Array oder null wenn nicht eingeloggt
+     */
     public static function getCurrentUser()
     {
         self::startSession();
@@ -149,6 +178,12 @@ class Auth
         return 'ok';
     }
 
+    /**
+     * Schließt den Login-Vorgang ab, erneuert die Session-ID (Schutz vor Session Fixation)
+     * und aktualisiert den last_login-Zeitstempel in der Datenbank.
+     *
+     * @param array $user Datensatz des authentifizierten Benutzers
+     */
     public static function completeLoginSession(array $user)
     {
         self::startSession();
@@ -166,6 +201,11 @@ class Auth
             ->execute(array(':now' => date('Y-m-d H:i:s'), ':id' => (int)$user['id']));
     }
 
+    /**
+     * Gibt das Benutzer-Array zurück, für das aktuell eine 2FA-Prüfung aussteht.
+     *
+     * @return array|null
+     */
     public static function getPending2faUser()
     {
         self::startSession();
@@ -184,6 +224,12 @@ class Auth
         return $user;
     }
 
+    /**
+     * Überprüft den vom Benutzer eingegebenen 6-stelligen 2FA-Code (TOTP oder E-Mail-OTP).
+     *
+     * @param string $code 6-stelliger numerischer Sicherheitscode
+     * @return bool True bei Erfolg
+     */
     public static function verify2faCode($code)
     {
         self::checkRateLimit();
@@ -360,6 +406,12 @@ class Auth
         return $user['username'];
     }
 
+    /**
+     * Maskiert eine E-Mail-Adresse für die datenschutzfreundliche Anzeige im Login-Dialog (z.B. "uw***@domain.de").
+     *
+     * @param string $email
+     * @return string
+     */
     public static function maskEmail($email)
     {
         $parts = explode('@', (string)$email);
@@ -378,6 +430,13 @@ class Auth
     // =========================================================================
     // RFC 6238 TOTP (Google / Microsoft Authenticator / Bitwarden) Pure-PHP
     // =========================================================================
+
+    /**
+     * Erzeugt einen zufälligen Base32-kodierten TOTP-Geheimschlüssel (Standard: 16 Zeichen = 80 Bit).
+     *
+     * @param int $length Länge des Base32-Strings
+     * @return string
+     */
     public static function generateTotpSecret($length = 16)
     {
         $chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
@@ -388,6 +447,13 @@ class Auth
         return $secret;
     }
 
+    /**
+     * Berechnet den 6-stelligen RFC-6238-TOTP-Code für ein gegebenes 30-Sekunden-Zeitfenster.
+     *
+     * @param string   $secret    Base32-kodiertes TOTP-Secret
+     * @param int|null $timeSlice Optionaler 30-Sekunden-Zeitschlitz (Standard: aktuelle Unix-Zeit / 30)
+     * @return string 6-stelliger Code
+     */
     public static function getTotpCode($secret, $timeSlice = null)
     {
         if ($timeSlice === null) {
@@ -407,6 +473,14 @@ class Auth
         return str_pad((string)($value % $modulo), 6, '0', STR_PAD_LEFT);
     }
 
+    /**
+     * Prüft einen 6-stelligen TOTP-Code inklusive Toleranzfenster (+/- 1 Zeitschlitz = +/- 30 Sek. Uhrzeitabweichung).
+     *
+     * @param string $secret      Base32-kodiertes TOTP-Secret
+     * @param string $code        Vom Benutzer eingegebener Code
+     * @param int    $discrepancy Erlaubte Abweichung in 30-Sekunden-Schritten
+     * @return bool
+     */
     public static function verifyTotpCode($secret, $code, $discrepancy = 1)
     {
         $cleanCode = preg_replace('/[^0-9]/', '', (string)$code);
@@ -423,6 +497,12 @@ class Auth
         return false;
     }
 
+    /**
+     * Dekodiert einen Base32-String (RFC 4648) in seine rohe Binärfolge für HMAC-SHA1.
+     *
+     * @param string $secret
+     * @return string
+     */
     private static function base32Decode($secret)
     {
         $secret = strtoupper(preg_replace('/[^A-Z2-7]/', '', (string)$secret));
@@ -445,6 +525,9 @@ class Auth
         return $out;
     }
 
+    /**
+     * Beendet die aktuelle Benutzersitzung vollständig und löscht das Session-Cookie.
+     */
     public static function logout()
     {
         self::startSession();

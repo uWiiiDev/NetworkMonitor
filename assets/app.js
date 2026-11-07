@@ -1,6 +1,15 @@
 /**
- * NetworkMonitor - Frontend Application Logic
- * Unterstützt 6 Ansichten & das Ein-/Ausblenden einzelner Geräte sowie ganzer Gerätegruppen
+ * NetworkMonitor - Zentrale Frontend-Applikationslogik (assets/app.js)
+ *
+ * Steuert die gesamte interaktive Benutzeroberfläche im Browser:
+ * - Globaler Anwendungszustand ('AppState') für Scopes, Geräte, Links, Alarme und Filter
+ * - 6 Topologie-Ansichten: Freies Physik-Netz, Hierarchie (Oben->Unten / Links->Rechts),
+ *   Radial-Ansicht, Verbindungs-Matrix sowie 19-Zoll-Switch-Rack-Panel
+ * - Dynamische SVG-Geräte-Icons & automatisches Client-Clustering
+ * - Interaktive 19-Zoll-Switch-Frontplatten-Ansicht mit Live-Port-Konfiguration
+ *   (VLAN, PoE, Status, Beschreibung) per SSH/SNMP sowie Patchfeld-/Dosen-Dokumentation
+ * - Excel-ähnliche Inventartabelle mit Spaltenfiltern, Sortierung, Gruppierung & Export
+ * - Mehrsprachigkeit (DE, EN, FR, ES) und 5 Farbschemata (Midnight, Emerald, Cyberpunk, Amber, Daylight)
  */
 
 var AppState = {
@@ -47,6 +56,10 @@ var TYPE_META = {
 };
 
 // Erzeugt gestochen scharfe SVG-Icons für jeden Gerätetyp im Netzwerkplan (inkl. Switch-Stack-Darstellung)
+/**
+ * Erzeugt ein dynamisches SVG-Icon (als Data-URI) für einen Gerätetyp auf der Topologie-Karte
+ * inklusive Online-/Offline-Statusring, Scope-Farbe und optionalem Stack-Badge.
+ */
 function createDeviceSvgUri(type, status, scopeColor, stackUnitsCount) {
     var meta = TYPE_META[type] || TYPE_META.workstation;
     var bg = meta.bg;
@@ -101,6 +114,9 @@ function createDeviceSvgUri(type, status, scopeColor, stackUnitsCount) {
 }
 
 // Erzeugt ein Sammel-Icon (Cluster) für gebündelte Clients an einem Switch / Gateway
+/**
+ * Erzeugt das SVG-Knoten-Icon für einen eingeklappten Client-Cluster (mit Gesamt- und Offline-Zähler).
+ */
 function createClusterSvgUri(totalCount, offlineCount) {
     var border = (offlineCount > 0) ? '#f59e0b' : '#10b981';
     var bg = '#0f172a';
@@ -119,6 +135,9 @@ function createClusterSvgUri(totalCount, offlineCount) {
     return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
 }
 
+/**
+ * Zeigt eine kurze, automatisch ausblendende Status-/Benachrichtigungsmeldung (Toast) am unteren Bildschirmrand.
+ */
 function showToast(msg) {
     var t = document.getElementById('toast');
     t.textContent = msg;
@@ -128,21 +147,33 @@ function showToast(msg) {
     }, 4000);
 }
 
+/**
+ * Prüft, ob der angemeldete Benutzer Schreibrechte für Scans, Alarme und Access-Ports besitzt (operator, netadmin, admin).
+ */
 function userCanEdit() {
     var u = AppState.currentUser || window.CURRENT_USER || {};
     return (u.role === 'operator' || u.role === 'netadmin' || u.role === 'admin');
 }
 
+/**
+ * Prüft, ob der angemeldete Benutzer Core-Switches, Trunks und VLANs verwalten darf (netadmin, admin).
+ */
 function userIsNetExpert() {
     var u = AppState.currentUser || window.CURRENT_USER || {};
     return (u.role === 'netadmin' || u.role === 'admin');
 }
 
+/**
+ * Prüft, ob der angemeldete Benutzer voller System-Administrator ist (admin).
+ */
 function userIsAdmin() {
     var u = AppState.currentUser || window.CURRENT_USER || {};
     return (u.role === 'admin');
 }
 
+/**
+ * Normalisiert eine MAC-Adresse auf reine Großbuchstaben-Hexadezimalzeichen für fehlertolerante Vergleiche.
+ */
 function normalizeMacHex(str) {
     if (!str) return '';
     return String(str).replace(/[^0-9a-fA-F]/g, '').toLowerCase();
@@ -187,6 +218,9 @@ function getSwitchUpstreamPortsMap(sw, snmp) {
     return upMap;
 }
 
+/**
+ * Extrahiert die laufende Port-Nummer aus Bezeichnungen wie 'gi1/0/12', 'Fa0/3' oder 'Port 5'.
+ */
 function extractPortNumberFromName(pName) {
     if (!pName) return null;
     var s = String(pName).trim();
@@ -410,6 +444,9 @@ function getDeviceSwitchPortInfo(dev) {
     };
 }
 
+/**
+ * Öffnet den Dialog 'MAC- & Dosen-Suche / Port-Historie' (optional mit vorbelegtem Suchbegriff).
+ */
 function openMacFinderModal(initialQuery) {
     var modal = document.getElementById('mac-finder-modal');
     var inp = document.getElementById('mac-finder-input');
@@ -422,11 +459,18 @@ function openMacFinderModal(initialQuery) {
     setTimeout(function () { inp.focus(); }, 60);
 }
 
+/**
+ * Schließt den Dialog 'MAC- & Dosen-Suche'.
+ */
 function closeMacFinderModal() {
     var modal = document.getElementById('mac-finder-modal');
     if (modal) modal.classList.remove('open');
 }
 
+/**
+ * Durchsucht Geräte, Switch-MAC-Tabellen, historische Port-Sichtungen und Netzwerkdosen nach dem Suchbegriff
+ * und rendert die detaillierten Trefferkarten.
+ */
 function renderMacFinderResults() {
     var container = document.getElementById('mac-finder-results');
     var inp = document.getElementById('mac-finder-input');
@@ -809,6 +853,10 @@ function renderMacFinderResults() {
     container.innerHTML = html;
 }
 
+/**
+ * Lädt den gesamten aktuellen Netzwerk-, Topologie-, Alarm- und Systemzustand vom Backend ('api.php?action=topology')
+ * und aktualisiert alle Ansichten.
+ */
 function loadTopologyData(callback) {
     fetch('api.php?action=topology')
         .then(function (r) {
@@ -874,6 +922,9 @@ function loadTopologyData(callback) {
         });
 }
 
+/**
+ * Öffnet oder schließt ein Dropdown-Menü in der oberen Werkzeugleiste.
+ */
 function toggleDropdown(menuId, ev) {
     if (ev) {
         ev.stopPropagation();
@@ -887,6 +938,9 @@ function toggleDropdown(menuId, ev) {
     }
 }
 
+/**
+ * Schließt alle geöffneten Dropdown-Menüs.
+ */
 function closeAllDropdowns() {
     var menus = document.querySelectorAll('.dropdown-menu.open');
     for (var i = 0; i < menus.length; i++) {
@@ -894,6 +948,9 @@ function closeAllDropdowns() {
     }
 }
 
+/**
+ * Klappt die linke Seitenleiste (Scopes & Scan-Historie) ein oder aus.
+ */
 function toggleLeftSidebar() {
     var sb = document.getElementById('sidebar-left');
     if (sb) {
@@ -902,6 +959,9 @@ function toggleLeftSidebar() {
     }
 }
 
+/**
+ * Blendet das schwebende Geräte-Details-Fenster (Inspector) ein oder aus.
+ */
 function toggleRightSidebar(forceOpen) {
     var sb = document.getElementById('sidebar-right');
     if (!sb) return;
@@ -919,6 +979,9 @@ function toggleRightSidebar(forceOpen) {
     }
 }
 
+/**
+ * Minimiert oder maximiert das schwebende Geräte-Details-Fenster auf seine Titelleiste.
+ */
 function toggleMinimizeInspector() {
     var sb = document.getElementById('sidebar-right');
     var minBtn = document.getElementById('btn-min-inspector');
@@ -930,6 +993,9 @@ function toggleMinimizeInspector() {
     }
 }
 
+/**
+ * Macht das schwebende Geräte-Details-Fenster per Maus an seiner Kopfzeile frei verschiebbar.
+ */
 function initFloatingInspectorDrag() {
     var win = document.getElementById('sidebar-right');
     var handle = document.getElementById('inspector-drag-handle');
@@ -990,6 +1056,9 @@ function initFloatingInspectorDrag() {
     document.addEventListener('touchend', onEnd);
 }
 
+/**
+ * Rendert die Liste der IP-Scopes in der linken Seitenleiste sowie die kurze Scan-Historie.
+ */
 function renderScopesList() {
     var container = document.getElementById('scope-list');
     var selectEl = document.getElementById('toolbar-scope-select');
@@ -1040,6 +1109,9 @@ function renderScopesList() {
     if (selectEl) selectEl.innerHTML = selectHtml;
 }
 
+/**
+ * Filtert Topologie-Karte und Inventarliste auf einen bestimmten IP-Scope (oder 'all' für alle Scopes).
+ */
 function filterByScope(scopeId) {
     AppState.selectedScopeId = scopeId;
     renderScopesList();
@@ -1108,6 +1180,9 @@ function renderGroupFilterBar() {
     listEl.innerHTML = html;
 }
 
+/**
+ * Schaltet die Sichtbarkeit einer Gerätekategorie (z.B. 'workstation', 'printer') auf der Karte um.
+ */
 function toggleTypeGroup(typeKey) {
     AppState.activeTypes[typeKey] = !AppState.activeTypes[typeKey];
     updateToolbarQuickButtons();
@@ -1115,6 +1190,9 @@ function toggleTypeGroup(typeKey) {
     renderCurrentView();
 }
 
+/**
+ * Schaltet die Sichtbarkeit einer benutzerdefinierten Gerätegruppe um.
+ */
 function toggleCustomGroup(groupName) {
     if (AppState.activeCustomGroups[groupName] === undefined) {
         AppState.activeCustomGroups[groupName] = false;
@@ -1125,6 +1203,9 @@ function toggleCustomGroup(groupName) {
     renderCurrentView();
 }
 
+/**
+ * Aktualisiert den aktiven Hervorhebungszustand der Schnellfilter-Buttons ('Nur Infrastruktur', 'Client-Cluster').
+ */
 function updateToolbarQuickButtons() {
     var infraBtn = document.getElementById('btn-infra-only');
     if (infraBtn) {
@@ -1145,6 +1226,9 @@ function updateToolbarQuickButtons() {
     }
 }
 
+/**
+ * Schaltet den Modus 'Nur Infrastruktur' (zeigt nur Router, Switches, APs und Server) ein oder aus.
+ */
 function toggleInfraOnlyMode() {
     if (AppState.activeTypes.workstation !== false) {
         AppState.activeTypes.workstation = false;
@@ -1159,6 +1243,9 @@ function toggleInfraOnlyMode() {
     setTimeout(function () { fitNetworkGraph(); }, 80);
 }
 
+/**
+ * Schaltet die automatische Gruppierung von Endgeräten in übersichtliche Sammel-Cluster um.
+ */
 function toggleClusterMode() {
     AppState.clusterMode = !AppState.clusterMode;
     updateToolbarQuickButtons();
@@ -1171,6 +1258,9 @@ function toggleClusterMode() {
     setTimeout(function () { fitNetworkGraph(); }, 80);
 }
 
+/**
+ * Klappt alle Client-Cluster auf der Topologie-Karte gleichzeitig auf.
+ */
 function expandAllClusters() {
     AppState.clusterMode = true;
     for (var i = 0; i < AppState.devices.length; i++) {
@@ -1182,6 +1272,9 @@ function expandAllClusters() {
     showToast('📂 Alle Client-Cluster aufgeklappt.');
 }
 
+/**
+ * Klappt alle geöffneten Client-Cluster wieder kompakt zusammen.
+ */
 function collapseAllClusters() {
     AppState.clusterMode = true;
     AppState.expandedClusters = {};
@@ -1191,6 +1284,9 @@ function collapseAllClusters() {
     showToast('📁 Alle Clients pro Switch/Gateway zu Clustern gebündelt.');
 }
 
+/**
+ * Klappt den Client-Cluster eines einzelnen Routers/Switches/APs gezielt auf oder zu.
+ */
 function toggleSingleCluster(parentId, expandFlag) {
     if (expandFlag) {
         AppState.expandedClusters[parentId] = true;
@@ -1201,11 +1297,17 @@ function toggleSingleCluster(parentId, expandFlag) {
     setTimeout(function () { fitNetworkGraph(); }, 80);
 }
 
+/**
+ * Aktiviert oder deaktiviert das automatische Ausblenden von Textlabels beim Herauszoomen (Level-of-Detail).
+ */
 function toggleLodMode(enabled) {
     AppState.lodEnabled = !!enabled;
     applyZoomLod(true);
 }
 
+/**
+ * Aktiviert den Nachbarschafts-Fokus auf ein einzelnes Gerät (hebt nur direkt verbundene Nachbarn hervor).
+ */
 function setFocusDevice(devId) {
     AppState.focusDeviceId = devId ? parseInt(devId, 10) : null;
     renderCurrentView();
@@ -1215,6 +1317,9 @@ function setFocusDevice(devId) {
     setTimeout(function () { fitNetworkGraph(); }, 80);
 }
 
+/**
+ * Speichert die aktuellen Knoten-Positionen der Topologie-Karte dauerhaft in der Datenbank.
+ */
 function saveGraphPositions() {
     if (!AppState.network) {
         showToast('Positionen können nur in den Graph-Ansichten (1 bis 4) gespeichert werden.');
@@ -1257,6 +1362,9 @@ function saveGraphPositions() {
     });
 }
 
+/**
+ * Löscht gespeicherte Knoten-Koordinaten und ordnet den Netzwerkplan wieder automatisch an.
+ */
 function resetGraphPositions() {
     if (!confirm('Gespeicherte Knoten-Positionen zurücksetzen und Layout neu berechnen?')) return;
     fetch('api.php?action=reset_layout_positions', {
@@ -1280,6 +1388,9 @@ function resetGraphPositions() {
     });
 }
 
+/**
+ * Wechselt zwischen den Darstellungsmodi der Topologie-Ansicht (Freies Physik-Netz, Hierarchie, Matrix, Rack-Panel).
+ */
 function changeMapViewMode(mode) {
     AppState.viewMode = mode;
     renderCurrentView();
@@ -1968,6 +2079,9 @@ function renderNetworkGraph() {
     });
 }
 
+/**
+ * Zeigt beim Klick auf einen Client-Cluster alle darin enthaltenen Geräte übersichtlich im rechten Detailfenster an.
+ */
 function selectCluster(clusterId) {
     var cInfo = AppState.clusterMap[clusterId];
     if (!cInfo) return;
@@ -2192,6 +2306,9 @@ function renderRackPanelView() {
     container.innerHTML = html || '<div style="padding:24px;color:var(--text-secondary);">Keine Switches oder Gateways in dieser Auswahl.</div>';
 }
 
+/**
+ * Zentriert und skaliert den Netzwerkgraphen so, dass alle sichtbaren Knoten optimal ins Fenster passen.
+ */
 function fitNetworkGraph() {
     if (AppState.network) {
         AppState.network.fit({ animation: true });
@@ -2553,6 +2670,9 @@ function exportNetworkPng4K() {
     img.src = url;
 }
 
+/**
+ * Öffnet das Detail- & Bearbeitungsfenster (Inspector) für ein ausgewähltes Gerät.
+ */
 function selectDevice(deviceId) {
     AppState.selectedDeviceId = deviceId;
     AppState.selectedClusterId = null;
@@ -2865,6 +2985,9 @@ function selectDevice(deviceId) {
         editFormHtml;
 }
 
+/**
+ * Speichert die im Inspector bearbeiteten Gerätedaten (Name, Typ, Gruppe, Uplink, Alarm-Modus, Notizen).
+ */
 function saveDeviceChanges(devId) {
     var alertEl = document.getElementById('edit-dev-alert');
     var isCoreEl = document.getElementById('edit-dev-iscore');
@@ -2897,6 +3020,9 @@ function saveDeviceChanges(devId) {
     });
 }
 
+/**
+ * Blendet ein einzelnes Gerät auf der Topologie-Karte aus oder wieder ein.
+ */
 function toggleSingleDeviceHidden(devId, hideFlag) {
     fetch('api.php?action=toggle_device_visibility', {
         method: 'POST',
@@ -2912,6 +3038,9 @@ function toggleSingleDeviceHidden(devId, hideFlag) {
     });
 }
 
+/**
+ * Speichert das Ein-/Ausblenden einer gesamten Gerätegruppe dauerhaft in der Datenbank.
+ */
 function persistGroupVisibility(groupKind, groupVal, hideFlag) {
     fetch('api.php?action=toggle_group_visibility', {
         method: 'POST',
@@ -2932,6 +3061,9 @@ function persistGroupVisibility(groupKind, groupVal, hideFlag) {
     });
 }
 
+/**
+ * Öffnet den Dialog zur Verwaltung ein- und ausgeblendeter Geräte.
+ */
 function openVisibilityModal() {
     var modal = document.getElementById('visibility-modal');
     document.getElementById('vis-search').value = '';
@@ -2939,10 +3071,16 @@ function openVisibilityModal() {
     modal.classList.add('open');
 }
 
+/**
+ * Schließt den Sichtbarkeits-Dialog.
+ */
 function closeVisibilityModal() {
     document.getElementById('visibility-modal').classList.remove('open');
 }
 
+/**
+ * Rendert die auswählbare Checkliste aller Geräte im Sichtbarkeits-Dialog.
+ */
 function renderVisibilityChecklist() {
     var groupsBox = document.getElementById('visibility-groups-box');
     var container = document.getElementById('visibility-checklist');
@@ -2983,6 +3121,9 @@ function renderVisibilityChecklist() {
     container.innerHTML = html || '<div style="padding:16px;color:var(--text-secondary);">Keine Geräte in diesem Scope vorhanden.</div>';
 }
 
+/**
+ * Markiert oder demarkiert alle Geräte einer Kategorie innerhalb der Sichtbarkeits-Checkliste.
+ */
 function checkGroupInModal(kind, val, state) {
     var rows = document.querySelectorAll('#visibility-checklist .checklist-row');
     for (var i = 0; i < rows.length; i++) {
@@ -2995,6 +3136,9 @@ function checkGroupInModal(kind, val, state) {
     }
 }
 
+/**
+ * Filtert die Einträge in der Sichtbarkeits-Checkliste anhand des Suchfelds.
+ */
 function filterVisibilityChecklist() {
     var search = (document.getElementById('vis-search').value || '').toLowerCase();
     var rows = document.querySelectorAll('#visibility-checklist .checklist-row');
@@ -3004,6 +3148,9 @@ function filterVisibilityChecklist() {
     }
 }
 
+/**
+ * Wendet eine Schnellauswahl ('all', 'none', 'infra') auf die Sichtbarkeits-Checkliste an.
+ */
 function setChecklistPreset(preset) {
     var rows = document.querySelectorAll('#visibility-checklist .checklist-row');
     for (var i = 0; i < rows.length; i++) {
@@ -3019,6 +3166,9 @@ function setChecklistPreset(preset) {
     }
 }
 
+/**
+ * Überträgt die in der Checkliste gesetzten Sichtbarkeiten per Bulk-Request an das Backend.
+ */
 function saveVisibilityChecklist() {
     var chks = document.querySelectorAll('#visibility-checklist .vis-dev-chk');
     var hiddenIds = [];
@@ -3046,6 +3196,9 @@ function saveVisibilityChecklist() {
     });
 }
 
+/**
+ * Löscht ein Gerät nach Sicherheitsabfrage aus der Datenbank.
+ */
 function deleteDevice(devId) {
     if (!confirm('Dieses Gerät wirklich dauerhaft aus der Datenbank löschen?')) return;
     fetch('api.php?action=delete_device', {
@@ -3060,6 +3213,9 @@ function deleteDevice(devId) {
     });
 }
 
+/**
+ * Startet einen Live-Netzwerkscan für einen Scope (oder alle Scopes) und aktualisiert danach die Ansicht.
+ */
 function triggerScan(scopeId, btnElem) {
     var origText = btnElem ? btnElem.textContent : '';
     if (btnElem) {
@@ -3101,6 +3257,9 @@ function triggerScan(scopeId, btnElem) {
     });
 }
 
+/**
+ * Lädt nach Bestätigung die Demo-Topologie in die Datenbank.
+ */
 function seedDemoData() {
     fetch('api.php?action=seed_demo', { method: 'POST' })
         .then(function (r) { return r.json(); })
@@ -3115,6 +3274,9 @@ function seedDemoData() {
         });
 }
 
+/**
+ * Öffnet das Formular zum Anlegen oder Bearbeiten eines IP-Scopes.
+ */
 function openScopeModal(scopeId) {
     var modal = document.getElementById('scope-modal');
     var s = null;
@@ -3137,10 +3299,16 @@ function openScopeModal(scopeId) {
     modal.classList.add('open');
 }
 
+/**
+ * Schließt das Scope-Formular.
+ */
 function closeScopeModal() {
     document.getElementById('scope-modal').classList.remove('open');
 }
 
+/**
+ * Speichert die eingegebenen Scope-Daten (Name, CIDR, Gateway, SNMP-Community, VLAN, Farbe).
+ */
 function saveScopeForm() {
     var payload = {
         id: document.getElementById('scope-id').value,
@@ -3170,6 +3338,9 @@ function saveScopeForm() {
     });
 }
 
+/**
+ * Löscht einen IP-Scope samt allen zugehörigen Geräten nach Bestätigung.
+ */
 function deleteScope(scopeId) {
     if (!confirm('Diesen Netzwerk-Scope inklusive aller zugehörigen Geräte löschen?')) return;
     fetch('api.php?action=delete_scope', {
@@ -3227,6 +3398,9 @@ try {
     }
 } catch (e) {}
 
+/**
+ * Wandelt eine IPv4-Adresse ('192.168.178.25') in einen 32-Bit-Zahlenwert für die numerisch korrekte Sortierung um.
+ */
 function ipToNumeric(ipStr) {
     if (!ipStr) return 0;
     var p = String(ipStr).split('.');
@@ -3237,6 +3411,9 @@ function ipToNumeric(ipStr) {
            (parseInt(p[3], 10) || 0);
 }
 
+/**
+ * Liefert den reinen Textwert einer Tabellenzelle eines Geräts für die Volltextsuche und Excel-Spaltenfilterung.
+ */
 function getInventoryCellText(dev, colKey) {
     if (!dev) return '';
     if (colKey === 'visible') {
@@ -3272,6 +3449,9 @@ function getInventoryCellText(dev, colKey) {
     return String(dev[colKey] || '');
 }
 
+/**
+ * Liefert den normierten Gruppenwert einer Spalte für die Werteliste im Excel-Spaltenfilter-Popover.
+ */
 function getInventoryChecklistValue(dev, colKey) {
     if (colKey === 'switch_port') {
         var sp = dev._spInfo || getDeviceSwitchPortInfo(dev);
@@ -3285,6 +3465,9 @@ function getInventoryChecklistValue(dev, colKey) {
     return getInventoryCellText(dev, colKey).trim();
 }
 
+/**
+ * Prüft, ob auf einer bestimmten Spalte der Inventartabelle aktuell ein Excel-Filter aktiv ist.
+ */
 function isColumnFilterActive(colKey) {
     var f = InvTableState.colFilters[colKey];
     if (!f) return false;
@@ -3294,6 +3477,9 @@ function isColumnFilterActive(colKey) {
     return false;
 }
 
+/**
+ * Prüft, ob ein Gerät die gesetzten Filterregeln (Enthält, Beginnt mit, Werteliste etc.) einer Spalte erfüllt.
+ */
 function deviceMatchesColumnFilter(dev, colKey, f) {
     if (!f) return true;
     var rawText = getInventoryCellText(dev, colKey);
@@ -3337,6 +3523,9 @@ function deviceMatchesColumnFilter(dev, colKey, f) {
     return true;
 }
 
+/**
+ * Sortiert die Inventartabelle nach der angegebenen Spalte (aufsteigend / absteigend).
+ */
 function sortInventoryBy(colKey, forceDir) {
     if (forceDir) {
         InvTableState.sortKey = colKey;
@@ -3350,6 +3539,9 @@ function sortInventoryBy(colKey, forceDir) {
     renderInventoryTable();
 }
 
+/**
+ * Gruppiert die Inventartabelle nach einem Merkmal (z.B. Typ, Hersteller, Status, Switch) und berechnet Zwischensummen.
+ */
 function setInventoryGroupBy(groupField) {
     InvTableState.groupBy = groupField || '';
     InvTableState.collapsedGroups = {};
@@ -3360,6 +3552,9 @@ function setInventoryGroupBy(groupField) {
     renderInventoryTable();
 }
 
+/**
+ * Klappt eine Gruppen-Sektion in der gruppierten Inventartabelle ein oder aus.
+ */
 function toggleInventoryGroupCollapse(groupKey) {
     if (InvTableState.collapsedGroups[groupKey]) {
         delete InvTableState.collapsedGroups[groupKey];
@@ -3369,6 +3564,9 @@ function toggleInventoryGroupCollapse(groupKey) {
     renderInventoryTable();
 }
 
+/**
+ * Setzt per Klick auf ein Gruppen-Badge sofort einen Spaltenfilter auf genau diesen Wert.
+ */
 function quickFilterInventoryByValue(colKey, exactVal) {
     var map = {};
     map[exactVal === '' ? '__EMPTY__' : exactVal] = true;
@@ -3385,12 +3583,18 @@ function quickFilterInventoryByValue(colKey, exactVal) {
     renderInventoryTable();
 }
 
+/**
+ * Entfernt den aktiven Spaltenfilter einer einzelnen Spalte.
+ */
 function clearSingleColumnFilter(colKey) {
     delete InvTableState.colFilters[colKey];
     closeInvColumnFilterPopover();
     renderInventoryTable();
 }
 
+/**
+ * Setzt sämtliche Spaltenfilter, Suchbegriffe und Gruppierungen der Inventartabelle zurück.
+ */
 function clearAllInventoryFilters() {
     InvTableState.colFilters = {};
     var searchEl = document.getElementById('inv-search');
@@ -3399,12 +3603,18 @@ function clearAllInventoryFilters() {
     renderInventoryTable();
 }
 
+/**
+ * Schließt das geöffnete Excel-Spaltenfilter-Popover.
+ */
 function closeInvColumnFilterPopover() {
     InvTableState.openFilterCol = null;
     var pop = document.getElementById('inv-excel-filter-popover');
     if (pop) pop.style.display = 'none';
 }
 
+/**
+ * Öffnet das Excel-ähnliche Filter-Popover für eine Tabellenspalte inkl. Sortierung, Textregel und Werteliste.
+ */
 function openInvColumnFilterPopover(colKey, ev) {
     if (ev && ev.stopPropagation) ev.stopPropagation();
     var pop = document.getElementById('inv-excel-filter-popover');
@@ -3536,6 +3746,9 @@ function openInvColumnFilterPopover(colKey, ev) {
     }
 }
 
+/**
+ * Blendet das Texteingabefeld im Spaltenfilter aus, wenn 'Ist leer' oder 'Ist nicht leer' gewählt wurde.
+ */
 function onInvFilterOpChange() {
     var opEl = document.getElementById('inv-flt-op');
     var txtEl = document.getElementById('inv-flt-text');
@@ -3549,6 +3762,9 @@ function onInvFilterOpChange() {
     }
 }
 
+/**
+ * Wählt im Spaltenfilter-Popover alle Werte der Checkliste auf einmal aus oder ab.
+ */
 function toggleAllInvPopoverValues(checked) {
     var boxes = document.querySelectorAll('#inv-flt-val-list .inv-flt-val-item');
     for (var i = 0; i < boxes.length; i++) {
@@ -3558,6 +3774,9 @@ function toggleAllInvPopoverValues(checked) {
     }
 }
 
+/**
+ * Synchronisiert den Status der '(Alle auswählen)'-Checkbox im Spaltenfilter-Popover.
+ */
 function onInvFilterItemCheckChange() {
     var allBoxes = document.querySelectorAll('#inv-flt-val-list .inv-flt-chk');
     var allOn = true;
@@ -3571,6 +3790,9 @@ function onInvFilterItemCheckChange() {
     if (allChk) allChk.checked = allOn;
 }
 
+/**
+ * Filtert die auswählbaren Werte innerhalb des Spaltenfilter-Popovers während der Eingabe.
+ */
 function filterInvPopoverValueList(q) {
     var search = String(q || '').toLowerCase().trim();
     var items = document.querySelectorAll('#inv-flt-val-list .inv-flt-val-item');
@@ -3580,6 +3802,9 @@ function filterInvPopoverValueList(q) {
     }
 }
 
+/**
+ * Übernimmt die im Spaltenfilter-Popover eingestellten Filterkriterien und aktualisiert die Inventartabelle.
+ */
 function applyInvColumnFilter(colKey) {
     var opEl = document.getElementById('inv-flt-op');
     var txtEl = document.getElementById('inv-flt-text');
@@ -3612,6 +3837,9 @@ function applyInvColumnFilter(colKey) {
     renderInventoryTable();
 }
 
+/**
+ * Blendet eine Spalte der Inventartabelle ein oder aus und speichert die Auswahl im localStorage.
+ */
 function toggleInventoryColumn(colKey, isVisible) {
     if (isVisible) {
         delete InvTableState.hiddenCols[colKey];
@@ -3624,6 +3852,9 @@ function toggleInventoryColumn(colKey, isVisible) {
     renderInventoryTable();
 }
 
+/**
+ * Stellt die Standard-Spaltenauswahl der Inventartabelle wieder her.
+ */
 function resetInventoryColumns() {
     InvTableState.hiddenCols = {};
     try {
@@ -3632,6 +3863,9 @@ function resetInventoryColumns() {
     renderInventoryTable();
 }
 
+/**
+ * Ermittelt den Gruppenschlüssel und den Anzeigenamen eines Geräts für die gruppierte Inventaransicht.
+ */
 function getDeviceGroupInfo(dev, groupByField) {
     if (groupByField === 'custom_group') {
         var g = String(dev.custom_group || '').trim();
@@ -3665,6 +3899,9 @@ function getDeviceGroupInfo(dev, groupByField) {
     return { key: 'Alle', label: 'Alle Geräte', filterCol: '', rawVal: '' };
 }
 
+/**
+ * Erzeugt das HTML einer einzelnen Gerätezeile innerhalb der Inventartabelle.
+ */
 function renderSingleInventoryRowHtml(dev, activeCols) {
     var isVisible = parseInt(dev.is_hidden || 0, 10) === 0;
     var visChk = '<input type="checkbox" ' + (isVisible ? 'checked' : '') + (userCanEdit() ? '' : ' disabled') +
@@ -3739,6 +3976,9 @@ function renderSingleInventoryRowHtml(dev, activeCols) {
     return rowHtml;
 }
 
+/**
+ * Rendert die gesamte Geräte-Inventartabelle inklusive Excel-Spaltenfiltern, Sortierung, Gruppierung und Summenzeilen.
+ */
 function renderInventoryTable() {
     var thead = document.getElementById('inventory-thead');
     var tbody = document.getElementById('inventory-tbody');
@@ -4025,6 +4265,9 @@ function renderInventoryTable() {
     }
 }
 
+/**
+ * Bereinigt und sortiert die per SNMP ausgelesene VLAN-Liste eines Switches.
+ */
 function normalizeSwitchVlansMap(rawVlans) {
     var out = {};
     if (Array.isArray(rawVlans)) {
@@ -4052,6 +4295,9 @@ function normalizeSwitchVlansMap(rawVlans) {
     return out;
 }
 
+/**
+ * Öffnet die tabellarische SNMP-Detailansicht (Schnittstellen, MAC-Tabelle, LLDP-Nachbarn) eines Managed Switches.
+ */
 function openSnmpModal(devId) {
     var dev = null;
     for (var i = 0; i < AppState.devices.length; i++) {
@@ -4217,6 +4463,9 @@ function openSnmpModal(devId) {
     document.getElementById('snmp-modal').classList.add('open');
 }
 
+/**
+ * Schließt das tabellarische SNMP-Detailfenster.
+ */
 function closeSnmpModal() {
     document.getElementById('snmp-modal').classList.remove('open');
 }
@@ -4228,11 +4477,17 @@ var SwitchGraphicState = {
     selectedPortKey: null
 };
 
+/**
+ * Schließt die interaktive grafische 19-Zoll-Switch-Port-Ansicht.
+ */
 function closeSwitchGraphicModal() {
     var m = document.getElementById('switch-graphic-modal');
     if (m) m.classList.remove('open');
 }
 
+/**
+ * Setzt die Portanzahl (8/16/24/48) für die grafische Darstellung von Switches ohne SNMP-Daten.
+ */
 function setFallbackSwitchPorts(devId, portCount) {
     try {
         localStorage.setItem('nm_sw_ports_' + devId, String(portCount));
@@ -4676,6 +4931,9 @@ function buildRealSwitchGraphicModel(dev) {
     };
 }
 
+/**
+ * Öffnet die interaktive grafische 19-Zoll-Switch-Frontplatten-Ansicht inkl. Port-Status, PoE, VLANs und Dosen-Zuordnung.
+ */
 function openSwitchGraphicModal(devId, isDemoPreview, keepSelectedPortName) {
     var modal = document.getElementById('switch-graphic-modal');
     var titleEl = document.getElementById('switch-graphic-title');
@@ -5152,6 +5410,9 @@ function openSwitchGraphicModal(devId, isDemoPreview, keepSelectedPortName) {
     }
 }
 
+/**
+ * Schaltet das Layout der Switch-Port-Nummerierung zwischen Standard (Ungerade oben / Gerade unten) und Linear um.
+ */
 function setSwitchPortNumberingMode(devId, mode) {
     try {
         localStorage.setItem('nm_sw_numbering_' + (devId || 'demo'), mode);
@@ -5163,6 +5424,9 @@ function setSwitchPortNumberingMode(devId, mode) {
     openSwitchGraphicModal(devId, SwitchGraphicState.isDemo, curPortName);
 }
 
+/**
+ * Rendert eine Reihe physischer RJ45-/SFP-Buchsen für die grafische Switch-Frontplatte.
+ */
 function renderSwitchPortRowHtml(portList, rowPosition) {
     var out = '';
     for (var i = 0; i < portList.length; i++) {
@@ -5267,6 +5531,9 @@ function renderSwitchPortRowHtml(portList, rowPosition) {
     return out;
 }
 
+/**
+ * Zeigt beim Klick auf eine Switch-Buchse alle Port-Details, angeschlossene Geräte, Netzwerkdose und das Konfigurationsformular.
+ */
 function selectSwitchGraphicPort(portKey) {
     var p = SwitchGraphicState.portsByKey[portKey];
     var box = document.getElementById('switch-graphic-port-inspector');
@@ -5533,12 +5800,18 @@ function selectSwitchGraphicPort(portKey) {
         sshConfigHtml;
 }
 
+/**
+ * Klappt die Gesamtübersicht aller Netzwerkdosen-/Patchfeld-Zuordnungen im Switch-Dialog auf oder zu.
+ */
 function toggleSwitchOutletsBulkPanel() {
     var p = document.getElementById('sw-outlets-bulk-panel');
     if (!p) return;
     p.style.display = (p.style.display === 'none' || !p.style.display) ? 'block' : 'none';
 }
 
+/**
+ * Speichert die Netzwerkdosen-, Patchfeld- und Raum-Zuordnung für den aktuell ausgewählten Switch-Port.
+ */
 function saveSingleSwitchPortOutlet(portKey) {
     var p = SwitchGraphicState.portsByKey[portKey];
     var devId = SwitchGraphicState.currentDevId;
@@ -5585,6 +5858,9 @@ function saveSingleSwitchPortOutlet(portKey) {
     });
 }
 
+/**
+ * Speichert alle in der tabellarischen Gesamtübersicht eingetragenen Dosen-Zuordnungen eines Switches auf einmal.
+ */
 function saveSwitchOutletsBulk(devId) {
     var rows = document.querySelectorAll('#sw-outlets-bulk-panel .sw-bulk-outlet-row');
     var entries = [];
@@ -5633,6 +5909,9 @@ function saveSwitchOutletsBulk(devId) {
     });
 }
 
+/**
+ * Exportiert den gesamten Patchfeld-/Dosen-Belegungsplan eines Switches als CSV-Datei für Excel.
+ */
 function exportSwitchOutletsCsv(devId) {
     var model = SwitchGraphicState.currentModel;
     if (!model || !model.units) return;
@@ -5669,6 +5948,9 @@ function exportSwitchOutletsCsv(devId) {
     showToast('📥 Patchfeld- & Dosen-Liste als CSV exportiert.');
 }
 
+/**
+ * Importiert Dosen- und Patchfeld-Zuordnungen aus einer CSV-Liste oder per Copy & Paste.
+ */
 function importSwitchOutletsCsvPrompt(devId) {
     var fileInp = document.createElement('input');
     fileInp.type = 'file';
@@ -5736,12 +6018,18 @@ function importSwitchOutletsCsvPrompt(devId) {
     fileInp.click();
 }
 
+/**
+ * Blendet das Formular für die SSH-/SNMP-Zugangsdaten des Switches ein oder aus.
+ */
 function toggleSwitchCredsForm() {
     var box = document.getElementById('sw-creds-form-box');
     if (!box) return;
     box.style.display = (box.style.display === 'none') ? 'block' : 'none';
 }
 
+/**
+ * Passt die VLAN-Eingabefelder im Port-Konfigurationsformular an den gewählten Modus (Access vs. Trunk) an.
+ */
 function onSwitchPortModeChange() {
     var modeSel = document.getElementById('sw-port-mode-select');
     var trWrap = document.getElementById('sw-trunk-allowed-wrap');
@@ -5752,6 +6040,9 @@ function onSwitchPortModeChange() {
     if (vlanLbl) vlanLbl.textContent = isTrunk ? 'Native VLAN (Ungetaggt auf Trunk)' : 'Access-VLAN (PVID)';
 }
 
+/**
+ * Zeigt bei Auswahl von 'Neues VLAN anlegen' die Zusatzfelder für VLAN-ID und VLAN-Name an.
+ */
 function onSwitchVlanSelectChange() {
     var sel = document.getElementById('sw-port-vlan-select');
     var idWrap = document.getElementById('sw-new-vlan-id-wrap');
@@ -5762,6 +6053,9 @@ function onSwitchVlanSelectChange() {
     nameWrap.style.display = isNew ? 'block' : 'none';
 }
 
+/**
+ * Speichert die SSH-/SNMP-Zugangsdaten eines Switches und führt optional sofort einen Verbindungstest durch.
+ */
 function saveSwitchCredentials(devId, testConn) {
     var profEl = document.getElementById('sw-cred-cli-profile');
     var userEl = document.getElementById('sw-cred-ssh-user');
@@ -5860,6 +6154,9 @@ function saveSwitchCredentials(devId, testConn) {
     });
 }
 
+/**
+ * Überträgt die geänderten Port-Einstellungen (VLAN, Status, Beschreibung, PoE, Speed) live per SSH/SNMP auf den Switch.
+ */
 function applySwitchPortConfig(portKey) {
     var p = SwitchGraphicState.portsByKey[portKey];
     if (!p || !SwitchGraphicState.currentDevId) return;
@@ -5971,6 +6268,9 @@ function applySwitchPortConfig(portKey) {
     });
 }
 
+/**
+ * Exportiert die aktuell gefilterte Inventarliste als UTF-8-CSV-Datei für Excel.
+ */
 function exportInventoryCsv() {
     var list = (InvTableState.lastFilteredRows && InvTableState.lastFilteredRows.length > 0) ? InvTableState.lastFilteredRows : AppState.devices;
     var rows = [['Status', 'IP', 'Name', 'Gruppe', 'Typ', 'Switch_Port_Dose', 'Betriebssystem', 'Dienste_Banner_TTL', 'MAC', 'Hersteller', 'Ports', 'SNMP_Name', 'Scope']];
@@ -6007,6 +6307,9 @@ function exportInventoryCsv() {
     link.click();
 }
 
+/**
+ * Berechnet die Dauer eines Scan-Durchlaufs aus Start- und Endzeitpunkt.
+ */
 function formatScanLogDuration(logEntry) {
     if (!logEntry) return '-';
     var sum = String(logEntry.summary || '');
@@ -6025,6 +6328,9 @@ function formatScanLogDuration(logEntry) {
     return '-';
 }
 
+/**
+ * Rendert den Reiter 'System & Cronjob' inkl. Datenbankstatus, Version und vollständiger Scan-Protokoll-Tabelle.
+ */
 function renderSystemInfo() {
     var phpEl = document.getElementById('sys-php');
     if (!phpEl) return;
@@ -6082,6 +6388,9 @@ function renderSystemInfo() {
     logBody.innerHTML = lhtml || '<tr><td colspan="6">Noch keine Scans durchgeführt.</td></tr>';
 }
 
+/**
+ * Prüft im Admin-Bereich per API-Aufruf, ob auf GitHub eine neuere Programmversion vorliegt.
+ */
 function checkGithubUpdate() {
     var box = document.getElementById('adm-update-status-box');
     var btn = document.getElementById('btn-check-gh-update');
@@ -6154,6 +6463,9 @@ function checkGithubUpdate() {
     });
 }
 
+/**
+ * Startet nach Bestätigung das automatische Live-Update der Anwendung von GitHub.
+ */
 function runGithubUpdate() {
     if (!confirm('Möchtest du NetworkMonitor jetzt direkt über GitHub (origin/main) auf die neueste Version aktualisieren?\n\nDeine lokalen Datenbanken und Einstellungen in data/ bleiben vollständig erhalten.')) {
         return;
@@ -6209,6 +6521,9 @@ function runGithubUpdate() {
     });
 }
 
+/**
+ * Wechselt zwischen den Hauptreitern der Anwendung (Topologie-Karte, Inventarliste, System & Cronjob, Admin).
+ */
 function switchTab(tabName, btn) {
     var tabs = document.querySelectorAll('.nav-tab');
     for (var i = 0; i < tabs.length; i++) tabs[i].classList.remove('active');
@@ -6373,6 +6688,9 @@ function renderAdminSection() {
     }
 }
 
+/**
+ * Löscht alle gescannten Geräte eines Scopes (oder aller Scopes), ohne die Scope-Definition selbst zu löschen.
+ */
 function adminClearScopeScans(scopeId, scopeLabel) {
     var msg = (scopeId === 'all')
         ? 'Möchtest du wirklich ALLE gescannten Geräte, Verbindungen und Scan-Protokolle aus allen Scopes leeren?\n(Die angelegten Netzwerk-Scopes selbst bleiben erhalten.)'
@@ -6396,6 +6714,9 @@ function adminClearScopeScans(scopeId, scopeLabel) {
     });
 }
 
+/**
+ * Löscht einen kompletten Scope inklusive aller Daten aus dem Admin-Bereich heraus.
+ */
 function adminDeleteScopeFull(scopeId, scopeLabel) {
     if (!confirm('Möchtest du den kompletten Netzwerk-Scope "' + scopeLabel + '" inklusive ALLER gescannten Geräte, Verbindungen und Scan-Protokolle endgültig löschen?')) {
         return;
@@ -6420,6 +6741,9 @@ function adminDeleteScopeFull(scopeId, scopeLabel) {
     });
 }
 
+/**
+ * Setzt nach zweifacher Sicherheitsabfrage sämtliche Scopes und Gerätedaten der Datenbank zurück.
+ */
 function adminDeleteAllScopes() {
     if (!confirm('ACHTUNG: Möchtest du wirklich ALLE Netzwerk-Scopes samt sämtlicher Geräte, Verbindungen und Scan-Protokolle vollständig aus der Datenbank löschen?')) {
         return;
@@ -6442,6 +6766,9 @@ function adminDeleteAllScopes() {
     });
 }
 
+/**
+ * Leert die Tabelle der historischen Scan-Protokolle.
+ */
 function adminClearScanLogs() {
     if (!confirm('Alle Einträge im Scan-Protokoll löschen?')) return;
     fetch('api.php?action=admin_clear_scan_logs', {
@@ -6458,6 +6785,9 @@ function adminClearScanLogs() {
     });
 }
 
+/**
+ * Testet die eingegebenen MySQL-/MariaDB-Zugangsdaten im Admin-Bereich.
+ */
 function testMysqlConnection() {
     var box = document.getElementById('adm-db-test-result');
     box.style.display = 'block';
@@ -6492,6 +6822,9 @@ function testMysqlConnection() {
     });
 }
 
+/**
+ * Speichert die Datenbank- und Scanner-Performance-Einstellungen im Admin-Bereich.
+ */
 function saveAdminDbAndScannerConfig() {
     var retEl = document.getElementById('adm-sc-retention-days');
     var staleEl = document.getElementById('adm-sc-stale-days');
@@ -6527,6 +6860,9 @@ function saveAdminDbAndScannerConfig() {
     });
 }
 
+/**
+ * Speichert das automatische Hintergrund-Scan-Intervall sowie die Aufbewahrungsfristen (Retention).
+ */
 function saveAdminCronAndRetention() {
     var cronIntEl = document.getElementById('adm-cron-interval');
     var retEl = document.getElementById('adm-sc-retention-days');
@@ -6556,6 +6892,9 @@ function saveAdminCronAndRetention() {
     });
 }
 
+/**
+ * Stößt die Datenbank-Bereinigung alter Protokolle und Offline-Geräte sofort manuell an.
+ */
 function runManualRetentionCleanup() {
     var retEl = document.getElementById('adm-sc-retention-days');
     var staleEl = document.getElementById('adm-sc-stale-days');
@@ -6582,6 +6921,9 @@ function runManualRetentionCleanup() {
     });
 }
 
+/**
+ * Kopiert einen Textwert (z.B. IP- oder MAC-Adresse) in die Zwischenablage und zeigt eine kurze Bestätigung.
+ */
 function copyToClipboard(text, label) {
     var str = (text === null || text === undefined) ? '' : String(text).trim();
     if (!str || str === '-') {
@@ -6602,6 +6944,9 @@ function copyToClipboard(text, label) {
     }
 }
 
+/**
+ * Fallback-Methode zum Kopieren in die Zwischenablage für Browser ohne navigator.clipboard-Unterstützung.
+ */
 function fallbackCopyText(str, lbl, preview) {
     try {
         var ta = document.createElement('textarea');
@@ -6621,6 +6966,9 @@ function fallbackCopyText(str, lbl, preview) {
     }
 }
 
+/**
+ * Erzeugt ein anklickbares HTML-Element, das seinen Wert beim Klick sofort in die Zwischenablage kopiert.
+ */
 function renderCopyableValue(val, label, extraStyle) {
     var str = (val === null || val === undefined) ? '' : String(val).trim();
     if (!str || str === '-' || str === 'Keine Standard-TCP-Ports offen') {
@@ -6636,6 +6984,9 @@ function renderCopyableValue(val, label, extraStyle) {
     '</div>';
 }
 
+/**
+ * Kopiert den kompletten Steckbrief des aktuell ausgewählten Geräts formatiert in die Zwischenablage.
+ */
 function copySelectedDeviceDetails() {
     if (!AppState.selectedDeviceId) {
         showToast('Kein Gerät ausgewählt.');
@@ -6674,6 +7025,9 @@ function copySelectedDeviceDetails() {
     copyToClipboard(summaryLines.join('\n'), 'Alle Gerätedaten (' + displayName + ')');
 }
 
+/**
+ * Speichert die SMTP-Server-Einstellungen für Alarm- und 2FA-Benachrichtigungen.
+ */
 function saveAdminSmtpConfig() {
     var payload = {
         enabled: document.getElementById('adm-smtp-enabled').checked,
@@ -6703,6 +7057,9 @@ function saveAdminSmtpConfig() {
     });
 }
 
+/**
+ * Versendet eine Test-E-Mail über die eingegebenen SMTP-Zugangsdaten.
+ */
 function testSmtpConfig() {
     var box = document.getElementById('adm-smtp-test-result');
     box.style.display = 'block';
@@ -6745,6 +7102,9 @@ function testSmtpConfig() {
     });
 }
 
+/**
+ * Aktualisiert den roten Zähler-Badge für unquittierte Alarme in der oberen Navigationsleiste.
+ */
 function updateTopbarAlertsBadge() {
     var badge = document.getElementById('topbar-alert-badge');
     var btn = document.getElementById('btn-topbar-alerts');
@@ -6768,11 +7128,17 @@ function updateTopbarAlertsBadge() {
     AppState.lastToastAlertCount = cnt;
 }
 
+/**
+ * Öffnet das Alarm-Center (Statuswechsel, Sicherheits-Anomalien & MAC-Überwachungsliste).
+ */
 function openAlertsModal() {
     renderAlertsModal();
     document.getElementById('alerts-modal').classList.add('open');
 }
 
+/**
+ * Öffnet das Alarm-Center und trägt eine MAC-Adresse direkt in das Formular der MAC-Überwachungsliste ein.
+ */
 function openAlertsModalWithWatchMac(prefillMac) {
     renderAlertsModal();
     document.getElementById('alerts-modal').classList.add('open');
@@ -6786,6 +7152,9 @@ function openAlertsModalWithWatchMac(prefillMac) {
     }, 60);
 }
 
+/**
+ * Speichert eine zu überwachende MAC-Adresse auf der MAC-Fahndungsliste.
+ */
 function saveMacWatchlistItem() {
     var macEl = document.getElementById('watch-mac-input');
     var lblEl = document.getElementById('watch-mac-label');
@@ -6816,6 +7185,9 @@ function saveMacWatchlistItem() {
     });
 }
 
+/**
+ * Löscht einen Eintrag von der MAC-Überwachungsliste.
+ */
 function deleteMacWatchlistItem(id) {
     fetch('api.php?action=delete_mac_watchlist', {
         method: 'POST',
@@ -6833,10 +7205,16 @@ function deleteMacWatchlistItem(id) {
     });
 }
 
+/**
+ * Schließt das Alarm-Center.
+ */
 function closeAlertsModal() {
     document.getElementById('alerts-modal').classList.remove('open');
 }
 
+/**
+ * Wechselt aus dem Alarm-Center direkt zu den Schwellenwert-Einstellungen des Anomalie-Wächters im Admin-Reiter.
+ */
 function jumpToAdminAnomalySettings() {
     closeAlertsModal();
     var admBtn = document.getElementById('nav-tab-admin');
@@ -6855,6 +7233,9 @@ function jumpToAdminAnomalySettings() {
     }, 80);
 }
 
+/**
+ * Rendert die MAC-Überwachungsliste sowie die Tabelle aller Alarme inklusive Kommentar-Quittierungsfunktion.
+ */
 function renderAlertsModal() {
     var body = document.getElementById('alerts-modal-body');
     if (!body) return;
@@ -7061,6 +7442,9 @@ function renderAlertsModal() {
     body.innerHTML = html;
 }
 
+/**
+ * Blendet das Eingabefeld zum nachträglichen Bearbeiten eines Quittierungs-Kommentars ein oder aus.
+ */
 function toggleAlertCommentBox(alertId) {
     var box = document.getElementById('alert-ack-box-' + alertId);
     var inp = document.getElementById('alert-ack-inp-' + alertId);
@@ -7071,6 +7455,9 @@ function toggleAlertCommentBox(alertId) {
     }
 }
 
+/**
+ * Quittiert einen einzelnen Alarm inklusive optionalem Techniker-Kommentar.
+ */
 function ackSingleAlert(alertId) {
     if (!userCanEdit()) {
         showToast('Keine Berechtigung: Nur Operatoren, Netzwerkexperten und Administratoren dürfen Alarme quittieren.');
@@ -7096,6 +7483,9 @@ function ackSingleAlert(alertId) {
     });
 }
 
+/**
+ * Speichert die Schwellenwerte für den automatischen Anomalie-Wächter.
+ */
 function saveAdminAnomalyConfig() {
     var payload = {
         anomaly_arp_spoofing: document.getElementById('adm-anom-arp') && document.getElementById('adm-anom-arp').checked ? 1 : 0,
@@ -7120,6 +7510,9 @@ function saveAdminAnomalyConfig() {
     });
 }
 
+/**
+ * Quittiert alle offenen Alarme gleichzeitig mit einem optionalen Sammel-Kommentar.
+ */
 function ackAllAlerts() {
     if (!userCanEdit()) {
         showToast('Keine Berechtigung: Nur Operatoren, Netzwerkexperten und Administratoren dürfen Alarme quittieren.');
@@ -7147,6 +7540,9 @@ function ackAllAlerts() {
     });
 }
 
+/**
+ * Löscht die gesamte Alarm-Historie nach Rückfrage.
+ */
 function clearAllAlerts() {
     if (!confirm('Gesamte Alarm-Historie wirklich löschen?')) return;
     fetch('api.php?action=clear_alerts', {
@@ -7165,6 +7561,9 @@ function clearAllAlerts() {
     });
 }
 
+/**
+ * Blendet das Feld für den Base32-Authenticator-Schlüssel ein, sobald 'totp' als 2FA-Methode gewählt wird.
+ */
 function toggleTotpBox(prefix) {
     var sel = document.getElementById(prefix + '-2fa-mode');
     var box = document.getElementById(prefix + '-totp-box');
@@ -7180,6 +7579,9 @@ function toggleTotpBox(prefix) {
     }
 }
 
+/**
+ * Fordert vom Server ein neues zufälliges TOTP-Secret an und trägt es in das Formularfeld ein.
+ */
 function requestNewTotpSecret(inputId) {
     fetch('api.php?action=generate_totp_secret', {
         method: 'POST',
@@ -7195,6 +7597,9 @@ function requestNewTotpSecret(inputId) {
     });
 }
 
+/**
+ * Öffnet den Dialog zum Anlegen oder Bearbeiten eines Benutzerkontos im Admin-Bereich.
+ */
 function openUserModal(userId) {
     var modal = document.getElementById('user-modal');
     var u = null;
@@ -7228,10 +7633,16 @@ function openUserModal(userId) {
     modal.classList.add('open');
 }
 
+/**
+ * Schließt den Benutzer-Dialog.
+ */
 function closeUserModal() {
     document.getElementById('user-modal').classList.remove('open');
 }
 
+/**
+ * Speichert ein neues oder bearbeitetes Benutzerkonto (inkl. Rolle, E-Mail, Alarm-Empfang und 2FA-Modus).
+ */
 function saveUserForm() {
     var payload = {
         id: document.getElementById('usr-id').value,
@@ -7262,6 +7673,9 @@ function saveUserForm() {
     });
 }
 
+/**
+ * Löscht ein Benutzerkonto nach Sicherheitsabfrage.
+ */
 function deleteUser(userId) {
     if (!confirm('Diesen Benutzer wirklich löschen?')) return;
     fetch('api.php?action=delete_user', {
@@ -7280,6 +7694,9 @@ function deleteUser(userId) {
     });
 }
 
+/**
+ * Öffnet den Dialog 'Mein Konto: Passwort, E-Mail & 2FA' für den aktuell angemeldeten Benutzer.
+ */
 function openPasswordModal() {
     var cu = AppState.currentUser || {};
     if (document.getElementById('own-email')) {
@@ -7299,10 +7716,16 @@ function openPasswordModal() {
     document.getElementById('password-modal').classList.add('open');
 }
 
+/**
+ * Schließt den 'Mein Konto'-Dialog.
+ */
 function closePasswordModal() {
     document.getElementById('password-modal').classList.remove('open');
 }
 
+/**
+ * Speichert die persönlichen Kontoeinstellungen (E-Mail, Alarm-Benachrichtigung, 2FA und optional neues Passwort).
+ */
 function saveOwnPassword() {
     var payload = {
         email: document.getElementById('own-email') ? document.getElementById('own-email').value.trim() : '',
@@ -7331,6 +7754,9 @@ function saveOwnPassword() {
     });
 }
 
+/**
+ * Maskiert HTML-Sonderzeichen (&, <, >, ", ') zum sicheren Schutz vor Cross-Site-Scripting (XSS).
+ */
 function escapeHtml(str) {
     if (str === null || str === undefined) return '';
     return String(str)
@@ -7624,6 +8050,9 @@ var I18N_DICT = {
     }
 };
 
+/**
+ * Wechselt das aktive Farbschema (Midnight, Emerald, Cyberpunk, Amber, Daylight) und speichert es im localStorage.
+ */
 function setAppTheme(themeName, silent) {
     var t = themeName || 'midnight';
     document.documentElement.setAttribute('data-theme', t);
@@ -7642,6 +8071,9 @@ function setAppTheme(themeName, silent) {
     }
 }
 
+/**
+ * Wechselt die Oberflächensprache (DE, EN, FR, ES), übersetzt alle UI-Elemente und speichert die Wahl im localStorage.
+ */
 function setAppLanguage(langCode, silent) {
     var lang = (I18N_DICT[langCode]) ? langCode : 'de';
     AppState.lang = lang;

@@ -13,6 +13,9 @@ class SnmpClient
     private $community;
     private $timeoutMs;
 
+        /**
+     * Initialisiert den SNMP-Client für eine Ziel-IP, Community und Timeout (in Millisekunden).
+     */
     public function __construct($ip, $community = 'public', $timeoutMs = 800)
     {
         $this->ip = $ip;
@@ -106,6 +109,9 @@ class SnmpClient
         return $responsiveIps;
     }
 
+        /**
+     * Erzeugt ein binäres ASN.1/BER-kodiertes SNMPv2c GET-Request-Paket für eine einzelne OID.
+     */
     public function buildSnmpGetPacket($oidStr)
     {
         $reqId = mt_rand(100, 30000);
@@ -622,6 +628,9 @@ class SnmpClient
         );
     }
 
+        /**
+     * Formatiert SNMP-TimeTicks (Hundertstelsekunden) in einen lesbaren Laufzeit-String (Tage/Stunden/Minuten).
+     */
     private function formatTimeticks($raw)
     {
         if ($raw === null || $raw === '') {
@@ -641,6 +650,9 @@ class SnmpClient
         return $this->cleanSnmpValue($raw);
     }
 
+        /**
+     * Bereinigt Rückgabewerte der PHP-SNMP-Erweiterung von Typ-Präfixen (z.B. 'STRING:', 'INTEGER:', 'Hex-STRING:').
+     */
     private function cleanSnmpValue($val)
     {
         if ($val === null || $val === false) {
@@ -651,6 +663,9 @@ class SnmpClient
         return trim($val, " \t\n\r\0\x0B\"'");
     }
 
+        /**
+     * Fragt eine einzelne SNMP-OID ab (nutzt php-snmp falls installiert, sonst den integrierten UDP-ASN.1-Socket-Fallback).
+     */
     public function getOid($oid)
     {
         // 1. PHP SNMP Extension
@@ -674,6 +689,9 @@ class SnmpClient
         return null;
     }
 
+        /**
+     * Führt einen SNMP-Walk unterhalb einer Basis-OID durch und liefert ein Array [oid => wert].
+     */
     public function walkOid($baseOid, $maxRows = 100)
     {
         $baseOid = ltrim($baseOid, '.');
@@ -756,6 +774,9 @@ class SnmpClient
         return $this->decodeSnmpResponse($resp);
     }
 
+        /**
+     * Kodiert einen Datentyp samt Längenfeld nach ASN.1 Basic Encoding Rules (BER).
+     */
     private function berEncode($tag, $data)
     {
         $len = strlen($data);
@@ -769,6 +790,9 @@ class SnmpClient
         return chr($tag) . $lenBytes . $data;
     }
 
+        /**
+     * Kodiert eine Ganzzahl als ASN.1 INTEGER.
+     */
     private function encodeInteger($val)
     {
         $val = (int)$val;
@@ -787,6 +811,9 @@ class SnmpClient
         return $this->berEncode(0x02, $bin);
     }
 
+        /**
+     * Kodiert eine numerische OID-Zeichenkette (z.B. '1.3.6.1.2.1.1.1.0') in das binäre ASN.1-OID-Format.
+     */
     private function encodeOid($oidStr)
     {
         $parts = array_map('intval', explode('.', ltrim($oidStr, '.')));
@@ -814,6 +841,9 @@ class SnmpClient
         return $this->berEncode(0x06, $bin);
     }
 
+        /**
+     * Dekodiert ein binäres SNMPv2c-Antwortpaket und extrahiert die erste enthaltene OID samt Wert.
+     */
     private function decodeSnmpResponse($bin)
     {
         $pos = 0;
@@ -862,6 +892,9 @@ class SnmpClient
         return array('oid' => $oidStr, 'value' => $valStr);
     }
 
+        /**
+     * Liest das nächste ASN.1/BER-Element (Tag, Länge, Nutzdaten) ab der aktuellen Byte-Position.
+     */
     private function berReadElement($bin, &$pos)
     {
         $total = strlen($bin);
@@ -890,6 +923,9 @@ class SnmpClient
         return array('tag' => $tag, 'value' => $val);
     }
 
+        /**
+     * Dekodiert binäre ASN.1-OID-Bytes zurück in die Punkt-Notation (z.B. '1.3.6.1.2.1...').
+     */
     private function decodeOid($bin)
     {
         if (strlen($bin) === 0) {
@@ -910,6 +946,9 @@ class SnmpClient
         return implode('.', $parts);
     }
 
+        /**
+     * Konvertiert den Rohwert eines ASN.1-Elements anhand seines Tags in einen PHP-String oder Integer.
+     */
     private function decodeValue($tag, $val)
     {
         if ($tag === 0x04) { // OCTET STRING
