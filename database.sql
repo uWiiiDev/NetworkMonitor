@@ -54,6 +54,8 @@ CREATE TABLE IF NOT EXISTS `devices` (
   `is_hidden` TINYINT(1) NOT NULL DEFAULT 0,
   `alert_mode` VARCHAR(20) NOT NULL DEFAULT 'none',
   `last_alert_state` VARCHAR(20) DEFAULT NULL,
+  `pos_x` INT(11) DEFAULT NULL,
+  `pos_y` INT(11) DEFAULT NULL,
   `first_seen` DATETIME NOT NULL,
   `last_seen` DATETIME NOT NULL,
   PRIMARY KEY (`id`),

@@ -24,6 +24,13 @@ var AppState = {
         workstation: true
     },
     activeCustomGroups: {}, // name => boolean
+    clusterMode: false,
+    autoClusterApplied: false,
+    expandedClusters: {}, // parentId => boolean
+    clusterMap: {},       // 'cluster_<pid>' => { parentId, parentDev, devices }
+    focusDeviceId: null,  // ID eines isolierten Geräts (Fokus-Modus)
+    lodEnabled: true,     // Zoom-abhängige Details (Level-of-Detail)
+    lodLabelsHidden: false,
     network: null,
     nodesDataSet: null,
     edgesDataSet: null
@@ -82,6 +89,25 @@ function createDeviceSvgUri(type, status, scopeColor) {
     return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
 }
 
+// Erzeugt ein Sammel-Icon (Cluster) für gebündelte Clients an einem Switch / Gateway
+function createClusterSvgUri(totalCount, offlineCount) {
+    var border = (offlineCount > 0) ? '#f59e0b' : '#10b981';
+    var bg = '#0f172a';
+    var badgeBg = (offlineCount > 0) ? '#d97706' : '#059669';
+
+    var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="68" height="68" viewBox="0 0 68 68">' +
+        '<rect x="10" y="6" width="48" height="48" rx="12" fill="#1e293b" stroke="#475569" stroke-width="2"/>' +
+        '<rect x="6" y="10" width="48" height="48" rx="12" fill="' + bg + '" stroke="' + border + '" stroke-width="3.2"/>' +
+        '<rect x="15" y="20" width="22" height="15" rx="2" fill="none" stroke="#93c5fd" stroke-width="2"/>' +
+        '<rect x="22" y="26" width="22" height="15" rx="2" fill="#0f172a" stroke="#f8fafc" stroke-width="2.2"/>' +
+        '<path d="M27 45h12M33 41v4" stroke="#f8fafc" stroke-width="2" stroke-linecap="round"/>' +
+        '<rect x="36" y="4" width="28" height="20" rx="10" fill="' + badgeBg + '" stroke="#0f172a" stroke-width="2"/>' +
+        '<text x="50" y="18" fill="#ffffff" font-family="sans-serif" font-size="11" font-weight="bold" text-anchor="middle">' + totalCount + '</text>' +
+        '</svg>';
+
+    return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+}
+
 function showToast(msg) {
     var t = document.getElementById('toast');
     t.textContent = msg;
@@ -134,6 +160,13 @@ function loadTopologyData(callback) {
                     AppState.activeCustomGroups[cg] = true;
                 }
             }
+
+            // Bei großen Netzwerken (>= 25 Geräte) beim ersten Laden automatisch Client-Clustering aktivieren
+            if (!AppState.autoClusterApplied && AppState.devices.length >= 25) {
+                AppState.clusterMode = true;
+                AppState.autoClusterApplied = true;
+            }
+            updateToolbarQuickButtons();
 
             renderScopesList();
             renderGroupFilterBar();
@@ -315,6 +348,7 @@ function renderGroupFilterBar() {
 
 function toggleTypeGroup(typeKey) {
     AppState.activeTypes[typeKey] = !AppState.activeTypes[typeKey];
+    updateToolbarQuickButtons();
     renderGroupFilterBar();
     renderCurrentView();
 }
@@ -329,18 +363,215 @@ function toggleCustomGroup(groupName) {
     renderCurrentView();
 }
 
+function updateToolbarQuickButtons() {
+    var infraBtn = document.getElementById('btn-infra-only');
+    if (infraBtn) {
+        var isInfraOnly = (AppState.activeTypes.workstation === false);
+        infraBtn.style.background = isInfraOnly ? 'rgba(59, 130, 246, 0.28)' : '';
+        infraBtn.style.borderColor = isInfraOnly ? '#3b82f6' : '';
+        infraBtn.style.color = isInfraOnly ? '#93c5fd' : '';
+        infraBtn.textContent = isInfraOnly ? '🏢 Nur Infrastruktur (Aktiv)' : '🏢 Nur Infrastruktur';
+    }
+
+    var clusterBtn = document.getElementById('btn-cluster-mode');
+    if (clusterBtn) {
+        var isClust = !!AppState.clusterMode;
+        clusterBtn.style.background = isClust ? 'rgba(16, 185, 129, 0.24)' : '';
+        clusterBtn.style.borderColor = isClust ? '#10b981' : '';
+        clusterBtn.style.color = isClust ? '#6ee7b7' : '';
+        clusterBtn.textContent = isClust ? '📦 Cluster (Aktiv)' : '📦 Cluster';
+    }
+}
+
+function toggleInfraOnlyMode() {
+    if (AppState.activeTypes.workstation !== false) {
+        AppState.activeTypes.workstation = false;
+        showToast('🏢 Infrastruktur-Fokus aktiv: Normale Clients ausgeblendet (Router, Switches, Server, APs & Drucker sichtbar).');
+    } else {
+        AppState.activeTypes.workstation = true;
+        showToast('💻 Alle Geräte inklusive Workstations/Clients wieder eingeblendet.');
+    }
+    updateToolbarQuickButtons();
+    renderGroupFilterBar();
+    renderCurrentView();
+    setTimeout(function () { fitNetworkGraph(); }, 80);
+}
+
+function toggleClusterMode() {
+    AppState.clusterMode = !AppState.clusterMode;
+    updateToolbarQuickButtons();
+    if (AppState.clusterMode) {
+        showToast('📦 Client-Clustering aktiv: Endgeräte werden pro Switch/Gateway gebündelt (Doppelklick klappt Cluster auf).');
+    } else {
+        showToast('📦 Client-Clustering deaktiviert: Alle Endgeräte werden einzeln dargestellt.');
+    }
+    renderCurrentView();
+    setTimeout(function () { fitNetworkGraph(); }, 80);
+}
+
+function expandAllClusters() {
+    AppState.clusterMode = true;
+    for (var i = 0; i < AppState.devices.length; i++) {
+        AppState.expandedClusters[AppState.devices[i].id] = true;
+    }
+    updateToolbarQuickButtons();
+    renderCurrentView();
+    setTimeout(function () { fitNetworkGraph(); }, 80);
+    showToast('📂 Alle Client-Cluster aufgeklappt.');
+}
+
+function collapseAllClusters() {
+    AppState.clusterMode = true;
+    AppState.expandedClusters = {};
+    updateToolbarQuickButtons();
+    renderCurrentView();
+    setTimeout(function () { fitNetworkGraph(); }, 80);
+    showToast('📁 Alle Clients pro Switch/Gateway zu Clustern gebündelt.');
+}
+
+function toggleSingleCluster(parentId, expandFlag) {
+    if (expandFlag) {
+        AppState.expandedClusters[parentId] = true;
+    } else {
+        delete AppState.expandedClusters[parentId];
+    }
+    renderCurrentView();
+    setTimeout(function () { fitNetworkGraph(); }, 80);
+}
+
+function toggleLodMode(enabled) {
+    AppState.lodEnabled = !!enabled;
+    applyZoomLod(true);
+}
+
+function setFocusDevice(devId) {
+    AppState.focusDeviceId = devId ? parseInt(devId, 10) : null;
+    renderCurrentView();
+    if (AppState.selectedDeviceId) {
+        selectDevice(AppState.selectedDeviceId);
+    }
+    setTimeout(function () { fitNetworkGraph(); }, 80);
+}
+
+function saveGraphPositions() {
+    if (!AppState.network) {
+        showToast('Positionen können nur in den Graph-Ansichten (1 bis 4) gespeichert werden.');
+        return;
+    }
+    var rawPos = AppState.network.getPositions();
+    var posList = [];
+    var byId = {};
+    for (var i = 0; i < AppState.devices.length; i++) {
+        byId[AppState.devices[i].id] = AppState.devices[i];
+    }
+    for (var k in rawPos) {
+        var numId = parseInt(k, 10);
+        if (!isNaN(numId) && numId > 0 && String(k).indexOf('cluster_') === -1) {
+            var rx = Math.round(rawPos[k].x);
+            var ry = Math.round(rawPos[k].y);
+            posList.push({ id: numId, x: rx, y: ry });
+            if (byId[numId]) {
+                byId[numId].pos_x = rx;
+                byId[numId].pos_y = ry;
+            }
+        }
+    }
+    if (posList.length === 0) {
+        showToast('Keine speicherbaren Geräteknoten im aktuellen Plan.');
+        return;
+    }
+    fetch('api.php?action=save_layout_positions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ positions: posList })
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (res) {
+        if (res.ok) {
+            showToast('📌 Layout fixiert: Positionen von ' + res.saved + ' Geräten dauerhaft gespeichert!');
+        } else {
+            showToast('Fehler: ' + (res.error || 'Unbekannt'));
+        }
+    });
+}
+
+function resetGraphPositions() {
+    if (!confirm('Gespeicherte Knoten-Positionen zurücksetzen und Layout neu berechnen?')) return;
+    fetch('api.php?action=reset_layout_positions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scope_id: AppState.selectedScopeId })
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (res) {
+        if (res.ok) {
+            for (var i = 0; i < AppState.devices.length; i++) {
+                if (AppState.selectedScopeId === 'all' || String(AppState.devices[i].scope_id) === String(AppState.selectedScopeId)) {
+                    AppState.devices[i].pos_x = null;
+                    AppState.devices[i].pos_y = null;
+                }
+            }
+            showToast('↺ Gespeicherte Positionen zurückgesetzt.');
+            renderCurrentView();
+            setTimeout(function () { fitNetworkGraph(); }, 100);
+        }
+    });
+}
+
 function changeMapViewMode(mode) {
     AppState.viewMode = mode;
     renderCurrentView();
+    setTimeout(function () { fitNetworkGraph(); }, 80);
 }
 
 /**
- * Filtert Geräte gemäß aktuellem Scope, Gruppen-Filter, Einzelsichtbarkeit und Suchtext
+ * Filtert Geräte gemäß aktuellem Scope, Gruppen-Filter, Einzelsichtbarkeit, Fokus-Modus und Suchtext
  */
 function getFilteredDevicesAndLinks() {
     var searchVal = (document.getElementById('map-search').value || '').toLowerCase();
     var showHiddenElem = document.getElementById('chk-show-hidden');
     var showHidden = showHiddenElem ? showHiddenElem.checked : false;
+
+    // Falls Fokus-Modus aktiv ist: Nachbarschaft (1-Hop + Uplink) bestimmen
+    var focusAllowed = null;
+    var focusBanner = document.getElementById('focus-mode-banner');
+    var focusText = document.getElementById('focus-mode-text');
+
+    if (AppState.focusDeviceId) {
+        focusAllowed = {};
+        focusAllowed[AppState.focusDeviceId] = true;
+        var neighborCount = 0;
+        for (var fl = 0; fl < AppState.links.length; fl++) {
+            var lnk = AppState.links[fl];
+            var sId = parseInt(lnk.source_device_id, 10);
+            var tId = parseInt(lnk.target_device_id, 10);
+            if (sId === AppState.focusDeviceId) {
+                focusAllowed[tId] = true;
+                neighborCount++;
+            } else if (tId === AppState.focusDeviceId) {
+                focusAllowed[sId] = true;
+                neighborCount++;
+            }
+        }
+        var fDev = null;
+        for (var fd = 0; fd < AppState.devices.length; fd++) {
+            if (parseInt(AppState.devices[fd].id, 10) === AppState.focusDeviceId) {
+                fDev = AppState.devices[fd];
+                break;
+            }
+        }
+        if (fDev && focusBanner && focusText) {
+            var fName = fDev.custom_name || fDev.hostname || fDev.snmp_sysname || fDev.ip_address;
+            focusBanner.style.display = 'flex';
+            focusText.innerHTML = '🎯 <b>Fokus-Modus aktiv:</b> Isolierte Ansicht für <u>' + escapeHtml(fName) + '</u> (' + escapeHtml(fDev.ip_address) + ') und <b>' + neighborCount + '</b> direkt verbundene Nachbargeräte';
+        } else {
+            AppState.focusDeviceId = null;
+            focusAllowed = null;
+            if (focusBanner) focusBanner.style.display = 'none';
+        }
+    } else if (focusBanner) {
+        focusBanner.style.display = 'none';
+    }
 
     var filteredDevices = [];
     var allowedIds = {};
@@ -358,10 +589,13 @@ function getFilteredDevicesAndLinks() {
             scopeVisibleCount++;
         }
 
-        if (isHidden && !showHidden) {
+        if (focusAllowed && !focusAllowed[parseInt(d.id, 10)]) {
             continue;
         }
-        if (AppState.activeTypes[d.device_type] === false) {
+        if (isHidden && !showHidden && (!focusAllowed || parseInt(d.id, 10) !== AppState.focusDeviceId)) {
+            continue;
+        }
+        if (AppState.activeTypes[d.device_type] === false && (!focusAllowed || parseInt(d.id, 10) !== AppState.focusDeviceId)) {
             continue;
         }
         if (d.custom_group && AppState.activeCustomGroups[d.custom_group] === false) {
@@ -396,70 +630,281 @@ function renderCurrentView() {
     var matrixEl = document.getElementById('matrix-view-container');
     var rackEl   = document.getElementById('rack-view-container');
     var btnFit   = document.getElementById('btn-fit-graph');
-    var btnPng   = document.getElementById('btn-export-png');
 
     if (AppState.viewMode === 'matrix') {
         canvasEl.style.display = 'none';
         rackEl.style.display = 'none';
         matrixEl.style.display = 'flex';
         if (btnFit) btnFit.style.display = 'none';
-        if (btnPng) btnPng.style.display = 'none';
         renderMatrixView();
     } else if (AppState.viewMode === 'rack') {
         canvasEl.style.display = 'none';
         matrixEl.style.display = 'none';
         rackEl.style.display = 'flex';
         if (btnFit) btnFit.style.display = 'none';
-        if (btnPng) btnPng.style.display = 'none';
         renderRackPanelView();
     } else {
         matrixEl.style.display = 'none';
         rackEl.style.display = 'none';
         canvasEl.style.display = 'block';
         if (btnFit) btnFit.style.display = 'inline-flex';
-        if (btnPng) btnPng.style.display = 'inline-flex';
         renderNetworkGraph();
     }
 }
 
 /**
- * Ansichten 1 bis 4: Interaktiver Topologie-Graph (Stern, Baum Oben->Unten, Baum Links->Rechts, Kreis/Radial)
+ * Berechnet ein kompaktes, gestaffeltes Block-Raster für die Baum-Ansichten (Oben->Unten & Links->Rechts),
+ * damit viele Endgeräte an einem Switch/Router in kompakten 5er-Reihen unter ihrem Switch stehen statt in einer Endlos-Linie.
+ */
+function computeSmartTreePositions(nodes, edges, direction) {
+    var nodeMap = {};
+    for (var i = 0; i < nodes.length; i++) {
+        nodeMap[nodes[i].id] = nodes[i];
+    }
+
+    var childrenMap = {};
+    var hasParent = {};
+    for (var e = 0; e < edges.length; e++) {
+        var ed = edges[e];
+        if (String(ed.id).indexOf('backbone_') === 0) continue;
+        if (!nodeMap[ed.from] || !nodeMap[ed.to]) continue;
+        if (ed.from === ed.to) continue;
+        if (!childrenMap[ed.from]) childrenMap[ed.from] = [];
+        if (!hasParent[ed.to]) {
+            childrenMap[ed.from].push(ed.to);
+            hasParent[ed.to] = ed.from;
+        }
+    }
+
+    // Wurzeln finden (Router / Knoten ohne Parent)
+    var roots = [];
+    for (var n = 0; n < nodes.length; n++) {
+        var nd = nodes[n];
+        if (!hasParent[nd.id]) {
+            roots.push(nd.id);
+        }
+    }
+    if (roots.length === 0 && nodes.length > 0) {
+        roots.push(nodes[0].id);
+    }
+
+    var visited = {};
+    var MAX_COLS = 5;       // Max. 5 Endgeräte nebeneinander pro Switch-Block
+    var COL_STEP = 165;     // Horizontaler Abstand im Block
+    var ROW_STEP = 120;     // Vertikaler Abstand zwischen gestaffelten Reihen
+    var LEVEL_STEP = 195;   // Abstand zwischen Infrastruktur-Ebenen (Router -> Switch -> Clients)
+    var cursorPrimary = 0;
+
+    function layoutSubtree(nodeId, depth) {
+        if (visited[nodeId]) return;
+        visited[nodeId] = true;
+        var kids = childrenMap[nodeId] || [];
+
+        // Trenne Kinder in Infrastruktur-Knoten (die selbst Kinder haben oder Switches sind) und Blatt-Knoten (Endgeräte/Cluster)
+        var branchKids = [];
+        var leafKids = [];
+        for (var k = 0; k < kids.length; k++) {
+            var cid = kids[k];
+            if (visited[cid]) continue;
+            var cNode = nodeMap[cid];
+            var cHasKids = childrenMap[cid] && childrenMap[cid].length > 0;
+            if (cHasKids || (cNode && (cNode.deviceType === 'switch' || cNode.deviceType === 'router' || cNode.deviceType === 'ap'))) {
+                branchKids.push(cid);
+            } else {
+                leafKids.push(cid);
+            }
+        }
+
+        var subStart = cursorPrimary;
+
+        // 1. Falls direkte Endgeräte (Blätter) an diesem Switch/Router hängen: als kompakten 5er-Block anordnen
+        if (leafKids.length > 0) {
+            var cols = Math.min(leafKids.length, MAX_COLS);
+            var blockWidth = Math.max(1, cols) * COL_STEP;
+            var blockStart = cursorPrimary;
+
+            for (var l = 0; l < leafKids.length; l++) {
+                var lid = leafKids[l];
+                visited[lid] = true;
+                var col = l % MAX_COLS;
+                var row = Math.floor(l / MAX_COLS);
+                var pCoord = blockStart + col * COL_STEP + Math.round(COL_STEP / 2);
+                var sCoord = (depth + 1) * LEVEL_STEP + row * ROW_STEP;
+                if (direction === 'LR') {
+                    nodeMap[lid].x = sCoord;
+                    nodeMap[lid].y = pCoord;
+                } else {
+                    nodeMap[lid].x = pCoord;
+                    nodeMap[lid].y = sCoord;
+                }
+            }
+            cursorPrimary += blockWidth + 70;
+        }
+
+        // 2. Darunterliegende Switches / Access Points rekursiv daneben platzieren
+        for (var b = 0; b < branchKids.length; b++) {
+            layoutSubtree(branchKids[b], depth + 1);
+        }
+
+        if (cursorPrimary === subStart) {
+            cursorPrimary += COL_STEP;
+        }
+
+        var centerPrimary = Math.round((subStart + cursorPrimary - 70) / 2);
+        var secondary = depth * LEVEL_STEP;
+        if (direction === 'LR') {
+            nodeMap[nodeId].x = secondary;
+            nodeMap[nodeId].y = centerPrimary;
+        } else {
+            nodeMap[nodeId].x = centerPrimary;
+            nodeMap[nodeId].y = secondary;
+        }
+    }
+
+    for (var r = 0; r < roots.length; r++) {
+        layoutSubtree(roots[r], 0);
+        cursorPrimary += 90;
+    }
+
+    // Falls noch unverbundene Knoten übrig sind
+    for (var u = 0; u < nodes.length; u++) {
+        if (!visited[nodes[u].id]) {
+            layoutSubtree(nodes[u].id, 0);
+        }
+    }
+}
+
+/**
+ * Zoom-abhängiges Level-of-Detail (LOD):
+ * Blendet bei weiter Herauszoom-Stufe in großen Netzen die mehrzeiligen Textschilder von normalen Workstations aus,
+ * während Router, Switches, Server, APs, Drucker und Cluster immer beschriftet bleiben.
+ */
+function applyZoomLod(forceUpdate) {
+    if (!AppState.network || !AppState.nodesDataSet) return;
+    var allNodes = AppState.nodesDataSet.get();
+    if (allNodes.length <= 12 && !forceUpdate) return;
+
+    var scale = AppState.network.getScale();
+    var shouldHideClientLabels = AppState.lodEnabled && (allNodes.length > 12) && (scale < 0.68);
+
+    if (!forceUpdate && shouldHideClientLabels === AppState.lodLabelsHidden) {
+        return;
+    }
+    AppState.lodLabelsHidden = shouldHideClientLabels;
+
+    var updates = [];
+    for (var i = 0; i < allNodes.length; i++) {
+        var n = allNodes[i];
+        if (n.isClientLeaf) {
+            var targetLbl = shouldHideClientLabels ? (n.shortLabel || '') : n.fullLabel;
+            if (n.label !== targetLbl) {
+                updates.push({ id: n.id, label: targetLbl });
+            }
+        }
+    }
+    if (updates.length > 0) {
+        AppState.nodesDataSet.update(updates);
+    }
+}
+
+/**
+ * Ansichten 1 bis 4: Interaktiver Topologie-Graph
+ * Inklusive Client-Clustering, gestaffeltem Block-Raster im Baum-Modus, Zoom-LOD & gespeicherten Knoten-Positionen
  */
 function renderNetworkGraph() {
     var filtered = getFilteredDevicesAndLinks();
     var filteredDevices = filtered.devices;
     var allowedIds = filtered.allowedIds;
 
+    // 1. Ermittle Eltern-Kind-Beziehungen für Client-Clustering
+    var parentByChild = {};
+    var childrenCountByParent = {};
+    for (var l = 0; l < AppState.links.length; l++) {
+        var lnk0 = AppState.links[l];
+        if (!allowedIds[lnk0.source_device_id] || !allowedIds[lnk0.target_device_id]) continue;
+        parentByChild[lnk0.target_device_id] = lnk0.source_device_id;
+        childrenCountByParent[lnk0.source_device_id] = (childrenCountByParent[lnk0.source_device_id] || 0) + 1;
+    }
+
+    // Prüfe, welche Workstations in ein Switch-/Gateway-Cluster gebündelt werden
+    AppState.clusterMap = {};
+    var clusteredDeviceToClusterId = {};
+
+    if (AppState.clusterMode && !AppState.focusDeviceId) {
+        var candidatesByParent = {};
+        for (var c = 0; c < filteredDevices.length; c++) {
+            var cd = filteredDevices[c];
+            var cid = parseInt(cd.id, 10);
+            // Nur Blatt-Workstations ohne eigene Kinder bündeln
+            if (cd.device_type === 'workstation' && !childrenCountByParent[cid] && parentByChild[cid]) {
+                var pid = parentByChild[cid];
+                if (!AppState.expandedClusters[pid]) {
+                    if (!candidatesByParent[pid]) candidatesByParent[pid] = [];
+                    candidatesByParent[pid].push(cd);
+                }
+            }
+        }
+
+        for (var pk in candidatesByParent) {
+            var list = candidatesByParent[pk];
+            if (list.length >= 2) {
+                var clusterId = 'cluster_' + pk;
+                var onlineCnt = 0;
+                var offlineCnt = 0;
+                for (var m = 0; m < list.length; m++) {
+                    if (list[m].status === 'online') onlineCnt++;
+                    else offlineCnt++;
+                    clusteredDeviceToClusterId[list[m].id] = clusterId;
+                }
+                AppState.clusterMap[clusterId] = {
+                    clusterId: clusterId,
+                    parentId: parseInt(pk, 10),
+                    parentDev: allowedIds[pk] || null,
+                    devices: list,
+                    onlineCount: onlineCnt,
+                    offlineCount: offlineCnt
+                };
+            }
+        }
+    }
+
     var nodes = [];
     var routersByScope = {};
 
     // Für Kreis-/Radial-Layout Koordinaten berechnen
-    var totalDevs = filteredDevices.length;
     var centerIndex = 0;
     var outerIndex = 0;
     var outerCount = 0;
-    for (var m = 0; m < totalDevs; m++) {
-        if (filteredDevices[m].device_type !== 'router' && filteredDevices[m].device_type !== 'switch') {
+    for (var m0 = 0; m0 < filteredDevices.length; m0++) {
+        if (clusteredDeviceToClusterId[filteredDevices[m0].id]) continue;
+        if (filteredDevices[m0].device_type !== 'router' && filteredDevices[m0].device_type !== 'switch') {
             outerCount++;
         }
     }
+    outerCount += Object.keys(AppState.clusterMap).length;
 
     for (var j = 0; j < filteredDevices.length; j++) {
         var dev = filteredDevices[j];
+        if (clusteredDeviceToClusterId[dev.id]) {
+            continue; // Wird durch Sammel-Knoten (Cluster) repräsentiert
+        }
+
         var devHidden = parseInt(dev.is_hidden || 0, 10) === 1;
-        var titleName = dev.custom_name || dev.hostname || dev.snmp_sysname || dev.ip_address;
+        var rawName = dev.custom_name || dev.hostname || dev.snmp_sysname || dev.ip_address;
+        var titleName = rawName;
         if (titleName.length > 24) {
             titleName = titleName.substring(0, 22) + '…';
         }
-        if (dev.alert_mode && dev.alert_mode !== 'none') {
+        var hasAlert = (dev.alert_mode && dev.alert_mode !== 'none');
+        if (hasAlert) {
             titleName = '🔔 ' + titleName;
         }
-        var label = titleName + '\n' + dev.ip_address;
+        var fullLabel = titleName + '\n' + dev.ip_address;
         if (dev.custom_group) {
-            label += '\n[' + dev.custom_group + ']';
+            fullLabel += '\n[' + dev.custom_group + ']';
         }
         if (devHidden) {
-            label += ' (ausgeblendet)';
+            fullLabel += ' (ausgeblendet)';
         }
 
         var level = 3;
@@ -470,9 +915,22 @@ function renderNetworkGraph() {
             level = 2;
         }
 
+        var tooltipText = rawName + ' (' + dev.ip_address + ')\n' +
+            'Typ: ' + (dev.device_type || '').toUpperCase() + ' | Status: ' + (dev.status || '').toUpperCase() + '\n' +
+            (dev.vendor ? ('Hersteller: ' + dev.vendor + '\n') : '') +
+            (dev.os_guess ? ('OS: ' + dev.os_guess + '\n') : '') +
+            (dev.open_ports ? ('Ports: ' + dev.open_ports) : '');
+
+        var isClientLeaf = (dev.device_type === 'workstation' && !childrenCountByParent[dev.id]);
+
         var nodeObj = {
             id: parseInt(dev.id, 10),
-            label: label,
+            label: fullLabel,
+            fullLabel: fullLabel,
+            shortLabel: hasAlert ? '🔔' : '',
+            isClientLeaf: isClientLeaf,
+            deviceType: dev.device_type,
+            title: tooltipText,
             image: createDeviceSvgUri(dev.device_type, dev.status, dev.scope_color),
             shape: 'image',
             opacity: devHidden ? 0.4 : 1.0,
@@ -498,17 +956,82 @@ function renderNetworkGraph() {
                 nodeObj.y = Math.round(radius * Math.sin(angle));
                 outerIndex++;
             }
+        } else if (AppState.viewMode === 'physics' && dev.pos_x !== null && dev.pos_x !== undefined && dev.pos_x !== '' && dev.pos_y !== null && dev.pos_y !== undefined && dev.pos_y !== '') {
+            nodeObj.x = parseInt(dev.pos_x, 10);
+            nodeObj.y = parseInt(dev.pos_y, 10);
         }
 
         nodes.push(nodeObj);
     }
 
+    // Cluster-Knoten hinzufügen
+    var clusterKeys = Object.keys(AppState.clusterMap);
+    for (var ck = 0; ck < clusterKeys.length; ck++) {
+        var cInfo = AppState.clusterMap[clusterKeys[ck]];
+        var cLabel = '📦 ' + cInfo.devices.length + ' Clients\n(' + cInfo.onlineCount + ' On' + (cInfo.offlineCount > 0 ? ', ' + cInfo.offlineCount + ' Off' : '') + ')';
+        var cNode = {
+            id: cInfo.clusterId,
+            label: cLabel,
+            fullLabel: cLabel,
+            shortLabel: cLabel,
+            isClientLeaf: false,
+            deviceType: 'cluster',
+            title: cInfo.devices.length + ' gebündelte Clients – Klick für Liste, Doppelklick zum Aufklappen im Plan',
+            image: createClusterSvgUri(cInfo.devices.length, cInfo.offlineCount),
+            shape: 'image',
+            size: 30,
+            level: 3,
+            font: {
+                color: '#6ee7b7',
+                size: 12,
+                face: 'monospace',
+                background: 'rgba(6, 78, 59, 0.88)'
+            }
+        };
+        if (AppState.viewMode === 'radial') {
+            var cRadius = Math.max(240, outerCount * 16);
+            var cAngle = (2 * Math.PI * outerIndex) / Math.max(1, outerCount);
+            cNode.x = Math.round(cRadius * Math.cos(cAngle));
+            cNode.y = Math.round(cRadius * Math.sin(cAngle));
+            outerIndex++;
+        }
+        nodes.push(cNode);
+    }
+
     var edges = [];
+    var addedClusterEdges = {};
+
     for (var k = 0; k < AppState.links.length; k++) {
         var lnk = AppState.links[k];
         if (!allowedIds[lnk.source_device_id] || !allowedIds[lnk.target_device_id]) {
             continue;
         }
+
+        var targetClustId = clusteredDeviceToClusterId[lnk.target_device_id];
+        if (targetClustId) {
+            if (!addedClusterEdges[targetClustId]) {
+                addedClusterEdges[targetClustId] = true;
+                var clObj = AppState.clusterMap[targetClustId];
+                edges.push({
+                    id: 'e_' + targetClustId,
+                    from: parseInt(lnk.source_device_id, 10),
+                    to: targetClustId,
+                    label: clObj ? (clObj.devices.length + ' Ports') : '',
+                    color: { color: '#10b981', highlight: '#34d399' },
+                    width: 2.8,
+                    dashes: [6, 4],
+                    font: {
+                        color: '#a7f3d0',
+                        size: 10,
+                        strokeWidth: 3,
+                        strokeColor: '#0f172a',
+                        align: 'middle'
+                    }
+                });
+            }
+            continue;
+        }
+
         var edgeColor = '#475569';
         var dashes = false;
         var width = 2;
@@ -564,30 +1087,28 @@ function renderNetworkGraph() {
     var isTree = (AppState.viewMode === 'tree_ud' || AppState.viewMode === 'tree_lr');
     var treeDir = (AppState.viewMode === 'tree_lr') ? 'LR' : 'UD';
 
+    // Für Baum-Ansichten das gestaffelte Block-Raster berechnen (statt einer einzigen Endlos-Reihe)
+    if (isTree) {
+        computeSmartTreePositions(nodes, edges, treeDir);
+    }
+
     var options = {
         interaction: {
             hover: true,
-            keyboard: true
+            keyboard: true,
+            tooltipDelay: 120
         },
         edges: {
             smooth: isTree ? {
                 type: 'cubicBezier',
                 forceDirection: (treeDir === 'LR') ? 'horizontal' : 'vertical',
-                roundness: 0.45
+                roundness: 0.4
             } : {
                 type: 'continuous',
                 roundness: 0.2
             }
         },
-        layout: isTree ? {
-            hierarchical: {
-                enabled: true,
-                direction: treeDir,
-                sortMethod: 'directed',
-                levelSeparation: (treeDir === 'LR') ? 220 : 150,
-                nodeSpacing: (treeDir === 'LR') ? 100 : 150
-            }
-        } : {
+        layout: {
             hierarchical: false
         },
         physics: (isTree || AppState.viewMode === 'radial') ? {
@@ -595,13 +1116,14 @@ function renderNetworkGraph() {
         } : {
             enabled: true,
             barnesHut: {
-                gravitationalConstant: -4200,
-                centralGravity: 0.25,
-                springLength: 145,
+                gravitationalConstant: -4600,
+                centralGravity: 0.22,
+                springLength: 150,
                 springConstant: 0.04,
-                damping: 0.12
+                damping: 0.15,
+                avoidOverlap: 0.35
             },
-            stabilization: { iterations: 120 }
+            stabilization: { iterations: 130 }
         }
     };
 
@@ -609,6 +1131,7 @@ function renderNetworkGraph() {
     if (AppState.network) {
         AppState.network.destroy();
     }
+    AppState.lodLabelsHidden = false;
     AppState.nodesDataSet = new vis.DataSet(nodes);
     AppState.edgesDataSet = new vis.DataSet(edges);
     AppState.network = new vis.Network(container, {
@@ -616,11 +1139,79 @@ function renderNetworkGraph() {
         edges: AppState.edgesDataSet
     }, options);
 
+    // Nach dem Einschwingen Physik einfrieren, damit Knoten ruhig stehen bleiben und beim Ziehen fixiert bleiben
+    if (AppState.viewMode === 'physics') {
+        AppState.network.once('stabilizationIterationsDone', function () {
+            AppState.network.setOptions({ physics: { enabled: false } });
+            applyZoomLod(true);
+        });
+    } else {
+        setTimeout(function () { applyZoomLod(true); }, 60);
+    }
+
+    AppState.network.on('zoom', function () {
+        applyZoomLod(false);
+    });
+
     AppState.network.on('click', function (params) {
         if (params.nodes && params.nodes.length > 0) {
-            selectDevice(params.nodes[0]);
+            var clickedId = params.nodes[0];
+            if (String(clickedId).indexOf('cluster_') === 0) {
+                selectCluster(clickedId);
+            } else {
+                selectDevice(clickedId);
+            }
         }
     });
+
+    AppState.network.on('doubleClick', function (params) {
+        if (params.nodes && params.nodes.length > 0) {
+            var dblId = params.nodes[0];
+            if (String(dblId).indexOf('cluster_') === 0) {
+                var cEntry = AppState.clusterMap[dblId];
+                if (cEntry) {
+                    toggleSingleCluster(cEntry.parentId, true);
+                    showToast('📂 Client-Cluster aufgeklappt.');
+                }
+            } else {
+                setFocusDevice(AppState.focusDeviceId === parseInt(dblId, 10) ? null : dblId);
+            }
+        }
+    });
+}
+
+function selectCluster(clusterId) {
+    var cInfo = AppState.clusterMap[clusterId];
+    if (!cInfo) return;
+    toggleRightSidebar(true);
+    var panel = document.getElementById('inspector-content');
+    var pName = cInfo.parentDev ? (cInfo.parentDev.custom_name || cInfo.parentDev.hostname || cInfo.parentDev.ip_address) : 'Switch / Gateway';
+
+    var html = '<div style="background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.3);border-radius:8px;padding:12px;display:flex;flex-direction:column;gap:10px;">' +
+        '<div style="font-size:14px;font-weight:700;color:#6ee7b7;">📦 Client-Cluster (' + cInfo.devices.length + ' Geräte)</div>' +
+        '<div style="font-size:12px;color:var(--text-secondary);">Gebündelte Endgeräte an <b>' + escapeHtml(pName) + '</b></div>' +
+        '<div style="display:flex;gap:8px;flex-wrap:wrap;">' +
+            '<span class="badge badge-online">' + cInfo.onlineCount + ' Online</span>' +
+            (cInfo.offlineCount > 0 ? ('<span class="badge badge-offline">' + cInfo.offlineCount + ' Offline</span>') : '') +
+        '</div>' +
+        '<button class="btn btn-primary" onclick="toggleSingleCluster(' + cInfo.parentId + ', true)">📂 Dieses Cluster im Netzwerkplan aufklappen</button>' +
+    '</div>' +
+    '<div style="font-size:12px;font-weight:700;color:var(--text-secondary);text-transform:uppercase;margin-top:4px;">Enthaltene Geräte (Klick für Details):</div>' +
+    '<div style="display:flex;flex-direction:column;gap:6px;">';
+
+    for (var i = 0; i < cInfo.devices.length; i++) {
+        var d = cInfo.devices[i];
+        var dName = d.custom_name || d.hostname || d.ip_address;
+        html += '<div onclick="selectDevice(' + d.id + ')" style="cursor:pointer;background:var(--bg-card);border:1px solid var(--border-color);border-radius:6px;padding:8px 10px;display:flex;justify-content:space-between;align-items:center;">' +
+            '<div>' +
+                '<div style="font-weight:600;font-size:12.5px;">' + escapeHtml(dName) + '</div>' +
+                '<div style="font-family:monospace;font-size:11.5px;color:#93c5fd;">' + escapeHtml(d.ip_address) + (d.vendor ? (' • ' + escapeHtml(d.vendor)) : '') + '</div>' +
+            '</div>' +
+            '<span class="badge badge-' + d.status + '">' + d.status.toUpperCase() + '</span>' +
+        '</div>';
+    }
+    html += '</div>';
+    panel.innerHTML = html;
 }
 
 /**
@@ -1343,7 +1934,18 @@ function selectDevice(deviceId) {
             '</div>';
     }
 
+    var isFocused = (AppState.focusDeviceId === parseInt(dev.id, 10));
+    var focusBtnHtml = '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:4px;">' +
+        (isFocused
+            ? '<button class="btn btn-sm" style="flex:1;justify-content:center;border-color:#60a5fa;background:rgba(59,130,246,0.2);color:#93c5fd;" onclick="setFocusDevice(null)">✕ Fokus-Modus beenden (Alle zeigen)</button>'
+            : '<button class="btn btn-sm" style="flex:1;justify-content:center;border-color:rgba(96,165,250,0.45);color:#93c5fd;" onclick="setFocusDevice(' + dev.id + ')">🎯 Fokus: Gerät &amp; Nachbarn isolieren</button>') +
+        (AppState.expandedClusters[dev.id]
+            ? '<button class="btn btn-sm" style="border-color:#10b981;color:#6ee7b7;" onclick="toggleSingleCluster(' + dev.id + ', false)">📁 Clients bündeln</button>'
+            : '') +
+    '</div>';
+
     panel.innerHTML =
+        focusBtnHtml +
         '<div class="kv-grid">' +
             '<div class="kv-label">Status</div><div class="kv-val"><span class="badge badge-' + dev.status + '">' + dev.status.toUpperCase() + '</span> (' + (dev.latency_ms || '1.0') + ' ms)</div>' +
             '<div class="kv-label">Alarm-Modus</div><div class="kv-val">' + alertBadgeHtml + '</div>' +

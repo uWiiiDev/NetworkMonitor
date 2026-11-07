@@ -158,18 +158,56 @@ $isAdmin = ($userRole === 'admin');
                                 </div>
                             </div>
                         </div>
+
+                        <!-- Schnell-Umschalter für große Netzwerke: Nur Infrastruktur & Client-Cluster -->
+                        <button id="btn-infra-only" class="btn btn-sm" onclick="toggleInfraOnlyMode()" title="Ein-Klick-Umschalter: Nur Infrastruktur (Router, Switches, Server, APs, Drucker) vs. Alle Geräte inkl. Clients">
+                            🏢 Nur Infrastruktur
+                        </button>
+                        <button id="btn-cluster-mode" class="btn btn-sm" onclick="toggleClusterMode()" title="Fasst Endgeräte (Clients) pro Switch/Gateway zu aufklappbaren Sammel-Knoten zusammen">
+                            📦 Cluster
+                        </button>
                     </div>
 
                     <div class="toolbar-group">
                         <!-- Ansicht Dropdown -->
                         <select id="view-mode-select" class="select-input" onchange="changeMapViewMode(this.value)" title="Darstellungsart wählen">
                             <option value="physics">Ansicht: 1. Stern-Topologie</option>
-                            <option value="tree_ud">Ansicht: 2. Baum (Oben → Unten)</option>
-                            <option value="tree_lr">Ansicht: 3. Baum (Links → Rechts)</option>
+                            <option value="tree_ud">Ansicht: 2. Baum (Oben → Unten, Block-Raster)</option>
+                            <option value="tree_lr">Ansicht: 3. Baum (Links → Rechts, Block-Raster)</option>
                             <option value="radial">Ansicht: 4. Kreis / Radial</option>
                             <option value="matrix">Ansicht: 5. Gruppen-Kacheln</option>
                             <option value="rack">Ansicht: 6. Switch-Port-Rack</option>
                         </select>
+
+                        <!-- Layout, Zoom-LOD & Positionen Dropdown -->
+                        <div class="dropdown">
+                            <button id="btn-layout-menu" class="btn btn-sm" onclick="toggleDropdown('dd-layout-menu', event)" title="Knoten-Positionen speichern, Cluster steuern &amp; Zoom-Details">
+                                📌 Layout ▾
+                            </button>
+                            <div id="dd-layout-menu" class="dropdown-menu dropdown-right" style="width:275px;" onclick="event.stopPropagation();">
+                                <div class="dropdown-header">Große Netzwerke &amp; Layout</div>
+                                <label class="dropdown-check-item" title="Blendet bei weiter Herauszoom-Stufe die Textschilder von normalen Workstations aus, damit Router &amp; Switches übersichtlich bleiben">
+                                    <input type="checkbox" id="chk-lod-mode" checked onchange="toggleLodMode(this.checked)">
+                                    <span>🔍 Text-Details erst beim Reinzoomen</span>
+                                </label>
+                                <div class="dropdown-divider"></div>
+                                <div class="dropdown-item" onclick="closeAllDropdowns(); expandAllClusters();">
+                                    📂 Alle Client-Cluster aufklappen
+                                </div>
+                                <div class="dropdown-item" onclick="closeAllDropdowns(); collapseAllClusters();">
+                                    📁 Alle Client-Cluster bündeln
+                                </div>
+                                <?php if ($canEdit): ?>
+                                <div class="dropdown-divider"></div>
+                                <div class="dropdown-item" style="color:#34d399;font-weight:600;" onclick="closeAllDropdowns(); saveGraphPositions();">
+                                    📌 Aktuelle Knoten-Positionen speichern
+                                </div>
+                                <div class="dropdown-item" style="color:#fca5a5;" onclick="closeAllDropdowns(); resetGraphPositions();">
+                                    ↺ Gespeicherte Positionen zurücksetzen
+                                </div>
+                                <?php endif; ?>
+                            </div>
+                        </div>
 
                         <button id="btn-fit-graph" class="btn btn-sm" onclick="fitNetworkGraph()" title="Netzwerkplan zentrieren">Zentrieren</button>
 
@@ -211,6 +249,12 @@ $isAdmin = ($userRole === 'admin');
                             Details ☰
                         </button>
                     </div>
+                </div>
+
+                <!-- Fokus-Modus Leiste (wenn ein Switch / Gerät isoliert betrachtet wird) -->
+                <div id="focus-mode-banner" style="display:none;background:rgba(59,130,246,0.16);border-bottom:1px solid rgba(59,130,246,0.45);padding:7px 14px;align-items:center;justify-content:space-between;gap:12px;font-size:12.5px;">
+                    <div id="focus-mode-text" style="color:#bfdbfe;font-weight:600;"></div>
+                    <button class="btn btn-sm" style="border-color:#60a5fa;color:#93c5fd;" onclick="setFocusDevice(null)">✕ Fokus-Modus beenden (Alle Geräte zeigen)</button>
                 </div>
 
                 <div id="network-canvas"></div>

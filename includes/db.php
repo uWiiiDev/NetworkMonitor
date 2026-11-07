@@ -185,6 +185,8 @@ class Database
         $this->ensureColumnExists('devices', 'service_info', 'TEXT DEFAULT NULL');
         $this->ensureColumnExists('devices', 'alert_mode', "VARCHAR(20) NOT NULL DEFAULT 'none'");
         $this->ensureColumnExists('devices', 'last_alert_state', 'VARCHAR(20) DEFAULT NULL');
+        $this->ensureColumnExists('devices', 'pos_x', 'INT DEFAULT NULL');
+        $this->ensureColumnExists('devices', 'pos_y', 'INT DEFAULT NULL');
     }
 
     private function initSqliteSchema()
@@ -235,6 +237,8 @@ class Database
                 is_hidden INTEGER NOT NULL DEFAULT 0,
                 alert_mode TEXT NOT NULL DEFAULT 'none',
                 last_alert_state TEXT DEFAULT NULL,
+                pos_x INTEGER DEFAULT NULL,
+                pos_y INTEGER DEFAULT NULL,
                 first_seen TEXT NOT NULL,
                 last_seen TEXT NOT NULL
             )
@@ -245,6 +249,8 @@ class Database
         $this->ensureColumnExists('devices', 'service_info', 'TEXT DEFAULT NULL');
         $this->ensureColumnExists('devices', 'alert_mode', "TEXT NOT NULL DEFAULT 'none'");
         $this->ensureColumnExists('devices', 'last_alert_state', 'TEXT DEFAULT NULL');
+        $this->ensureColumnExists('devices', 'pos_x', 'INTEGER DEFAULT NULL');
+        $this->ensureColumnExists('devices', 'pos_y', 'INTEGER DEFAULT NULL');
 
         $this->pdo->exec("
             CREATE TABLE IF NOT EXISTS links (

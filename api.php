@@ -536,6 +536,39 @@ try {
             echo json_encode(array('ok' => true));
             break;
 
+        case 'save_layout_positions':
+            Auth::requireRole(array('operator', 'admin'));
+            if (!isset($input['positions']) || !is_array($input['positions'])) {
+                throw new InvalidArgumentException('Keine Positionsdaten übergeben.');
+            }
+            $stmt = $pdo->prepare("UPDATE devices SET pos_x = :x, pos_y = :y WHERE id = :id");
+            $savedCount = 0;
+            foreach ($input['positions'] as $pos) {
+                $did = isset($pos['id']) ? (int)$pos['id'] : 0;
+                if ($did > 0 && isset($pos['x']) && isset($pos['y'])) {
+                    $stmt->execute(array(
+                        ':x'  => (int)round($pos['x']),
+                        ':y'  => (int)round($pos['y']),
+                        ':id' => $did,
+                    ));
+                    $savedCount++;
+                }
+            }
+            echo json_encode(array('ok' => true, 'saved' => $savedCount));
+            break;
+
+        case 'reset_layout_positions':
+            Auth::requireRole(array('operator', 'admin'));
+            $scopeId = isset($input['scope_id']) && $input['scope_id'] !== 'all' ? (int)$input['scope_id'] : 0;
+            if ($scopeId > 0) {
+                $pdo->prepare("UPDATE devices SET pos_x = NULL, pos_y = NULL WHERE scope_id = :sid")
+                    ->execute(array(':sid' => $scopeId));
+            } else {
+                $pdo->exec("UPDATE devices SET pos_x = NULL, pos_y = NULL");
+            }
+            echo json_encode(array('ok' => true));
+            break;
+
         default:
             throw new InvalidArgumentException('Unbekannte API-Aktion: ' . $action);
     }
