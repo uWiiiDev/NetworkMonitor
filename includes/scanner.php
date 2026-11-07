@@ -614,7 +614,7 @@ class NetworkScanner
             }
         }
 
-        // 2. Verbinde Managed Switches mit dem Gateway-Router (sofern noch nicht per LLDP verknüpft)
+        // 2. Verbinde Managed Switches untereinander bzw. mit dem Gateway-Router (inkl. Port-Erkennung aus MAC-Tabelle)
         $primarySwitch = !empty($switches) ? $switches[0] : null;
         foreach ($switches as $sw) {
             if ((int)$sw['id'] === (int)$routerDevice['id']) {
@@ -622,12 +622,35 @@ class NetworkScanner
             }
             if (!isset($linkedTargets[$sw['id']])) {
                 $parent = ($primarySwitch && (int)$primarySwitch['id'] !== (int)$sw['id']) ? $primarySwitch : $routerDevice;
+                $srcPortName = 'Trunk';
+                $dstPortName = 'Uplink';
+
+                // Prüfe ob Parent-Switch die MAC des Ziel-Switches auf einem Port sieht
+                if (!empty($parent['snmp_ports_json']) && !empty($sw['mac_address'])) {
+                    $pSnmp = @json_decode($parent['snmp_ports_json'], true);
+                    $swMacUpper = strtoupper($sw['mac_address']);
+                    if (!empty($pSnmp['mac_table'][$swMacUpper]['port_name'])) {
+                        $srcPortName = $pSnmp['mac_table'][$swMacUpper]['port_name'];
+                    }
+                }
+                // Prüfe auf welchem Port der Ziel-Switch die MAC des Parent/Gateway sieht (= Uplink-Port)
+                if (!empty($sw['snmp_ports_json'])) {
+                    $sSnmp = @json_decode($sw['snmp_ports_json'], true);
+                    $parentMacUpper = !empty($parent['mac_address']) ? strtoupper($parent['mac_address']) : '';
+                    $routerMacUpper = !empty($routerDevice['mac_address']) ? strtoupper($routerDevice['mac_address']) : '';
+                    if ($parentMacUpper && !empty($sSnmp['mac_table'][$parentMacUpper]['port_name'])) {
+                        $dstPortName = $sSnmp['mac_table'][$parentMacUpper]['port_name'];
+                    } elseif ($routerMacUpper && !empty($sSnmp['mac_table'][$routerMacUpper]['port_name'])) {
+                        $dstPortName = $sSnmp['mac_table'][$routerMacUpper]['port_name'];
+                    }
+                }
+
                 $insertLink->execute(array(
                     ':sid'   => $scopeId,
                     ':src'   => $parent['id'],
                     ':dst'   => $sw['id'],
-                    ':sport' => 'Trunk',
-                    ':dport' => 'Uplink',
+                    ':sport' => $srcPortName,
+                    ':dport' => $dstPortName,
                     ':ltype' => 'trunk',
                     ':now'   => $now,
                 ));

@@ -261,18 +261,60 @@ class SnmpClient
             }
         }
 
-        // LLDP Nachbarschaftstabelle: lldpRemSysName (1.0.8802.1.1.2.1.4.1.1.9)
+        // LLDP Nachbarschaftstabelle: lldpRemSysName (1.0.8802.1.1.2.1.4.1.1.9) & lldpRemPortId (.7) / lldpRemPortDesc (.8)
         $lldpNeighbors = array();
         $lldpWalk = $this->walkOid('1.0.8802.1.1.2.1.4.1.1.9', 32);
+        $lldpPortWalk = !empty($lldpWalk) ? $this->walkOid('1.0.8802.1.1.2.1.4.1.1.7', 32) : array();
+        $lldpPortDescWalk = !empty($lldpWalk) ? $this->walkOid('1.0.8802.1.1.2.1.4.1.1.8', 32) : array();
         foreach ($lldpWalk as $oid => $val) {
             $parts = explode('.', $oid);
             $localPortNum = isset($parts[count($parts) - 2]) ? (int)$parts[count($parts) - 2] : 0;
             $remName = $this->cleanSnmpValue($val);
             if ($remName !== '') {
+                $suffix = substr($oid, strlen('1.0.8802.1.1.2.1.4.1.1.9.'));
+                $remPort = '';
+                if (isset($lldpPortWalk['1.0.8802.1.1.2.1.4.1.1.7.' . $suffix])) {
+                    $remPort = $this->cleanSnmpValue($lldpPortWalk['1.0.8802.1.1.2.1.4.1.1.7.' . $suffix]);
+                } elseif (isset($lldpPortDescWalk['1.0.8802.1.1.2.1.4.1.1.8.' . $suffix])) {
+                    $remPort = $this->cleanSnmpValue($lldpPortDescWalk['1.0.8802.1.1.2.1.4.1.1.8.' . $suffix]);
+                }
                 $portName = isset($interfaces[$localPortNum]['name']) ? $interfaces[$localPortNum]['name'] : ('Port ' . $localPortNum);
                 $lldpNeighbors[] = array(
                     'local_port'  => $portName,
                     'remote_name' => $remName,
+                    'remote_port' => $remPort !== '' ? $remPort : 'Uplink',
+                );
+            }
+        }
+
+        // Switch-Stacking Erkennung (aus Port-Namen wie Gi1/0/1, Gi2/0/1, 1/0/1, 2/0/1 sowie Entity-MIB)
+        $detectedUnits = array();
+        foreach ($interfaces as $ifIdx => $inf) {
+            $pName = $inf['name'];
+            // Muster wie Gi1/0/12, Te2/0/1, 1/0/5, 2/1/8, unit1/port3
+            if (preg_match('/^(?:[A-Za-z\-]+)?([1-8])\/[0-9]+\/([0-9]+)$/', $pName, $pm)) {
+                $unitNum = (int)$pm[1];
+                $detectedUnits[$unitNum] = isset($detectedUnits[$unitNum]) ? ($detectedUnits[$unitNum] + 1) : 1;
+                $interfaces[$ifIdx]['stack_unit'] = $unitNum;
+                $interfaces[$ifIdx]['port_num'] = (int)$pm[2];
+            } elseif (preg_match('/^([1-8])\/([0-9]{1,2})$/', $pName, $pm2)) {
+                $unitNum = (int)$pm2[1];
+                $detectedUnits[$unitNum] = isset($detectedUnits[$unitNum]) ? ($detectedUnits[$unitNum] + 1) : 1;
+                $interfaces[$ifIdx]['stack_unit'] = $unitNum;
+                $interfaces[$ifIdx]['port_num'] = (int)$pm2[2];
+            }
+        }
+
+        $stackMembers = array();
+        ksort($detectedUnits);
+        if (count($detectedUnits) > 1) {
+            foreach ($detectedUnits as $uNum => $pCount) {
+                $stackMembers[] = array(
+                    'unit'   => $uNum,
+                    'role'   => ($uNum === 1) ? 'Master / Commander' : 'Stack-Member',
+                    'model'  => $this->cleanSnmpValue($deviceModel ? $deviceModel : $sysDescr),
+                    'serial' => ($uNum === 1 && $serialNumber) ? $this->cleanSnmpValue($serialNumber) : ('STACK-UNIT-' . $uNum),
+                    'ports'  => $pCount,
                 );
             }
         }
@@ -326,6 +368,7 @@ class SnmpClient
             'interfaces'     => array_values($interfaces),
             'mac_table'      => $macTable,
             'lldp_neighbors' => $lldpNeighbors,
+            'stack_members'  => $stackMembers,
             'printer'        => $printerInfo,
         );
     }

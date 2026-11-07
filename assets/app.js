@@ -45,8 +45,8 @@ var TYPE_META = {
     workstation: { label: 'Clients / PCs',     color: '#3b82f6', bg: '#1e293b' }
 };
 
-// Erzeugt gestochen scharfe SVG-Icons für jeden Gerätetyp im Netzwerkplan
-function createDeviceSvgUri(type, status, scopeColor) {
+// Erzeugt gestochen scharfe SVG-Icons für jeden Gerätetyp im Netzwerkplan (inkl. Switch-Stack-Darstellung)
+function createDeviceSvgUri(type, status, scopeColor, stackUnitsCount) {
     var meta = TYPE_META[type] || TYPE_META.workstation;
     var bg = meta.bg;
     var border = (type === 'workstation' && scopeColor) ? scopeColor : meta.color;
@@ -62,10 +62,20 @@ function createDeviceSvgUri(type, status, scopeColor) {
         glyph = '<circle cx="32" cy="32" r="14" fill="none" stroke="' + iconColor + '" stroke-width="2.5"/>' +
                 '<path d="M32 14v8M32 42v8M14 32h8M42 32h8" stroke="' + iconColor + '" stroke-width="2.5" stroke-linecap="round"/>';
     } else if (type === 'switch') {
-        glyph = '<rect x="12" y="22" width="40" height="20" rx="3" fill="none" stroke="' + iconColor + '" stroke-width="2.5"/>' +
-                '<circle cx="19" cy="32" r="2" fill="#34d399"/><circle cx="26" cy="32" r="2" fill="#34d399"/>' +
-                '<circle cx="33" cy="32" r="2" fill="#34d399"/><circle cx="40" cy="32" r="2" fill="#34d399"/>' +
-                '<path d="M45 29l4 3-4 3" fill="none" stroke="' + iconColor + '" stroke-width="2"/>';
+        if (stackUnitsCount && stackUnitsCount > 1) {
+            glyph = '<rect x="11" y="14" width="42" height="15" rx="2.5" fill="none" stroke="' + iconColor + '" stroke-width="2.2"/>' +
+                    '<circle cx="17" cy="21.5" r="1.8" fill="#34d399"/><circle cx="24" cy="21.5" r="1.8" fill="#34d399"/><circle cx="31" cy="21.5" r="1.8" fill="#34d399"/>' +
+                    '<rect x="11" y="34" width="42" height="15" rx="2.5" fill="none" stroke="' + iconColor + '" stroke-width="2.2"/>' +
+                    '<circle cx="17" cy="41.5" r="1.8" fill="#34d399"/><circle cx="24" cy="41.5" r="1.8" fill="#34d399"/><circle cx="31" cy="41.5" r="1.8" fill="#34d399"/>' +
+                    '<path d="M47 21h4v20h-4" fill="none" stroke="#c084fc" stroke-width="2.2"/>' +
+                    '<rect x="38" y="2" width="24" height="16" rx="8" fill="#7c3aed" stroke="#0f172a" stroke-width="1.5"/>' +
+                    '<text x="50" y="13" fill="#ffffff" font-family="sans-serif" font-size="10" font-weight="bold" text-anchor="middle">' + stackUnitsCount + 'x</text>';
+        } else {
+            glyph = '<rect x="12" y="22" width="40" height="20" rx="3" fill="none" stroke="' + iconColor + '" stroke-width="2.5"/>' +
+                    '<circle cx="19" cy="32" r="2" fill="#34d399"/><circle cx="26" cy="32" r="2" fill="#34d399"/>' +
+                    '<circle cx="33" cy="32" r="2" fill="#34d399"/><circle cx="40" cy="32" r="2" fill="#34d399"/>' +
+                    '<path d="M45 29l4 3-4 3" fill="none" stroke="' + iconColor + '" stroke-width="2"/>';
+        }
     } else if (type === 'server') {
         glyph = '<rect x="16" y="14" width="32" height="10" rx="2" fill="none" stroke="' + iconColor + '" stroke-width="2.2"/>' +
                 '<rect x="16" y="27" width="32" height="10" rx="2" fill="none" stroke="' + iconColor + '" stroke-width="2.2"/>' +
@@ -907,6 +917,17 @@ function renderNetworkGraph() {
             fullLabel += ' (ausgeblendet)';
         }
 
+        var stackUnitsCount = 1;
+        if (dev.snmp_ports_json) {
+            try {
+                var parsedSnmp = JSON.parse(dev.snmp_ports_json);
+                if (parsedSnmp && parsedSnmp.stack_members && parsedSnmp.stack_members.length > 1) {
+                    stackUnitsCount = parsedSnmp.stack_members.length;
+                    fullLabel += '\n[📚 Stack: ' + stackUnitsCount + ' Switche]';
+                }
+            } catch (e) {}
+        }
+
         var level = 3;
         if (dev.device_type === 'router') {
             level = 1;
@@ -916,7 +937,7 @@ function renderNetworkGraph() {
         }
 
         var tooltipText = rawName + ' (' + dev.ip_address + ')\n' +
-            'Typ: ' + (dev.device_type || '').toUpperCase() + ' | Status: ' + (dev.status || '').toUpperCase() + '\n' +
+            'Typ: ' + (dev.device_type || '').toUpperCase() + (stackUnitsCount > 1 ? (' (Stack: ' + stackUnitsCount + ' Einheiten)') : '') + ' | Status: ' + (dev.status || '').toUpperCase() + '\n' +
             (dev.vendor ? ('Hersteller: ' + dev.vendor + '\n') : '') +
             (dev.os_guess ? ('OS: ' + dev.os_guess + '\n') : '') +
             (dev.open_ports ? ('Ports: ' + dev.open_ports) : '');
@@ -931,7 +952,7 @@ function renderNetworkGraph() {
             isClientLeaf: isClientLeaf,
             deviceType: dev.device_type,
             title: tooltipText,
-            image: createDeviceSvgUri(dev.device_type, dev.status, dev.scope_color),
+            image: createDeviceSvgUri(dev.device_type, dev.status, dev.scope_color, stackUnitsCount),
             shape: 'image',
             opacity: devHidden ? 0.4 : 1.0,
             size: (dev.device_type === 'router' || dev.device_type === 'switch') ? 32 : 25,
@@ -1049,11 +1070,16 @@ function renderNetworkGraph() {
             dashes = [5, 5];
         }
 
+        var edgeLabel = lnk.source_port || '';
+        if ((lnk.link_type === 'lldp' || lnk.link_type === 'trunk') && lnk.target_port && lnk.target_port !== 'eth0') {
+            edgeLabel = (lnk.source_port ? lnk.source_port : 'Uplink') + ' ⇄ ' + lnk.target_port;
+        }
+
         edges.push({
             id: 'e_' + lnk.id,
             from: parseInt(lnk.source_device_id, 10),
             to: parseInt(lnk.target_device_id, 10),
-            label: lnk.source_port || '',
+            label: edgeLabel,
             color: { color: edgeColor, highlight: '#60a5fa' },
             width: width,
             dashes: dashes,
@@ -1338,7 +1364,10 @@ function renderRackPanelView() {
         rackUnits.push(devs[0]);
     }
 
-    var html = '';
+    var html = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;background:rgba(15,23,42,0.7);border:1px solid var(--border-color);border-radius:8px;padding:10px 14px;flex-wrap:wrap;gap:10px;">' +
+        '<div style="font-size:12.5px;color:var(--text-secondary);">Klicke auf einen Switch für die <b>originalgetreue 19-Zoll Frontblenden-Grafik</b> inkl. RJ45/SFP-Matrix, <b>Uplink-Kaskadierung</b> &amp; <b>Switch-Stacking</b>.</div>' +
+        '<button class="btn btn-sm" style="border-color:#a855f7;color:#d8b4fe;background:rgba(168,85,247,0.14);" onclick="openSwitchGraphicModal(0, true)">👁 Demo: 2x Switch-Stack &amp; Kaskade zeigen</button>' +
+    '</div>';
     for (var u = 0; u < rackUnits.length; u++) {
         var sw = rackUnits[u];
         var swName = sw.custom_name || sw.snmp_sysname || sw.hostname || sw.ip_address;
@@ -1364,8 +1393,9 @@ function renderRackPanelView() {
                             escapeHtml(sw.snmp_sysdescr || sw.vendor || 'Netzwerk-Verteiler') +
                         '</div>' +
                     '</div>' +
-                    '<div style="font-size:12.5px;color:#34d399;font-weight:600;">' +
-                        connectedLinks.length + ' belegte Ports' +
+                    '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">' +
+                        '<span style="font-size:12.5px;color:#34d399;font-weight:600;">' + connectedLinks.length + ' belegte Ports</span>' +
+                        '<button class="btn btn-sm btn-primary" onclick="event.stopPropagation(); openSwitchGraphicModal(' + sw.id + ', false);">🎛 19&quot; Switch-Grafik &amp; Kaskade</button>' +
                     '</div>' +
                 '</div>' +
                 '<div class="rack-ports-grid">';
@@ -1934,8 +1964,13 @@ function selectDevice(deviceId) {
             '</div>';
     }
 
+    var isSwitchOrRouter = (dev.device_type === 'switch' || dev.device_type === 'router' || dev.device_type === 'ap' || parseInt(dev.snmp_enabled, 10) === 1);
+    var switchGraphicBtnHtml = isSwitchOrRouter
+        ? '<button class="btn btn-sm" style="width:100%;justify-content:center;border-color:#10b981;background:linear-gradient(90deg, rgba(16,185,129,0.22), rgba(59,130,246,0.22));color:#a7f3d0;font-weight:700;padding:8px 10px;margin-bottom:4px;" onclick="openSwitchGraphicModal(' + dev.id + ', false)">🎛 Grafische Switch-Belegung, Uplinks &amp; Stacking öffnen</button>'
+        : '';
+
     var isFocused = (AppState.focusDeviceId === parseInt(dev.id, 10));
-    var focusBtnHtml = '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:4px;">' +
+    var focusBtnHtml = switchGraphicBtnHtml + '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:4px;">' +
         (isFocused
             ? '<button class="btn btn-sm" style="flex:1;justify-content:center;border-color:#60a5fa;background:rgba(59,130,246,0.2);color:#93c5fd;" onclick="setFocusDevice(null)">✕ Fokus-Modus beenden (Alle zeigen)</button>'
             : '<button class="btn btn-sm" style="flex:1;justify-content:center;border-color:rgba(96,165,250,0.45);color:#93c5fd;" onclick="setFocusDevice(' + dev.id + ')">🎯 Fokus: Gerät &amp; Nachbarn isolieren</button>') +
@@ -2532,7 +2567,11 @@ function openSnmpModal(devId) {
     }
 
     // 1. System-Metadaten (MIB-II & Entity-MIB)
-    var html = '<div style="background:rgba(15,23,42,0.7);border:1px solid var(--border-color);border-radius:8px;padding:14px;">' +
+    var html = '<div style="display:flex;justify-content:space-between;align-items:center;background:rgba(16,185,129,0.1);border:1px solid rgba(16,185,129,0.35);border-radius:8px;padding:10px 14px;flex-wrap:wrap;gap:10px;">' +
+        '<div style="font-size:12.5px;color:#a7f3d0;">Möchtest du die Ports dieses Geräts als <b>grafische 19-Zoll Switch-Frontblende inkl. Kaskadierung &amp; Stacking</b> sehen?</div>' +
+        '<button class="btn btn-sm btn-primary" onclick="closeSnmpModal(); openSwitchGraphicModal(' + dev.id + ', false);">🎛 Zur grafischen 19&quot; Switch-Belegung wechseln</button>' +
+    '</div>' +
+    '<div style="background:rgba(15,23,42,0.7);border:1px solid var(--border-color);border-radius:8px;padding:14px;">' +
         '<div class="panel-title" style="margin-bottom:10px;color:#34d399;">1. SNMP System- &amp; Hardware-Informationen (MIB-II / Entity-MIB)</div>' +
         '<div class="kv-grid" style="grid-template-columns: 180px 1fr;">' +
             '<div class="kv-label">sysName (Hostname)</div><div class="kv-val" style="font-weight:700;">' + escapeHtml(snmp.sysName || dev.snmp_sysname || '-') + '</div>' +
@@ -2641,6 +2680,800 @@ function openSnmpModal(devId) {
 
 function closeSnmpModal() {
     document.getElementById('snmp-modal').classList.remove('open');
+}
+
+var SwitchGraphicState = {
+    currentDevId: null,
+    isDemo: false,
+    portsByKey: {},
+    selectedPortKey: null
+};
+
+function closeSwitchGraphicModal() {
+    var m = document.getElementById('switch-graphic-modal');
+    if (m) m.classList.remove('open');
+}
+
+/**
+ * Erzeugt ein realistisches Demo-Modell (2x gestackter 28-Port Core-Switch + Upstream-Firewall + 2 kaskadierte Etagen-Switche),
+ * damit man Stacking & Switch-Kaskadierung jederzeit live testen kann.
+ */
+function buildDemoSwitchGraphicModel() {
+    var units = [
+        { unit: 1, role: 'Master (Active)', model: 'Cisco Catalyst C9300-24P (Stack Unit #1)', serial: 'FCW2248G0A1', ports: [] },
+        { unit: 2, role: 'Stack-Member (Standby)', model: 'Cisco Catalyst C9300-24P (Stack Unit #2)', serial: 'FCW2248G0B9', ports: [] }
+    ];
+
+    var demoDevicesUnit1 = {
+        1:  { name: 'SRV-PROXMOX-01', ip: '192.168.178.10', mac: '00:25:90:8A:11:01', type: 'server', speed: '1 Gbps', rx_mb: 14820.4, tx_mb: 9410.2 },
+        2:  { name: 'SRV-SYNOLOGY-NAS', ip: '192.168.178.11', mac: '00:11:32:9C:44:12', type: 'server', speed: '1 Gbps', rx_mb: 28410.0, tx_mb: 41290.8 },
+        3:  { name: 'PC-BUERO-CHEF', ip: '192.168.178.25', mac: '3C:7C:3F:1B:88:01', type: 'workstation', speed: '1 Gbps', rx_mb: 412.5, tx_mb: 128.0 },
+        4:  { name: 'PC-BUCHHALTUNG-01', ip: '192.168.178.26', mac: '3C:7C:3F:1B:88:02', type: 'workstation', speed: '1 Gbps', rx_mb: 318.1, tx_mb: 94.6 },
+        5:  { name: 'PC-VERTRIEB-01', ip: '192.168.178.27', mac: '3C:7C:3F:1B:88:03', type: 'workstation', speed: '100 Mbps', rx_mb: 85.2, tx_mb: 19.4 },
+        7:  { name: 'PRN-KYOCERA-EG', ip: '192.168.178.40', mac: '00:17:C8:55:20:99', type: 'printer', speed: '100 Mbps', rx_mb: 44.0, tx_mb: 12.1 },
+        9:  { name: 'AP-EMPFANG-WIFI6', ip: '192.168.178.51', mac: '74:83:C2:AA:10:01', type: 'ap', speed: '1 Gbps', rx_mb: 3120.8, tx_mb: 890.4 },
+        10: { name: 'AP-KONFERENZ-WIFI6', ip: '192.168.178.52', mac: '74:83:C2:AA:10:02', type: 'ap', speed: '1 Gbps', rx_mb: 1950.2, tx_mb: 610.0 },
+        12: { name: 'PC-EMPFANG-TERMINAL', ip: '192.168.178.31', mac: 'DC:A6:32:71:09:CC', type: 'workstation', speed: '1 Gbps', rx_mb: 215.0, tx_mb: 64.2, in_errors: 14 },
+        15: { name: 'PC-ENTWICKLUNG-01', ip: '192.168.178.60', mac: 'F8:75:A4:90:11:22', type: 'workstation', speed: '1 Gbps', rx_mb: 1640.5, tx_mb: 720.1 },
+        16: { name: 'PC-ENTWICKLUNG-02', ip: '192.168.178.61', mac: 'F8:75:A4:90:11:23', type: 'workstation', speed: '1 Gbps', rx_mb: 1190.0, tx_mb: 510.8 },
+        25: { name: 'FW-FRITZBOX-GATEWAY', ip: '192.168.178.1', mac: '60:B5:8D:83:0C:16', type: 'router', speed: '10 Gbps', rx_mb: 68400.0, tx_mb: 22910.5, is_uplink: true, uplink_role: 'upstream', remote_port: 'LAN 1 (WAN-Gateway)' },
+        26: { name: 'SW-ETAGE1-ARUBA', ip: '192.168.178.3', mac: 'B4:B5:2F:44:10:80', type: 'switch', speed: '10 Gbps', rx_mb: 19400.2, tx_mb: 31200.6, is_uplink: true, uplink_role: 'downstream', remote_port: 'Port 25 (SFP+ Uplink)' },
+        27: { name: 'StackWise-480 Ring A -> Unit #2', ip: 'Stack-Backplane', mac: '-', type: 'stack', speed: '40 Gbps', rx_mb: 94120.0, tx_mb: 91040.0, is_stack: true, remote_port: 'Stack-Port 2/1' },
+        28: { name: 'StackWise-480 Ring B -> Unit #2', ip: 'Stack-Backplane', mac: '-', type: 'stack', speed: '40 Gbps', rx_mb: 88210.0, tx_mb: 89300.0, is_stack: true, remote_port: 'Stack-Port 2/2' }
+    };
+
+    var demoDevicesUnit2 = {
+        1:  { name: 'SRV-BACKUP-VAULT', ip: '192.168.178.15', mac: '00:25:90:8A:99:05', type: 'server', speed: '1 Gbps', rx_mb: 51200.4, tx_mb: 4120.0 },
+        2:  { name: 'PC-DISPO-01', ip: '192.168.178.71', mac: '40:B0:76:12:33:01', type: 'workstation', speed: '1 Gbps', rx_mb: 290.4, tx_mb: 88.2 },
+        3:  { name: 'PC-DISPO-02', ip: '192.168.178.72', mac: '40:B0:76:12:33:02', type: 'workstation', speed: '1 Gbps', rx_mb: 310.0, tx_mb: 91.5 },
+        6:  { name: 'PRN-BROTHER-VERSAND', ip: '192.168.178.42', mac: '30:05:5C:88:19:44', type: 'printer', speed: '100 Mbps', rx_mb: 18.2, tx_mb: 4.9 },
+        8:  { name: 'AP-LAGER-HALLE', ip: '192.168.178.55', mac: '74:83:C2:AA:10:09', type: 'ap', speed: '1 Gbps', rx_mb: 980.1, tx_mb: 340.7 },
+        11: { name: 'IOT-ZEITERFASSUNG', ip: '192.168.178.90', mac: 'B8:27:EB:45:12:09', type: 'workstation', speed: '100 Mbps', rx_mb: 12.4, tx_mb: 8.1 },
+        26: { name: 'SW-LAGER-NETGEAR', ip: '192.168.178.4', mac: '28:C6:8E:91:00:11', type: 'switch', speed: '10 Gbps', rx_mb: 8420.5, tx_mb: 12940.0, is_uplink: true, uplink_role: 'downstream', remote_port: 'Gi0/24 (Trunk)' },
+        27: { name: 'StackWise-480 Ring A -> Unit #1', ip: 'Stack-Backplane', mac: '-', type: 'stack', speed: '40 Gbps', rx_mb: 91040.0, tx_mb: 94120.0, is_stack: true, remote_port: 'Stack-Port 1/1' },
+        28: { name: 'StackWise-480 Ring B -> Unit #1', ip: 'Stack-Backplane', mac: '-', type: 'stack', speed: '40 Gbps', rx_mb: 89300.0, tx_mb: 88210.0, is_stack: true, remote_port: 'Stack-Port 1/2' }
+    };
+
+    for (var u = 0; u < 2; u++) {
+        var unitNo = u + 1;
+        var map = (unitNo === 1) ? demoDevicesUnit1 : demoDevicesUnit2;
+        for (var p = 1; p <= 28; p++) {
+            var isSfp = (p >= 25);
+            var prefix = isSfp ? ('Te' + unitNo + '/0/' + p) : ('Gi' + unitNo + '/0/' + p);
+            var d = map[p] || null;
+            units[u].ports.push({
+                key: 'u' + unitNo + '_p' + p,
+                unit: unitNo,
+                portNum: p,
+                name: prefix,
+                shortName: String(p),
+                isSfp: isSfp,
+                status: d ? 'up' : 'down',
+                speed: d ? d.speed : 'Down',
+                alias: d ? (d.is_uplink ? ('Uplink: ' + d.name) : (d.is_stack ? 'Stack-Backplane' : d.name)) : 'Freier Port',
+                rx_mb: d ? d.rx_mb : 0,
+                tx_mb: d ? d.tx_mb : 0,
+                in_errors: (d && d.in_errors) ? d.in_errors : 0,
+                isUplink: !!(d && d.is_uplink),
+                uplinkRole: (d && d.uplink_role) ? d.uplink_role : null,
+                isStackPort: !!(d && d.is_stack),
+                remotePort: (d && d.remote_port) ? d.remote_port : '',
+                connectedDevices: d ? [{
+                    id: 0,
+                    name: d.name,
+                    ip: d.ip,
+                    mac: d.mac,
+                    type: d.type
+                }] : []
+            });
+        }
+    }
+
+    return {
+        isDemo: true,
+        switchName: 'SW-CORE-STACK01 (Demo 2x Switch-Stack)',
+        switchIp: '192.168.178.2',
+        vendor: 'Cisco Catalyst 9300 Stack (2 Units)',
+        model: '2x C9300-24P-A im StackWise-480 Verbund',
+        upstreamLinks: [
+            {
+                localPort: 'Te1/0/25',
+                remotePort: 'LAN 1 (WAN-Gateway)',
+                remoteName: 'FW-FRITZBOX-GATEWAY',
+                remoteIp: '192.168.178.1',
+                remoteType: 'router',
+                remoteId: 0,
+                linkType: 'LLDP / 10G SFP+ Uplink'
+            }
+        ],
+        downstreamSwitches: [
+            {
+                localPort: 'Te1/0/26',
+                remotePort: 'Port 25 (SFP+ Uplink)',
+                remoteName: 'SW-ETAGE1-ARUBA',
+                remoteIp: '192.168.178.3',
+                remoteType: 'switch',
+                remoteId: 0,
+                linkType: 'LLDP / 10G Trunk (Unit #1)'
+            },
+            {
+                localPort: 'Te2/0/26',
+                remotePort: 'Gi0/24 (Trunk)',
+                remoteName: 'SW-LAGER-NETGEAR',
+                remoteIp: '192.168.178.4',
+                remoteType: 'switch',
+                remoteId: 0,
+                linkType: 'Bridge-MIB / 10G Trunk (Unit #2)'
+            }
+        ],
+        units: units
+    };
+}
+
+/**
+ * Baut das Switch-Grafik-Modell aus den echten Scan- & SNMP-Daten eines Switches/Routers im Netzwerkplan
+ */
+function buildRealSwitchGraphicModel(dev) {
+    var devById = {};
+    var devByMac = {};
+    for (var i = 0; i < AppState.devices.length; i++) {
+        var d = AppState.devices[i];
+        devById[d.id] = d;
+        if (d.mac_address) {
+            devByMac[d.mac_address.toUpperCase()] = d;
+        }
+    }
+
+    var snmp = {};
+    if (dev.snmp_ports_json) {
+        try { snmp = JSON.parse(dev.snmp_ports_json) || {}; } catch (e) {}
+    }
+
+    var swName = dev.custom_name || dev.snmp_sysname || dev.hostname || dev.ip_address;
+
+    // 1. Upstream-Verbindungen (An welchem Switch/Router hängt dieser Switch?)
+    var upstreamLinks = [];
+    // 2. Downstream-Switche / APs (Welche weiteren Switche/APs hängen an diesem Switch?)
+    var downstreamSwitches = [];
+    // 3. Zugeordnete Geräte pro lokalem Portnamen
+    var devicesByPortName = {};
+
+    function addDeviceToPortMap(portNameRaw, targetDev, remotePortName, isUplinkFlag, uplinkRoleStr) {
+        if (!portNameRaw || !targetDev) return;
+        var key = String(portNameRaw).trim();
+        if (!devicesByPortName[key]) {
+            devicesByPortName[key] = {
+                list: [],
+                remotePort: remotePortName || '',
+                isUplink: !!isUplinkFlag,
+                uplinkRole: uplinkRoleStr || null
+            };
+        }
+        var exists = false;
+        for (var x = 0; x < devicesByPortName[key].list.length; x++) {
+            if (parseInt(devicesByPortName[key].list[x].id, 10) === parseInt(targetDev.id, 10)) {
+                exists = true;
+                break;
+            }
+        }
+        if (!exists) {
+            devicesByPortName[key].list.push({
+                id: targetDev.id,
+                name: targetDev.custom_name || targetDev.hostname || targetDev.snmp_sysname || targetDev.ip_address,
+                ip: targetDev.ip_address,
+                mac: targetDev.mac_address || '-',
+                type: targetDev.device_type || 'workstation'
+            });
+        }
+        if (isUplinkFlag) {
+            devicesByPortName[key].isUplink = true;
+            devicesByPortName[key].uplinkRole = uplinkRoleStr;
+            if (remotePortName) devicesByPortName[key].remotePort = remotePortName;
+        }
+    }
+
+    for (var l = 0; l < AppState.links.length; l++) {
+        var lnk = AppState.links[l];
+        var srcId = parseInt(lnk.source_device_id, 10);
+        var dstId = parseInt(lnk.target_device_id, 10);
+        var myId = parseInt(dev.id, 10);
+
+        if (dstId === myId && devById[srcId]) {
+            // Dieser Switch ist Ziel -> srcId ist der übergeordnete Switch/Router (Upstream)
+            var parentDev = devById[srcId];
+            var myUplinkPort = (lnk.target_port && lnk.target_port !== 'eth0') ? lnk.target_port : 'Uplink';
+            var parentDownPort = lnk.source_port || 'Port';
+            upstreamLinks.push({
+                localPort: myUplinkPort,
+                remotePort: parentDownPort,
+                remoteName: parentDev.custom_name || parentDev.hostname || parentDev.snmp_sysname || parentDev.ip_address,
+                remoteIp: parentDev.ip_address,
+                remoteType: parentDev.device_type,
+                remoteId: parentDev.id,
+                linkType: (lnk.link_type || 'uplink').toUpperCase()
+            });
+            if (myUplinkPort !== 'Uplink') {
+                addDeviceToPortMap(myUplinkPort, parentDev, parentDownPort, true, 'upstream');
+            }
+        } else if (srcId === myId && devById[dstId]) {
+            // Dieser Switch ist Quelle -> dstId hängt an diesem Switch
+            var childDev = devById[dstId];
+            var localPort = lnk.source_port || ('Port #' + (l + 1));
+            var childPort = (lnk.target_port && lnk.target_port !== 'eth0') ? lnk.target_port : '';
+            var isChildInfra = (childDev.device_type === 'switch' || childDev.device_type === 'router' || childDev.device_type === 'ap');
+            if (isChildInfra) {
+                downstreamSwitches.push({
+                    localPort: localPort,
+                    remotePort: childPort || 'Uplink',
+                    remoteName: childDev.custom_name || childDev.hostname || childDev.snmp_sysname || childDev.ip_address,
+                    remoteIp: childDev.ip_address,
+                    remoteType: childDev.device_type,
+                    remoteId: childDev.id,
+                    linkType: (lnk.link_type || 'trunk').toUpperCase()
+                });
+            }
+            addDeviceToPortMap(localPort, childDev, childPort, isChildInfra, isChildInfra ? 'downstream' : null);
+        }
+    }
+
+    // Ergänze außerdem Geräte aus der SNMP Bridge-MIB MAC-Tabelle
+    if (snmp.mac_table) {
+        var mKeys = Object.keys(snmp.mac_table);
+        for (var mk = 0; mk < mKeys.length; mk++) {
+            var macStr = mKeys[mk];
+            var mEntry = snmp.mac_table[macStr];
+            var pName = mEntry.port_name || ('Port ' + mEntry.bridge_port);
+            var matchedDev = devByMac[macStr.toUpperCase()];
+            if (matchedDev && parseInt(matchedDev.id, 10) !== parseInt(dev.id, 10)) {
+                var isInfra = (matchedDev.device_type === 'switch' || matchedDev.device_type === 'router');
+                addDeviceToPortMap(pName, matchedDev, '', isInfra, isInfra ? 'downstream' : null);
+            }
+        }
+    }
+
+    // 4. Physische Switch-Units & Ports aus SNMP IF-MIB aufbauen (oder Fallback-Chassis falls kein SNMP aktiv)
+    var rawIfs = snmp.interfaces || [];
+    var physicalIfs = [];
+    for (var idx = 0; idx < rawIfs.length; idx++) {
+        var inf = rawIfs[idx];
+        var nLower = String(inf.name || '').toLowerCase();
+        if (nLower.indexOf('vlan') === 0 || nLower === 'lo' || nLower.indexOf('loopback') === 0 || nLower.indexOf('null') === 0 || nLower.indexOf('cpu') === 0) {
+            continue;
+        }
+        physicalIfs.push(inf);
+    }
+
+    var unitsMap = {};
+    if (physicalIfs.length > 0) {
+        for (var p = 0; p < physicalIfs.length; p++) {
+            var pi = physicalIfs[p];
+            var pNameStr = String(pi.name || ('Port ' + (p + 1)));
+            var uNo = pi.stack_unit ? parseInt(pi.stack_unit, 10) : 1;
+            var pNo = pi.port_num ? parseInt(pi.port_num, 10) : (p + 1);
+
+            // Falls ältere SNMP-JSON noch kein stack_unit Feld hatte, live aus Portnamen wie Gi2/0/15 extrahieren
+            var stackMatch = pNameStr.match(/^(?:Gi|Fa|Te|Tw|Fo|Eth|ge-|xe-|et-|Port)?\s*([1-8])\/(\d+)\/(\d+)$/i);
+            if (stackMatch) {
+                uNo = parseInt(stackMatch[1], 10);
+                pNo = parseInt(stackMatch[3], 10);
+            } else {
+                var numMatch = pNameStr.match(/(\d+)$/);
+                if (numMatch) pNo = parseInt(numMatch[1], 10);
+            }
+
+            if (!unitsMap[uNo]) {
+                unitsMap[uNo] = [];
+            }
+
+            var mapped = devicesByPortName[pNameStr] || null;
+            var nUp = pNameStr.toLowerCase();
+            var isSfpPort = (nUp.indexOf('te') === 0 || nUp.indexOf('sfp') !== -1 || nUp.indexOf('xg') !== -1 || pNo > 24 && pNo <= 28 || pNo > 48);
+            var isStack = (nUp.indexOf('stack') !== -1 || (pi.alias && String(pi.alias).toLowerCase().indexOf('stack') !== -1));
+
+            unitsMap[uNo].push({
+                key: 'u' + uNo + '_p' + pNo + '_' + p,
+                unit: uNo,
+                portNum: pNo,
+                name: pNameStr,
+                shortName: String(pNo),
+                isSfp: isSfpPort,
+                status: (pi.status === 'up' || (mapped && mapped.list.length > 0)) ? 'up' : 'down',
+                speed: pi.speed || ((mapped && mapped.list.length > 0) ? '1 Gbps' : 'Down'),
+                alias: pi.alias || (mapped && mapped.list.length > 0 ? mapped.list[0].name : ''),
+                rx_mb: pi.rx_mb || 0,
+                tx_mb: pi.tx_mb || 0,
+                in_errors: pi.in_errors || 0,
+                isUplink: !!(mapped && mapped.isUplink),
+                uplinkRole: mapped ? mapped.uplinkRole : null,
+                isStackPort: isStack,
+                remotePort: mapped ? mapped.remotePort : '',
+                connectedDevices: mapped ? mapped.list : []
+            });
+        }
+    } else {
+        // Fallback für Switches/Router ohne SNMP IF-MIB: Baue ein 8- oder 24-Port Panel aus den bekannten Topologie-Links
+        var pKeys = Object.keys(devicesByPortName);
+        var minPorts = Math.max(8, pKeys.length <= 8 ? 8 : (pKeys.length <= 16 ? 16 : 24));
+        unitsMap[1] = [];
+        var usedPortNums = {};
+
+        for (var pk = 0; pk < pKeys.length; pk++) {
+            var pLabel = pKeys[pk];
+            var pInfo = devicesByPortName[pLabel];
+            var pNumber = pk + 1;
+            var nm = pLabel.match(/(\d+)$/);
+            if (nm) {
+                var candNo = parseInt(nm[1], 10);
+                if (candNo >= 1 && candNo <= 52 && !usedPortNums[candNo]) {
+                    pNumber = candNo;
+                }
+            }
+            while (usedPortNums[pNumber]) pNumber++;
+            usedPortNums[pNumber] = true;
+            if (pNumber > minPorts) minPorts = (pNumber <= 24) ? 24 : 28;
+
+            unitsMap[1].push({
+                key: 'u1_p' + pNumber,
+                unit: 1,
+                portNum: pNumber,
+                name: pLabel,
+                shortName: String(pNumber),
+                isSfp: pNumber > 24,
+                status: 'up',
+                speed: pInfo.isUplink ? '1 Gbps Uplink' : '1 Gbps',
+                alias: pInfo.list.length > 0 ? pInfo.list[0].name : pLabel,
+                rx_mb: 0,
+                tx_mb: 0,
+                in_errors: 0,
+                isUplink: pInfo.isUplink,
+                uplinkRole: pInfo.uplinkRole,
+                isStackPort: false,
+                remotePort: pInfo.remotePort || '',
+                connectedDevices: pInfo.list
+            });
+        }
+
+        for (var fp = 1; fp <= minPorts; fp++) {
+            if (!usedPortNums[fp]) {
+                unitsMap[1].push({
+                    key: 'u1_p' + fp,
+                    unit: 1,
+                    portNum: fp,
+                    name: 'Port ' + fp,
+                    shortName: String(fp),
+                    isSfp: fp > 24,
+                    status: 'down',
+                    speed: 'Down',
+                    alias: 'Freier Port',
+                    rx_mb: 0,
+                    tx_mb: 0,
+                    in_errors: 0,
+                    isUplink: false,
+                    uplinkRole: null,
+                    isStackPort: false,
+                    remotePort: '',
+                    connectedDevices: []
+                });
+            }
+        }
+    }
+
+    var unitKeys = Object.keys(unitsMap).map(function (k) { return parseInt(k, 10); }).sort(function (a, b) { return a - b; });
+    var units = [];
+    for (var uk = 0; uk < unitKeys.length; uk++) {
+        var uNum = unitKeys[uk];
+        var sortedPorts = unitsMap[uNum].sort(function (a, b) { return a.portNum - b.portNum; });
+        units.push({
+            unit: uNum,
+            role: (unitKeys.length > 1) ? (uNum === 1 ? 'Master (Stack Unit #1)' : ('Stack-Member (Unit #' + uNum + ')')) : 'Standalone Chassis',
+            model: (snmp.deviceModel || dev.vendor || 'Managed Switch') + (unitKeys.length > 1 ? (' – Unit #' + uNum) : ''),
+            serial: snmp.serialNumber || '-',
+            ports: sortedPorts
+        });
+    }
+
+    return {
+        isDemo: false,
+        switchName: swName,
+        switchIp: dev.ip_address,
+        vendor: dev.vendor || 'Managed Switch',
+        model: snmp.deviceModel || dev.snmp_sysdescr || dev.vendor || 'Netzwerk-Switch',
+        upstreamLinks: upstreamLinks,
+        downstreamSwitches: downstreamSwitches,
+        units: units
+    };
+}
+
+function openSwitchGraphicModal(devId, isDemoPreview) {
+    var modal = document.getElementById('switch-graphic-modal');
+    var titleEl = document.getElementById('switch-graphic-title');
+    var bodyEl = document.getElementById('switch-graphic-body');
+    if (!modal || !bodyEl) return;
+
+    var model = null;
+    if (isDemoPreview) {
+        model = buildDemoSwitchGraphicModel();
+    } else {
+        var dev = null;
+        for (var i = 0; i < AppState.devices.length; i++) {
+            if (parseInt(AppState.devices[i].id, 10) === parseInt(devId, 10)) {
+                dev = AppState.devices[i];
+                break;
+            }
+        }
+        if (!dev) {
+            model = buildDemoSwitchGraphicModel();
+        } else {
+            model = buildRealSwitchGraphicModel(dev);
+        }
+    }
+
+    SwitchGraphicState.currentDevId = devId;
+    SwitchGraphicState.isDemo = model.isDemo;
+    SwitchGraphicState.portsByKey = {};
+    SwitchGraphicState.selectedPortKey = null;
+
+    var isStacked = model.units.length > 1;
+    titleEl.innerHTML = '🎛 ' + escapeHtml(model.switchName) + ' <span style="font-family:monospace;color:#93c5fd;font-size:14px;">(' + escapeHtml(model.switchIp) + ')</span>' +
+        (isStacked ? (' <span class="badge" style="background:rgba(168,85,247,0.25);border:1px solid #a855f7;color:#e9d5ff;margin-left:8px;">📚 STACK: ' + model.units.length + ' SWITCHE</span>') : '');
+
+    var html = '';
+
+    if (model.isDemo) {
+        html += '<div style="background:rgba(168,85,247,0.12);border:1px solid rgba(168,85,247,0.45);border-radius:8px;padding:10px 14px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">' +
+            '<div style="font-size:12.5px;color:#e9d5ff;"><b>👁 Vorschau-Modus (Demo-Stack &amp; Kaskade):</b> Zeigt exemplarisch einen <b>2x gestackten Core-Switch</b> (Unit #1 + Unit #2 über StackWise-Backplane) sowie dessen <b>Upstream-Gateway</b> und <b>2 kaskadierte Unterverteiler-Switche</b>.</div>' +
+            (SwitchGraphicState.currentDevId ? '<button class="btn btn-sm" onclick="openSwitchGraphicModal(' + SwitchGraphicState.currentDevId + ', false)">↩ Zurück zum ausgewählten Gerät</button>' : '') +
+        '</div>';
+    }
+
+    // =========================================================================
+    // 1. GRAFISCHES KASKADEN- & UPLINK-SCHALTBILD (Welcher Switch hängt an welchem?)
+    // =========================================================================
+    html += '<div style="background:rgba(15,23,42,0.85);border:1px solid var(--border-color);border-radius:10px;padding:14px;">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px;">' +
+            '<div style="font-size:12.5px;font-weight:700;color:#60a5fa;text-transform:uppercase;letter-spacing:0.04em;">🔗 1. Switch-Kaskadierung, Uplinks &amp; Stack-Topologie (Wer hängt an wem?)</div>' +
+            '<div style="font-size:11.5px;color:var(--text-secondary);">Zeigt Upstream-Port (Richtung Router/Core) und Downstream-Trunks (weiterführende Switche/APs)</div>' +
+        '</div>' +
+        '<div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(260px, 1fr));gap:14px;align-items:stretch;">';
+
+    // Spalte A: Upstream (Übergeordneter Router / Core-Switch)
+    html += '<div style="background:rgba(30,41,59,0.7);border:1px solid rgba(59,130,246,0.35);border-radius:8px;padding:12px;display:flex;flex-direction:column;justify-content:space-between;">' +
+        '<div style="font-size:11px;font-weight:700;color:#93c5fd;text-transform:uppercase;margin-bottom:8px;">⬆ Upstream (Übergeordneter Verteiler)</div>';
+    if (model.upstreamLinks.length > 0) {
+        for (var u = 0; u < model.upstreamLinks.length; u++) {
+            var up = model.upstreamLinks[u];
+            var clickUp = up.remoteId ? ('onclick="closeSwitchGraphicModal(); selectDevice(' + up.remoteId + ');" style="cursor:pointer;"') : '';
+            html += '<div ' + clickUp + ' style="background:rgba(15,23,42,0.9);border:1px solid #3b82f6;border-radius:6px;padding:9px;margin-bottom:6px;">' +
+                '<div style="font-weight:700;font-size:13px;color:#f8fafc;">' + escapeHtml(up.remoteName) + '</div>' +
+                '<div style="font-family:monospace;font-size:11.5px;color:#93c5fd;">' + escapeHtml(up.remoteIp) + ' • ' + escapeHtml(up.linkType) + '</div>' +
+                '<div style="margin-top:6px;padding-top:6px;border-top:1px dashed rgba(148,163,184,0.25);font-family:monospace;font-size:11.5px;color:#34d399;display:flex;justify-content:space-between;">' +
+                    '<span>Gegenstelle: <b>' + escapeHtml(up.remotePort) + '</b></span>' +
+                    '<span>⇄</span>' +
+                    '<span>Hier: <b>' + escapeHtml(up.localPort) + '</b></span>' +
+                '</div>' +
+            '</div>';
+        }
+    } else {
+        html += '<div style="font-size:12px;color:var(--text-secondary);padding:12px 0;">Kein übergeordneter Switch ermittelt (dieses Gerät bildet die Core-/Root-Ebene).</div>';
+    }
+    html += '</div>';
+
+    // Spalte B: Aktueller Switch / Switch-Stack in der Mitte
+    html += '<div style="background:linear-gradient(135deg, rgba(16,185,129,0.14), rgba(168,85,247,0.14));border:2px solid ' + (isStacked ? '#a855f7' : '#10b981') + ';border-radius:8px;padding:12px;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;">' +
+        '<div style="font-size:11px;font-weight:700;color:' + (isStacked ? '#e9d5ff' : '#6ee7b7') + ';text-transform:uppercase;margin-bottom:4px;">' +
+            (isStacked ? ('📚 Gestackter Switch-Verbund (' + model.units.length + ' Einheiten)') : '🎛 Aktuell betrachteter Switch') +
+        '</div>' +
+        '<div style="font-size:15px;font-weight:800;color:#ffffff;">' + escapeHtml(model.switchName) + '</div>' +
+        '<div style="font-family:monospace;font-size:12px;color:#93c5fd;margin-top:2px;">IP: ' + escapeHtml(model.switchIp) + '</div>' +
+        '<div style="font-size:11.5px;color:var(--text-secondary);margin-top:4px;">' + escapeHtml(model.model) + '</div>';
+    if (isStacked) {
+        html += '<div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap;justify-content:center;">';
+        for (var su = 0; su < model.units.length; su++) {
+            html += '<span class="badge" style="background:rgba(168,85,247,0.28);border:1px solid #c084fc;color:#f3e8ff;font-size:11px;">Unit #' + model.units[su].unit + ' (' + escapeHtml(model.units[su].role) + ')</span>';
+        }
+        html += '</div>';
+    }
+    html += '</div>';
+
+    // Spalte C: Downstream (Darunter kaskadierte Switche & Access Points)
+    html += '<div style="background:rgba(30,41,59,0.7);border:1px solid rgba(16,185,129,0.35);border-radius:8px;padding:12px;display:flex;flex-direction:column;justify-content:space-between;">' +
+        '<div style="font-size:11px;font-weight:700;color:#6ee7b7;text-transform:uppercase;margin-bottom:8px;">⬇ Downstream (Kaskadierte Switche &amp; APs: ' + model.downstreamSwitches.length + ')</div>';
+    if (model.downstreamSwitches.length > 0) {
+        for (var d = 0; d < model.downstreamSwitches.length; d++) {
+            var dw = model.downstreamSwitches[d];
+            var clickDw = dw.remoteId ? ('onclick="openSwitchGraphicModal(' + dw.remoteId + ', false)" style="cursor:pointer;" title="Klicken, um die Switch-Grafik von ' + escapeHtml(dw.remoteName) + ' zu öffnen"') : '';
+            html += '<div ' + clickDw + ' style="background:rgba(15,23,42,0.9);border:1px solid #10b981;border-radius:6px;padding:9px;margin-bottom:6px;">' +
+                '<div style="display:flex;justify-content:space-between;align-items:center;">' +
+                    '<span style="font-weight:700;font-size:13px;color:#f8fafc;">' + escapeHtml(dw.remoteName) + '</span>' +
+                    '<span class="badge badge-snmp" style="font-size:10px;">' + escapeHtml(dw.remoteType.toUpperCase()) + '</span>' +
+                '</div>' +
+                '<div style="font-family:monospace;font-size:11.5px;color:#93c5fd;">' + escapeHtml(dw.remoteIp) + ' • ' + escapeHtml(dw.linkType) + '</div>' +
+                '<div style="margin-top:6px;padding-top:6px;border-top:1px dashed rgba(148,163,184,0.25);font-family:monospace;font-size:11.5px;color:#fcd34d;display:flex;justify-content:space-between;">' +
+                    '<span>Hier: <b>' + escapeHtml(dw.localPort) + '</b></span>' +
+                    '<span>➔</span>' +
+                    '<span>Ziel: <b>' + escapeHtml(dw.remotePort) + '</b></span>' +
+                '</div>' +
+            '</div>';
+        }
+    } else {
+        html += '<div style="font-size:12px;color:var(--text-secondary);padding:12px 0;">Keine weiteren nachgeschalteten Switche oder Access Points an diesem Verteiler erkannt (reiner Access-Switch).</div>';
+    }
+    html += '</div>';
+
+    html += '</div></div>';
+
+    // =========================================================================
+    // 2. FARB-LEGENDE & 19-ZOLL FRONTBLENDEN PRO STACK-UNIT
+    // =========================================================================
+    html += '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;padding:4px 2px;">' +
+        '<div style="font-size:12.5px;font-weight:700;color:#f8fafc;text-transform:uppercase;">🎛 2. Physische 19-Zoll Switch-Frontblende (Klick auf eine RJ45-/SFP-Buchse für Port-Details)</div>' +
+        '<div style="display:flex;gap:12px;flex-wrap:wrap;font-size:11.5px;color:var(--text-secondary);">' +
+            '<span><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:#10b981;margin-right:4px;"></span>1G / 10G Aktiv</span>' +
+            '<span><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:#f59e0b;margin-right:4px;"></span>100M / 10M (FastEth/PoE)</span>' +
+            '<span><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:#3b82f6;margin-right:4px;"></span>Uplink / Kaskaden-Trunk</span>' +
+            '<span><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:#a855f7;margin-right:4px;"></span>Stack-Backplane</span>' +
+            '<span><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:#334155;margin-right:4px;"></span>Port Frei (Down)</span>' +
+        '</div>' +
+    '</div>';
+
+    for (var uIdx = 0; uIdx < model.units.length; uIdx++) {
+        var unitObj = model.units[uIdx];
+        var copperPorts = [];
+        var sfpPorts = [];
+
+        for (var pi = 0; pi < unitObj.ports.length; pi++) {
+            var prt = unitObj.ports[pi];
+            SwitchGraphicState.portsByKey[prt.key] = prt;
+            if (!SwitchGraphicState.selectedPortKey && prt.status === 'up') {
+                SwitchGraphicState.selectedPortKey = prt.key;
+            }
+            if (prt.isSfp) {
+                sfpPorts.push(prt);
+            } else {
+                copperPorts.push(prt);
+            }
+        }
+        if (!SwitchGraphicState.selectedPortKey && unitObj.ports.length > 0) {
+            SwitchGraphicState.selectedPortKey = unitObj.ports[0].key;
+        }
+
+        // Teile RJ45-Ports wie bei echten 19"-Switchen in obere Reihe (ungerade: 1, 3, 5...) und untere Reihe (gerade: 2, 4, 6...)
+        var topRowPorts = [];
+        var botRowPorts = [];
+        for (var cp = 0; cp < copperPorts.length; cp++) {
+            if (cp % 2 === 0) {
+                topRowPorts.push(copperPorts[cp]);
+            } else {
+                botRowPorts.push(copperPorts[cp]);
+            }
+        }
+
+        var activeCnt = 0;
+        for (var ac = 0; ac < unitObj.ports.length; ac++) {
+            if (unitObj.ports[ac].status === 'up') activeCnt++;
+        }
+
+        // Falls mehrere Stack-Units vorhanden sind, zeichne zwischen den Gehäusen das Stack-Verbindungskabel
+        if (uIdx > 0) {
+            html += '<div style="display:flex;align-items:center;justify-content:center;gap:12px;margin:-4px 0;">' +
+                '<div style="height:22px;width:4px;background:linear-gradient(180deg, #a855f7, #ec4899);border-radius:2px;"></div>' +
+                '<div style="background:rgba(168,85,247,0.2);border:1px solid #a855f7;color:#e9d5ff;font-size:11px;font-weight:700;padding:2px 12px;border-radius:999px;font-family:monospace;">' +
+                    '⚡ High-Speed Stack-Backplane Ring (Unit #' + model.units[uIdx - 1].unit + ' ⇄ Unit #' + unitObj.unit + ')' +
+                '</div>' +
+                '<div style="height:22px;width:4px;background:linear-gradient(180deg, #a855f7, #ec4899);border-radius:2px;"></div>' +
+            '</div>';
+        }
+
+        // 19-Zoll Metallgehäuse mit Rack-Ohren links & rechts
+        html += '<div style="display:flex;align-items:stretch;gap:0;background:#090d16;border:2px solid ' + (isStacked ? '#7e22ce' : '#475569') + ';border-radius:10px;overflow:hidden;box-shadow:0 10px 25px rgba(0,0,0,0.45);">' +
+            // Linker 19" Rack-Haltewinkel
+            '<div style="width:22px;background:linear-gradient(90deg, #1e293b, #334155);border-right:2px solid #0f172a;display:flex;flex-direction:column;justify-content:space-between;align-items:center;padding:10px 0;">' +
+                '<span style="width:8px;height:12px;border-radius:4px;background:#090d16;border:1px solid #64748b;"></span>' +
+                '<span style="writing-mode:vertical-rl;font-size:9px;font-family:monospace;color:#94a3b8;letter-spacing:1px;">19&quot; RACK</span>' +
+                '<span style="width:8px;height:12px;border-radius:4px;background:#090d16;border:1px solid #64748b;"></span>' +
+            '</div>' +
+            // Haupt-Frontblende
+            '<div style="flex:1;padding:12px 14px;display:flex;flex-direction:column;gap:10px;overflow-x:auto;">' +
+                // Chassis-Kopfzeile (Modell, Unit-Badge, System-LEDs)
+                '<div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid rgba(148,163,184,0.2);padding-bottom:8px;flex-wrap:wrap;gap:8px;">' +
+                    '<div style="display:flex;align-items:center;gap:10px;">' +
+                        '<span style="background:' + (uIdx === 0 ? '#10b981' : '#a855f7') + ';color:#0f172a;font-weight:800;font-family:monospace;font-size:12px;padding:3px 9px;border-radius:5px;">UNIT #' + unitObj.unit + '</span>' +
+                        '<div>' +
+                            '<div style="font-weight:700;font-size:13.5px;color:#f8fafc;">' + escapeHtml(unitObj.model) + ' <span style="color:#93c5fd;font-size:12px;">(' + escapeHtml(unitObj.role) + ')</span></div>' +
+                            '<div style="font-size:11px;color:var(--text-secondary);font-family:monospace;">SN: ' + escapeHtml(unitObj.serial) + ' • ' + activeCnt + ' von ' + unitObj.ports.length + ' Ports aktiv</div>' +
+                        '</div>' +
+                    '</div>' +
+                    '<div style="display:flex;align-items:center;gap:12px;font-family:monospace;font-size:11px;color:#94a3b8;">' +
+                        '<span><span class="port-led up" style="display:inline-block;margin-right:4px;"></span>PWR</span>' +
+                        '<span><span class="port-led up" style="display:inline-block;margin-right:4px;"></span>SYST</span>' +
+                        (isStacked ? '<span><span class="port-led up" style="display:inline-block;background:#a855f7;box-shadow:0 0 6px #a855f7;margin-right:4px;"></span>MSTR/STACK</span>' : '') +
+                    '</div>' +
+                '</div>' +
+                // Port-Matrix (Links 2-reihiges RJ45-Feld in 4er/6er-Portgruppen, Rechts abgetrenntes SFP+/Uplink-Modul)
+                '<div style="display:flex;align-items:stretch;gap:18px;min-width:max-content;">' +
+                    // RJ45 Port-Block (Ober- & Unterreihe)
+                    '<div style="display:flex;flex-direction:column;gap:8px;background:#111827;border:1px solid #374151;border-radius:8px;padding:10px;">' +
+                        '<div style="display:flex;gap:6px;">' + renderSwitchPortRowHtml(topRowPorts, 'top') + '</div>' +
+                        '<div style="display:flex;gap:6px;">' + renderSwitchPortRowHtml(botRowPorts, 'bottom') + '</div>' +
+                    '</div>';
+
+        if (sfpPorts.length > 0) {
+            html += '<div style="display:flex;flex-direction:column;justify-content:space-between;background:#172554;border:1px solid #3b82f6;border-radius:8px;padding:10px;">' +
+                '<div style="font-size:10px;font-weight:700;color:#93c5fd;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px;text-align:center;">SFP+ / Uplink / Stack</div>' +
+                '<div style="display:flex;gap:6px;align-items:center;flex:1;">' + renderSwitchPortRowHtml(sfpPorts, 'sfp') + '</div>' +
+            '</div>';
+        }
+
+        html +=     '</div>' +
+            '</div>' +
+            // Rechter 19" Rack-Haltewinkel
+            '<div style="width:22px;background:linear-gradient(90deg, #334155, #1e293b);border-left:2px solid #0f172a;display:flex;flex-direction:column;justify-content:space-between;align-items:center;padding:10px 0;">' +
+                '<span style="width:8px;height:12px;border-radius:4px;background:#090d16;border:1px solid #64748b;"></span>' +
+                '<span style="writing-mode:vertical-rl;font-size:9px;font-family:monospace;color:#94a3b8;letter-spacing:1px;">19&quot; RACK</span>' +
+                '<span style="width:8px;height:12px;border-radius:4px;background:#090d16;border:1px solid #64748b;"></span>' +
+            '</div>' +
+        '</div>';
+    }
+
+    // =========================================================================
+    // 3. INTERAKTIVE PORT-INSPEKTOR-BOX (Detailansicht bei Klick auf einen Port)
+    // =========================================================================
+    html += '<div id="switch-graphic-port-inspector" style="background:rgba(15,23,42,0.9);border:1px solid var(--border-color);border-radius:10px;padding:14px;"></div>';
+
+    bodyEl.innerHTML = html;
+    modal.classList.add('open');
+
+    if (SwitchGraphicState.selectedPortKey) {
+        selectSwitchGraphicPort(SwitchGraphicState.selectedPortKey);
+    }
+}
+
+function renderSwitchPortRowHtml(portList, rowPosition) {
+    var out = '';
+    for (var i = 0; i < portList.length; i++) {
+        var p = portList[i];
+        var isUp = (p.status === 'up');
+        var spLower = String(p.speed || '').toLowerCase();
+        var isFastEth = (isUp && (spLower.indexOf('100 ') !== -1 || spLower.indexOf('10 ') === 0));
+
+        var borderCol = '#334155';
+        var bgCol = '#1e293b';
+        var ledCol = '#475569';
+        var badgeCol = '#94a3b8';
+
+        if (p.isStackPort) {
+            borderCol = '#a855f7';
+            bgCol = 'rgba(168, 85, 247, 0.22)';
+            ledCol = '#c084fc';
+            badgeCol = '#e9d5ff';
+        } else if (p.isUplink) {
+            borderCol = '#3b82f6';
+            bgCol = 'rgba(59, 130, 246, 0.24)';
+            ledCol = '#60a5fa';
+            badgeCol = '#bfdbfe';
+        } else if (isUp && isFastEth) {
+            borderCol = '#f59e0b';
+            bgCol = 'rgba(245, 158, 11, 0.18)';
+            ledCol = '#fbbf24';
+            badgeCol = '#fde68a';
+        } else if (isUp) {
+            borderCol = '#10b981';
+            bgCol = 'rgba(16, 185, 129, 0.18)';
+            ledCol = '#34d399';
+            badgeCol = '#a7f3d0';
+        }
+
+        // Kleiner optischer Abstand nach jeweils 4 Spalten (= 8 Ports wie bei echten Switch-Portblöcken)
+        var groupMargin = (rowPosition !== 'sfp' && i > 0 && i % 4 === 0) ? 'margin-left:8px;' : '';
+
+        var devLabel = 'Frei';
+        if (p.isStackPort) {
+            devLabel = 'STACK';
+        } else if (p.connectedDevices && p.connectedDevices.length > 0) {
+            devLabel = p.connectedDevices[0].name;
+            if (p.connectedDevices.length > 1) {
+                devLabel = '+' + p.connectedDevices.length + ' MACs';
+            }
+        } else if (isUp) {
+            devLabel = p.alias || 'Aktiv';
+        }
+        if (devLabel.length > 9) {
+            devLabel = devLabel.substring(0, 8) + '…';
+        }
+
+        var errDot = (p.in_errors && p.in_errors > 0)
+            ? '<span title="' + p.in_errors + ' Paketfehler auf diesem Port!" style="width:7px;height:7px;border-radius:50%;background:#ef4444;box-shadow:0 0 6px #ef4444;display:inline-block;"></span>'
+            : '';
+
+        out += '<div id="swport_' + p.key + '" class="sw-front-port" onclick="selectSwitchGraphicPort(\'' + p.key + '\')" ' +
+            'title="Port ' + escapeHtml(p.name) + ' (' + escapeHtml(p.speed) + ') – ' + escapeHtml(p.alias || 'Klicken für Details') + '" ' +
+            'style="' + groupMargin + 'width:60px;min-width:60px;background:' + bgCol + ';border:2px solid ' + borderCol + ';border-radius:6px;padding:5px 4px;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:space-between;transition:transform 0.12s, box-shadow 0.12s;user-select:none;">' +
+                // Kopfzeile im Port: LED + Portnummer
+                '<div style="width:100%;display:flex;justify-content:space-between;align-items:center;margin-bottom:3px;">' +
+                    '<span style="width:7px;height:7px;border-radius:50%;background:' + ledCol + ';' + (isUp ? ('box-shadow:0 0 6px ' + ledCol + ';') : '') + '"></span>' +
+                    '<span style="font-family:monospace;font-size:10.5px;font-weight:800;color:#f8fafc;">#' + escapeHtml(p.shortName) + '</span>' +
+                    errDot +
+                '</div>' +
+                // Stilisierte RJ45 / SFP Buchsen-Kontur
+                '<div style="width:36px;height:18px;background:#090d16;border:1px solid ' + borderCol + ';border-radius:2px;display:flex;flex-direction:column;align-items:center;justify-content:center;margin:2px 0;">' +
+                    (p.isSfp
+                        ? '<div style="width:24px;height:6px;border:1px solid ' + badgeCol + ';border-radius:1px;"></div>'
+                        : '<div style="width:18px;height:4px;background:' + (isUp ? ledCol : '#334155') + ';margin-bottom:2px;border-radius:1px;"></div><div style="width:10px;height:4px;background:#475569;"></div>') +
+                '</div>' +
+                // Angeschlossenes Gerät / Kurzlabel direkt auf der Buchse
+                '<div style="width:100%;text-align:center;font-size:9.5px;font-weight:600;color:' + badgeCol + ';white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px;">' +
+                    escapeHtml(devLabel) +
+                '</div>' +
+            '</div>';
+    }
+    return out;
+}
+
+function selectSwitchGraphicPort(portKey) {
+    var p = SwitchGraphicState.portsByKey[portKey];
+    var box = document.getElementById('switch-graphic-port-inspector');
+    if (!p || !box) return;
+
+    SwitchGraphicState.selectedPortKey = portKey;
+
+    // Optische Hervorhebung des angeklickten Ports in der 19"-Blende
+    var allTiles = document.querySelectorAll('#switch-graphic-body .sw-front-port');
+    for (var i = 0; i < allTiles.length; i++) {
+        allTiles[i].style.boxShadow = 'none';
+        allTiles[i].style.transform = 'none';
+    }
+    var activeTile = document.getElementById('swport_' + portKey);
+    if (activeTile) {
+        activeTile.style.boxShadow = '0 0 0 3px #f8fafc, 0 0 14px #3b82f6';
+        activeTile.style.transform = 'translateY(-2px)';
+    }
+
+    var stBadge = (p.status === 'up')
+        ? '<span class="badge badge-online">ONLINE / LINK UP (' + escapeHtml(p.speed) + ')</span>'
+        : '<span class="badge badge-offline">FREI / LINK DOWN</span>';
+
+    var roleBadge = '<span class="badge" style="background:rgba(148,163,184,0.18);color:#cbd5e1;">Access-Port</span>';
+    if (p.isStackPort) {
+        roleBadge = '<span class="badge" style="background:rgba(168,85,247,0.25);color:#e9d5ff;">📚 Stack-Interconnect (' + escapeHtml(p.remotePort || 'Backplane') + ')</span>';
+    } else if (p.isUplink) {
+        roleBadge = '<span class="badge" style="background:rgba(59,130,246,0.25);color:#93c5fd;">🔗 ' + (p.uplinkRole === 'upstream' ? 'Upstream-Uplink zum Gateway/Core' : 'Downstream-Trunk zu weiterem Switch/AP') + '</span>';
+    }
+
+    var devsHtml = '';
+    if (p.connectedDevices && p.connectedDevices.length > 0) {
+        devsHtml = '<div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(240px, 1fr));gap:10px;margin-top:8px;">';
+        for (var d = 0; d < p.connectedDevices.length; d++) {
+            var cd = p.connectedDevices[d];
+            var jumpAttr = cd.id ? ('onclick="closeSwitchGraphicModal(); selectDevice(' + cd.id + ');" style="cursor:pointer;"') : '';
+            devsHtml += '<div ' + jumpAttr + ' style="background:var(--bg-panel);border:1px solid #3b82f6;border-radius:8px;padding:10px;display:flex;justify-content:space-between;align-items:center;">' +
+                '<div>' +
+                    '<div style="font-weight:700;font-size:13px;color:#f8fafc;">' + escapeHtml(cd.name) + '</div>' +
+                    '<div style="font-family:monospace;font-size:11.5px;color:#93c5fd;margin-top:2px;">IP: ' + escapeHtml(cd.ip) + ' • MAC: ' + escapeHtml(cd.mac) + '</div>' +
+                    (p.remotePort ? ('<div style="font-family:monospace;font-size:11px;color:#34d399;margin-top:2px;">Gegenstellen-Port: <b>' + escapeHtml(p.remotePort) + '</b></div>') : '') +
+                '</div>' +
+                '<span class="badge badge-snmp">' + escapeHtml((cd.type || 'client').toUpperCase()) + '</span>' +
+            '</div>';
+        }
+        devsHtml += '</div>';
+    } else {
+        devsHtml = '<div style="font-size:12.5px;color:var(--text-secondary);margin-top:6px;">An diesem Port wurde aktuell kein aktives Endgerät in der MAC-/Topologie-Tabelle gemeldet.</div>';
+    }
+
+    box.innerHTML =
+        '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;border-bottom:1px solid var(--border-color);padding-bottom:10px;margin-bottom:10px;">' +
+            '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">' +
+                '<span style="font-family:monospace;font-size:16px;font-weight:800;color:#60a5fa;">Port ' + escapeHtml(p.name) + ' (Unit #' + p.unit + ')</span>' +
+                stBadge +
+                roleBadge +
+            '</div>' +
+            '<div style="font-family:monospace;font-size:12px;color:var(--text-secondary);">' +
+                'Traffic RX: <b style="color:#f8fafc;">' + (p.rx_mb ? (p.rx_mb + ' MB') : '0 MB') + '</b> • ' +
+                'Traffic TX: <b style="color:#f8fafc;">' + (p.tx_mb ? (p.tx_mb + ' MB') : '0 MB') + '</b> • ' +
+                'Paketfehler: <b style="color:' + (p.in_errors > 0 ? '#ef4444' : '#34d399') + ';">' + (p.in_errors || 0) + '</b>' +
+            '</div>' +
+        '</div>' +
+        '<div style="font-size:12px;font-weight:700;color:var(--text-secondary);text-transform:uppercase;">Angeschlossene Geräte / Gegenstelle an Buchse #' + escapeHtml(p.shortName) + ':</div>' +
+        devsHtml;
 }
 
 function exportInventoryCsv() {

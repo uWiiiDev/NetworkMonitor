@@ -736,6 +736,30 @@ $isAdmin = ($userRole === 'admin');
         </div>
     </div>
 
+    <!-- Modal: Grafische 19-Zoll Switch-Frontblende, Port-Belegung, Switch-Kaskade & Stacking -->
+    <div id="switch-graphic-modal" class="modal-backdrop">
+        <div class="modal" style="width:1040px;max-width:96vw;max-height:90vh;display:flex;flex-direction:column;">
+            <div class="panel-header">
+                <span class="panel-title" id="switch-graphic-title">🎛 Grafische Switch-Port-Belegung &amp; Stacking</span>
+                <div style="display:flex;gap:8px;align-items:center;">
+                    <button class="btn btn-sm" style="border-color:#8b5cf6;color:#c4b5fd;" onclick="openSwitchGraphicModal(0, true)" title="Zeigt ein Beispiel eines gestackten Core-Switches (2 Stack-Units) mit kaskadiertem Etagen-Switch">
+                        👁 Demo-Stack &amp; Kaskade zeigen
+                    </button>
+                    <button class="btn btn-sm" onclick="closeSwitchGraphicModal()">×</button>
+                </div>
+            </div>
+            <div id="switch-graphic-body" class="modal-body" style="overflow-y:auto;max-height:78vh;display:flex;flex-direction:column;gap:16px;">
+                <!-- Dynamisch per JS gefüllt -->
+            </div>
+            <div class="modal-footer" style="justify-content:space-between;">
+                <div style="font-size:12px;color:var(--text-secondary);">
+                    💡 Klicke auf eine beliebige RJ45-/SFP-Buchse im Switch-Gehäuse, um die Port-Details und das angeschlossene Gerät anzuzeigen.
+                </div>
+                <button class="btn btn-primary" onclick="closeSwitchGraphicModal()">Schließen</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Modal: Alarm-Zentrale (Online/Offline Geräte-Alarme) -->
     <div id="alerts-modal" class="modal-backdrop">
         <div class="modal" style="width:760px;max-width:95vw;max-height:86vh;display:flex;flex-direction:column;">
