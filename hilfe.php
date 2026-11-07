@@ -159,16 +159,23 @@ $currentUser = Auth::getCurrentUser();
             </ul>
         </div>
 
-        <!-- 3. Ansichten & Export -->
+        <!-- 3. Ansichten, Große Netzwerke & Export -->
         <div id="sec-ansichten" class="help-card">
-            <h2>3. Die 6 Ansichten &amp; Hochauflösenden Vektor-Exporte</h2>
+            <h2>3. Die 6 Ansichten, Werkzeuge für große Netzwerke &amp; Vektor-Exporte</h2>
             <ul>
-                <li><strong>Ansicht 1 – Stern-Topologie:</strong> Frei bewegliches Kräfte-Layout rund um Gateway und Switches.</li>
-                <li><strong>Ansicht 2 – Baum (Oben → Unten):</strong> Klassisches Organigramm (Router oben → Switches → Endgeräte unten).</li>
-                <li><strong>Ansicht 3 – Baum (Links → Rechts):</strong> Ideal für breite Monitore und viele Gerätenamen.</li>
+                <li><strong>Ansicht 1 – Stern-Topologie:</strong> Frei bewegliches Kräfte-Layout rund um Gateway und Switches (friert nach dem Einschwingen automatisch ein, damit verschobene Knoten ruhig stehen bleiben).</li>
+                <li><strong>Ansicht 2 – Baum (Oben → Unten, Block-Raster):</strong> Klassisches Organigramm (Router oben → Switches → Endgeräte als kompaktes 5er-Block-Raster direkt unter ihrem Switch).</li>
+                <li><strong>Ansicht 3 – Baum (Links → Rechts, Block-Raster):</strong> Ideal für breite Monitore und viele Gerätenamen.</li>
                 <li><strong>Ansicht 4 – Kreis / Radial:</strong> Übersichtsring ohne überlappende Knoten.</li>
                 <li><strong>Ansicht 5 – Gruppen-Kacheln (Matrix):</strong> Sortierte Gerätekarten nach Kategorien und eigenen Gruppen ganz ohne Linien-Gewirr.</li>
                 <li><strong>Ansicht 6 – 19" Switch-Port-Rack:</strong> Zeigt jeden Switch/Router als physisches 19-Zoll-Port-Panel mit grünen/roten Status-LEDs pro Port.</li>
+            </ul>
+            <h3>Spezial-Funktionen für große Netzwerke (Übersichtlichkeit)</h3>
+            <ul>
+                <li><strong>📦 Client-Cluster:</strong> Bündelt normale Endgeräte (PCs/Clients) pro Switch bzw. Gateway zu einem Sammel-Knoten (z. B. <code>📦 18 Clients</code>). Ein Klick zeigt alle enthaltenen Geräte rechts in der Seitenleiste; ein <strong>Doppelklick</strong> klappt das Cluster im Plan auf.</li>
+                <li><strong>🏢 Nur Infrastruktur:</strong> Blendet mit einem Klick alle normalen Workstations aus, sodass nur das Netzwerk-Rückgrat (Router, Switches, Server, Access Points und Drucker) sichtbar ist.</li>
+                <li><strong>🎯 Fokus-Modus (Nachbarschaft isolieren):</strong> Ein Doppelklick auf einen Switch/Router (oder Klick auf <em>„🎯 Fokus: Gerät &amp; Nachbarn isolieren“</em> in den Details rechts) blendet alle anderen Zweige aus und zeigt nur dieses Gerät samt seinen direkt verbundenen Ports.</li>
+                <li><strong>📌 Layout &amp; Positionen speichern:</strong> Über das Menü <strong>„📌 Layout ▾“</strong> lassen sich die zurechtgezogenen Knoten-Positionen dauerhaft in der Datenbank speichern sowie die Option <em>„🔍 Text-Details erst beim Reinzoomen“</em> steuern.</li>
             </ul>
             <p>
                 Über das Menü <strong>„Exportieren ▾“</strong> lässt sich der Plan als <strong>verlustfreie SVG-Vektorgrafik (<code>.svg</code>)</strong> (unendlich zoombar + Textsuche mit <code>Strg+F</code>), als <strong>bearbeitbare Draw.io / Visio-Datei (<code>.drawio</code>)</strong>, als <strong>Vektor-PDF-Report</strong> oder als <strong>4K Ultra-HD PNG (3840×2160 px)</strong> speichern.
@@ -242,25 +249,57 @@ mysql -u root -p network_monitor &lt; /var/www/html/networkmonitor/database.sql<
 
         <!-- 7. SNMP auf Switches aktivieren -->
         <div id="sec-switches" class="help-card">
-            <h2>7. SNMP v2c &amp; LLDP auf Managed Switches aktivieren</h2>
+            <h2>7. Managed Switches vorbereiten: Wie funktioniert die Port-Erkennung &amp; was wird benötigt?</h2>
             <p>
-                Damit NetworkMonitor die physische Port-Belegung (welches Gerät steckt an welchem Switch-Port) automatisch einzeichnet, muss auf den Managed Switches <strong>SNMP v2c (Read-Only)</strong> aktiviert sein:
+                NetworkMonitor kann vollautomatisch ermitteln, <strong>welches Endgerät an welcher physischen Buchse (Port) eines Switches angeschlossen ist</strong>, und zeichnet diese Port-Bezeichnung (z. B. <code>Gi1/0/8</code> oder <code>Port 12</code>) direkt an die grünen Verbindungslinien im Netzwerkplan sowie in die 19"-Rack-Ansicht.
             </p>
+
+            <h3>A. Wie funktioniert das technisch im Hintergrund?</h3>
+            <ol style="font-size:13.5px;color:#cbd5e1;line-height:1.65;padding-left:20px;margin-bottom:12px;">
+                <li><strong>IP &harr; MAC-Adresse (Ping &amp; ARP-Cache):</strong> Beim Subnetz-Scan ermittelt der Server für jedes aktive Gerät dessen IP- und Hardware-MAC-Adresse (z. B. <code>192.168.178.34</code> &rarr; <code>48:BA:4E:86:2B:BF</code>).</li>
+                <li><strong>SNMP-Abfrage der Switch-MAC-Tabelle (UDP Port 161):</strong> Jeder Managed Switch führt intern eine sogenannte <em>Forwarding Database (MAC-Adresstabelle)</em>, um zu wissen, hinter welchem Port welche MAC-Adresse steckt. NetworkMonitor liest diese Tabelle über die standardisierten MIBs <strong><code>Bridge-MIB</code> (<code>1.3.6.1.2.1.17.4.3.1.2</code>)</strong> sowie für VLANs <strong><code>Q-Bridge-MIB</code> (<code>1.3.6.1.2.1.17.7.1.2.2.1.2</code>)</strong> aus und übersetzt die Port-Nummer über die <strong><code>IF-MIB</code></strong> in den echten Portnamen (z. B. <code>Gi1/0/18</code>).</li>
+                <li><strong>Uplink-Filterung &amp; LLDP-Nachbarschaft:</strong> Sieht ein Switch auf einem Port viele verschiedene MAC-Adressen (inkl. der MAC des Routers), erkennt der Algorithmus diesen Port automatisch als <strong>Uplink-/Trunk-Port</strong>. Sieht er auf einem Port nur 1–2 MAC-Adressen, ist das der direkte Anschlussport des Endgeräts. Über <strong><code>LLDP</code> (IEEE 802.1AB)</strong> erkennen sich zudem direkt miteinander verbundene Switches untereinander.</li>
+            </ol>
+
+            <h3>B. Was braucht man dafür? (Die 3 Voraussetzungen)</h3>
             <ul>
-                <li><strong>Cisco IOS / Catalyst Switches:</strong>
+                <li><strong>1. Einen „Managed Switch“ oder „Smart Managed Switch“:</strong> Einfache, „dumme“ Tischswitches (<em>Unmanaged Switches</em> ohne eigene IP-Adresse und ohne Weboberfläche) besitzen keinen SNMP-Agenten und leiten Kabelsignale nur unsichtbar weiter. Sobald es ein <em>Smart Managed</em> oder <em>Managed Switch</em> mit eigener IP-Adresse im Subnetz ist, kann er abgefragt werden.</li>
+                <li><strong>2. SNMP (v1 / v2c) im Switch einschalten:</strong> In der Weboberfläche (oder CLI) des Switches muss <strong>SNMP (Read-Only)</strong> auf UDP-Port <code>161</code> aktiviert und ein sogenannter <strong>Community-String</strong> (Lese-Passwort, Standard: <code>public</code>) eingetragen sein.</li>
+                <li><strong>3. Gleiche Community im NetworkMonitor-Scope eintragen:</strong> Beim Anlegen oder Bearbeiten des Netzwerk-Scopes im NetworkMonitor muss im Feld <strong>„SNMP v2c Community“</strong> exakt derselbe Community-String stehen (Standard ist bereits <code>public</code>). Auf dem Linux-Server selbst ist kein Zusatzprogramm nötig, da NetworkMonitor einen eigenen Pure-PHP-SNMP-Client mitbringt.</li>
+            </ul>
+
+            <h3>C. Schritt-für-Schritt: SNMP &amp; LLDP bei gängigen Switch-Herstellern aktivieren</h3>
+            <ul>
+                <li><strong>Cisco IOS / Catalyst / Small Business (CBS / SG-Serie):</strong>
+                    Per CLI (SSH/Telnet) oder im Web-GUI unter <em>SNMP &rarr; Communities</em>:
                     <div class="code-pre">configure terminal
 snmp-server community public RO
 lldp run
 end
 write memory</div>
                 </li>
-                <li><strong>HP ProCurve / ArubaOS Switches:</strong>
+                <li><strong>HP ProCurve / ArubaOS / HPE Aruba InstantOn / OfficeConnect:</strong>
+                    Per CLI oder im Webinterface unter <em>System &rarr; SNMP</em> (Community <code>public</code> mit Lese-Rechten / Read-Only anlegen):
                     <div class="code-pre">configure
 snmp-server community "public" Unrestricted
 lldp run
 write memory</div>
                 </li>
-                <li><strong>Ubiquiti UniFi / TP-Link JetStream / Netgear / MikroTik:</strong> Im Switch-Webinterface unter <em>Settings → Services → SNMP</em> die Option <strong>SNMP v1/v2c</strong> aktivieren und die Community (z. B. <code>public</code>) im jeweiligen Netzwerk-Scope hinterlegen.</li>
+                <li><strong>Netgear (ProSAFE / Smart Managed Plus / Insight):</strong>
+                    Im Webinterface unter <em>System &rarr; SNMP &rarr; SNMP Configuration</em>: <strong>SNMP aktivieren (Enable)</strong>, danach unter <em>Community Configuration</em> die Community <code>public</code> mit Access Mode <strong>Read Only</strong> und Status <strong>Enable</strong> anlegen. Unter <em>System &rarr; LLDP</em> zusätzlich LLDP aktivieren.
+                </li>
+                <li><strong>TP-Link (JetStream / Easy Smart / Omada):</strong>
+                    Im Switch-Webinterface unter <em>System &rarr; SNMP &rarr; Global Config</em> das Häkchen bei <strong>SNMP Enable</strong> setzen. Anschließend unter <em>SNMP v1/v2c &rarr; Community List</em> einen Eintrag mit Community Name <code>public</code> und Access Right <strong>Read-Only</strong> hinzufügen. (Bei Omada SDN unter <em>Settings &rarr; Services &rarr; SNMP</em>).
+                </li>
+                <li><strong>Zyxel (GS1900 / GS1920 / XGS-Serie) &amp; D-Link (DGS-Serie):</strong>
+                    Im Webinterface unter <em>Management &rarr; SNMP</em> den Dienst aktivieren und die Get-Community (Read-Only) auf <code>public</code> stellen.
+                </li>
+                <li><strong>Ubiquiti UniFi Switches &amp; Access Points:</strong>
+                    Im UniFi Network Controller unter <em>Settings (Einstellungen) &rarr; System &rarr; Advanced / Services &rarr; SNMP</em> die Option <strong>SNMP v1/v2c</strong> aktivieren und als Community String <code>public</code> speichern.
+                </li>
+                <li><strong>MikroTik (RouterOS &amp; SwOS):</strong>
+                    In WinBox / WebFig unter <em>IP &rarr; SNMP</em> das Häkchen bei <strong>Enabled</strong> setzen (Community <code>public</code> ist standardmäßig bereits hinterlegt).
+                </li>
             </ul>
         </div>
 
