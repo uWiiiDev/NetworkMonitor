@@ -5729,10 +5729,26 @@ function renderAdminSection() {
         var stBadge = isAct ? '<span class="badge badge-online">Aktiv</span>' : '<span class="badge badge-offline">Gesperrt</span>';
         var rBadge = roleLabels[u.role] || escapeHtml(u.role);
 
+        var emailHtml = u.email
+            ? '<div style="font-family:monospace;font-size:12px;color:#93c5fd;">' + escapeHtml(u.email) + '</div>' +
+              (parseInt(u.receive_alerts, 10) === 1
+                  ? '<span class="badge" style="background:rgba(16,185,129,0.18);color:#6ee7b7;font-size:10px;margin-top:2px;">🔔 Alarm-E-Mails aktiv</span>'
+                  : '<span class="badge" style="background:rgba(148,163,184,0.15);color:#94a3b8;font-size:10px;margin-top:2px;">🔕 Keine Alarm-Mails</span>')
+            : '<span style="color:var(--text-secondary);font-size:12px;">-</span>';
+
+        var twoFaBadge = '<span class="badge" style="background:rgba(148,163,184,0.15);color:#94a3b8;">Aus</span>';
+        if (u.two_fa_mode === 'email') {
+            twoFaBadge = '<span class="badge" style="background:rgba(59,130,246,0.22);border:1px solid #3b82f6;color:#93c5fd;">📧 E-Mail-2FA</span>';
+        } else if (u.two_fa_mode === 'totp') {
+            twoFaBadge = '<span class="badge" style="background:rgba(16,185,129,0.22);border:1px solid #10b981;color:#6ee7b7;">📱 Authenticator-App</span>';
+        }
+
         html += '<tr>' +
             '<td>' + stBadge + '</td>' +
             '<td style="font-weight:700;font-family:monospace;">' + escapeHtml(u.username) + '</td>' +
             '<td>' + escapeHtml(u.full_name || '-') + '</td>' +
+            '<td>' + emailHtml + '</td>' +
+            '<td>' + twoFaBadge + '</td>' +
             '<td>' + rBadge + '</td>' +
             '<td>' + escapeHtml(u.last_login || 'Noch nie') + '</td>' +
             '<td>' +
@@ -6487,6 +6503,36 @@ function clearAllAlerts() {
     });
 }
 
+function toggleTotpBox(prefix) {
+    var sel = document.getElementById(prefix + '-2fa-mode');
+    var box = document.getElementById(prefix + '-totp-box');
+    var secInp = document.getElementById(prefix + '-totp-secret');
+    if (!sel || !box) return;
+    if (sel.value === 'totp') {
+        box.style.display = 'block';
+        if (secInp && !secInp.value.trim()) {
+            requestNewTotpSecret(prefix + '-totp-secret');
+        }
+    } else {
+        box.style.display = 'none';
+    }
+}
+
+function requestNewTotpSecret(inputId) {
+    fetch('api.php?action=generate_totp_secret', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({})
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (res) {
+        if (res.ok && res.totp_secret) {
+            var el = document.getElementById(inputId);
+            if (el) el.value = res.totp_secret;
+        }
+    });
+}
+
 function openUserModal(userId) {
     var modal = document.getElementById('user-modal');
     var u = null;
@@ -6501,6 +6547,19 @@ function openUserModal(userId) {
     document.getElementById('usr-id').value = u ? u.id : 0;
     document.getElementById('usr-username').value = u ? u.username : '';
     document.getElementById('usr-fullname').value = u ? (u.full_name || '') : '';
+    if (document.getElementById('usr-email')) {
+        document.getElementById('usr-email').value = u ? (u.email || '') : '';
+    }
+    if (document.getElementById('usr-receive-alerts')) {
+        document.getElementById('usr-receive-alerts').checked = u ? (parseInt(u.receive_alerts, 10) === 1) : true;
+    }
+    if (document.getElementById('usr-2fa-mode')) {
+        document.getElementById('usr-2fa-mode').value = u ? (u.two_fa_mode || 'none') : 'none';
+    }
+    if (document.getElementById('usr-totp-secret')) {
+        document.getElementById('usr-totp-secret').value = u ? (u.totp_secret || '') : '';
+    }
+    toggleTotpBox('usr');
     document.getElementById('usr-role').value = u ? u.role : 'viewer';
     document.getElementById('usr-password').value = '';
     document.getElementById('usr-active').value = u ? u.is_active : 1;
@@ -6516,6 +6575,10 @@ function saveUserForm() {
         id: document.getElementById('usr-id').value,
         username: document.getElementById('usr-username').value,
         full_name: document.getElementById('usr-fullname').value,
+        email: document.getElementById('usr-email') ? document.getElementById('usr-email').value.trim() : '',
+        receive_alerts: (document.getElementById('usr-receive-alerts') && document.getElementById('usr-receive-alerts').checked) ? 1 : 0,
+        two_fa_mode: document.getElementById('usr-2fa-mode') ? document.getElementById('usr-2fa-mode').value : 'none',
+        totp_secret: document.getElementById('usr-totp-secret') ? document.getElementById('usr-totp-secret').value.trim() : '',
         role: document.getElementById('usr-role').value,
         password: document.getElementById('usr-password').value,
         is_active: document.getElementById('usr-active').value
@@ -6529,7 +6592,7 @@ function saveUserForm() {
     .then(function (res) {
         if (res.ok) {
             closeUserModal();
-            showToast('Benutzerkonto gespeichert.');
+            showToast('Benutzerkonto, E-Mail & 2FA gespeichert.');
             loadTopologyData();
         } else {
             showToast('Fehler: ' + res.error);
@@ -6556,6 +6619,20 @@ function deleteUser(userId) {
 }
 
 function openPasswordModal() {
+    var cu = AppState.currentUser || {};
+    if (document.getElementById('own-email')) {
+        document.getElementById('own-email').value = cu.email || '';
+    }
+    if (document.getElementById('own-receive-alerts')) {
+        document.getElementById('own-receive-alerts').checked = (cu.receive_alerts === undefined) ? true : (parseInt(cu.receive_alerts, 10) === 1);
+    }
+    if (document.getElementById('own-2fa-mode')) {
+        document.getElementById('own-2fa-mode').value = cu.two_fa_mode || 'none';
+    }
+    if (document.getElementById('own-totp-secret')) {
+        document.getElementById('own-totp-secret').value = cu.totp_secret || '';
+    }
+    toggleTotpBox('own');
     document.getElementById('own-new-password').value = '';
     document.getElementById('password-modal').classList.add('open');
 }
@@ -6565,17 +6642,27 @@ function closePasswordModal() {
 }
 
 function saveOwnPassword() {
-    var np = document.getElementById('own-new-password').value;
+    var payload = {
+        email: document.getElementById('own-email') ? document.getElementById('own-email').value.trim() : '',
+        receive_alerts: (document.getElementById('own-receive-alerts') && document.getElementById('own-receive-alerts').checked) ? 1 : 0,
+        two_fa_mode: document.getElementById('own-2fa-mode') ? document.getElementById('own-2fa-mode').value : 'none',
+        totp_secret: document.getElementById('own-totp-secret') ? document.getElementById('own-totp-secret').value.trim() : '',
+        new_password: document.getElementById('own-new-password').value
+    };
     fetch('api.php?action=change_own_password', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ new_password: np })
+        body: JSON.stringify(payload)
     })
     .then(function (r) { return r.json(); })
     .then(function (res) {
         if (res.ok) {
+            if (res.current_user) {
+                AppState.currentUser = res.current_user;
+            }
             closePasswordModal();
-            showToast('Dein Passwort wurde erfolgreich geändert!');
+            showToast('✅ Dein Profil, E-Mail-Alarme & 2FA-Einstellungen wurden gespeichert!');
+            loadTopologyData();
         } else {
             showToast('Fehler: ' + res.error);
         }

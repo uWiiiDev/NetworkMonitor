@@ -99,12 +99,18 @@ CREATE TABLE IF NOT EXISTS `scan_logs` (
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8;
 
--- 5. Benutzer & Berechtigungen (Rollen: admin, operator, viewer)
+-- 5. Benutzer & Berechtigungen (Rollen: admin, netadmin, operator, viewer)
 CREATE TABLE IF NOT EXISTS `users` (
   `id` INT(11) NOT NULL AUTO_INCREMENT,
   `username` VARCHAR(60) NOT NULL,
   `password_hash` VARCHAR(255) NOT NULL,
   `full_name` VARCHAR(120) DEFAULT NULL,
+  `email` VARCHAR(190) DEFAULT NULL,
+  `receive_alerts` TINYINT(1) NOT NULL DEFAULT 1,
+  `two_fa_mode` VARCHAR(20) NOT NULL DEFAULT 'none',
+  `totp_secret` VARCHAR(64) DEFAULT NULL,
+  `otp_code_hash` VARCHAR(255) DEFAULT NULL,
+  `otp_expires_at` DATETIME DEFAULT NULL,
   `role` VARCHAR(20) NOT NULL DEFAULT 'viewer',
   `is_active` TINYINT(1) NOT NULL DEFAULT 1,
   `last_login` DATETIME DEFAULT NULL,

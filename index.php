@@ -85,7 +85,7 @@ $gitShort = Database::getGitCommitShort();
                         <?php echo htmlspecialchars($currentUser['full_name'] ?: $currentUser['username'], ENT_QUOTES, 'UTF-8'); ?>
                     </div>
                     <div class="dropdown-item" onclick="closeAllDropdowns(); openPasswordModal();">
-                        🔑 Eigenes Passwort ändern
+                        🔑 Eigenes Profil, E-Mail, Passwort &amp; 2FA
                     </div>
                     <?php if ($isAdmin): ?>
                         <div class="dropdown-item" onclick="closeAllDropdowns(); var b = document.getElementById('nav-tab-admin'); if (b) b.click();">
@@ -542,6 +542,8 @@ $gitShort = Database::getGitCommitShort();
                                     <th>Status</th>
                                     <th>Benutzername</th>
                                     <th>Anzeigename / Abteilung</th>
+                                    <th>E-Mail &amp; Alarme</th>
+                                    <th>2FA-Schutz</th>
                                     <th>Rolle / Berechtigung</th>
                                     <th>Letzter Login</th>
                                     <th>Aktionen</th>
@@ -800,20 +802,57 @@ $gitShort = Database::getGitCommitShort();
 
     <!-- Modal: Benutzer anlegen / bearbeiten (Admin) -->
     <div id="user-modal" class="modal-backdrop">
-        <div class="modal">
+        <div class="modal" style="width:520px;max-width:95vw;">
             <div class="panel-header">
-                <span class="panel-title">Benutzer &amp; Rolle konfigurieren</span>
+                <span class="panel-title">Benutzer, E-Mail, Alarme &amp; 2FA konfigurieren</span>
                 <button class="btn btn-sm" onclick="closeUserModal()">×</button>
             </div>
             <div class="modal-body">
                 <input type="hidden" id="usr-id" value="0">
-                <div class="form-group">
-                    <label>Benutzername (Login) *</label>
-                    <input type="text" id="usr-username" class="form-input" placeholder="z.B. m.mueller">
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+                    <div class="form-group">
+                        <label>Benutzername (Login) *</label>
+                        <input type="text" id="usr-username" class="form-input" placeholder="z.B. m.mueller">
+                    </div>
+                    <div class="form-group">
+                        <label>Anzeigename / Abteilung</label>
+                        <input type="text" id="usr-fullname" class="form-input" placeholder="z.B. Max Müller (IT)">
+                    </div>
                 </div>
                 <div class="form-group">
-                    <label>Anzeigename / Abteilung</label>
-                    <input type="text" id="usr-fullname" class="form-input" placeholder="z.B. Max Müller (Netzwerk-Team)">
+                    <label>E-Mail-Adresse (für Alarm-Benachrichtigungen, Passwort-Reset &amp; 2FA)</label>
+                    <input type="email" id="usr-email" class="form-input" placeholder="z.B. m.mueller@firma.de">
+                </div>
+                <div style="background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.3);border-radius:8px;padding:10px 12px;">
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:600;color:#6ee7b7;font-size:12.5px;">
+                        <input type="checkbox" id="usr-receive-alerts" checked>
+                        🔔 Automatische E-Mail-Benachrichtigung im Alarmfall an diesen Benutzer senden
+                    </label>
+                </div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+                    <div class="form-group">
+                        <label>Zwei-Faktor-Authentifizierung (2FA)</label>
+                        <select id="usr-2fa-mode" class="select-input" onchange="toggleTotpBox('usr')">
+                            <option value="none">Deaktiviert (Nur Passwort)</option>
+                            <option value="email">📧 E-Mail-Sicherheitscode (6-stellig)</option>
+                            <option value="totp">📱 Authenticator-App (TOTP / RFC 6238)</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Status</label>
+                        <select id="usr-active" class="select-input">
+                            <option value="1">Aktiv (Anmeldung erlaubt)</option>
+                            <option value="0">Gesperrt (Anmeldung blockiert)</option>
+                        </select>
+                    </div>
+                </div>
+                <div id="usr-totp-box" style="display:none;background:rgba(59,130,246,0.1);border:1px solid rgba(59,130,246,0.35);border-radius:8px;padding:10px 12px;">
+                    <div style="font-size:12px;color:#93c5fd;font-weight:600;margin-bottom:6px;">📱 TOTP-Geheimschlüssel (für Google / Microsoft Authenticator / Bitwarden):</div>
+                    <div style="display:flex;gap:8px;align-items:center;">
+                        <input type="text" id="usr-totp-secret" class="form-input" style="font-family:monospace;letter-spacing:2px;font-weight:700;" placeholder="Wird automatisch erzeugt">
+                        <button type="button" class="btn btn-sm" onclick="requestNewTotpSecret('usr-totp-secret')">🔄 Neu</button>
+                    </div>
+                    <div style="font-size:11px;color:var(--text-secondary);margin-top:4px;">Diesen Base32-Schlüssel in der Authenticator-App unter „Setup-Schlüssel eingeben" hinterlegen (Zeitbasiert, 30 Sek.).</div>
                 </div>
                 <div class="form-group">
                     <label>Rolle / Berechtigungsstufe *</label>
@@ -828,13 +867,6 @@ $gitShort = Database::getGitCommitShort();
                     <label>Passwort (bei Bearbeitung leer lassen, um es beizubehalten)</label>
                     <input type="password" id="usr-password" class="form-input" placeholder="Mindestens 4 Zeichen">
                 </div>
-                <div class="form-group">
-                    <label>Status</label>
-                    <select id="usr-active" class="select-input">
-                        <option value="1">Aktiv (Anmeldung erlaubt)</option>
-                        <option value="0">Gesperrt (Anmeldung blockiert)</option>
-                    </select>
-                </div>
             </div>
             <div class="modal-footer">
                 <button class="btn" onclick="closeUserModal()">Abbrechen</button>
@@ -843,22 +875,48 @@ $gitShort = Database::getGitCommitShort();
         </div>
     </div>
 
-    <!-- Modal: Eigenes Passwort ändern -->
+    <!-- Modal: Eigenes Profil, E-Mail-Alarme, Passwort & 2FA -->
     <div id="password-modal" class="modal-backdrop">
-        <div class="modal" style="width:400px;">
+        <div class="modal" style="width:480px;max-width:95vw;">
             <div class="panel-header">
-                <span class="panel-title">Eigenes Passwort ändern</span>
+                <span class="panel-title">🔑 Eigenes Profil, E-Mail-Alarme, Passwort &amp; 2FA</span>
                 <button class="btn btn-sm" onclick="closePasswordModal()">×</button>
             </div>
             <div class="modal-body">
                 <div class="form-group">
-                    <label>Neues Passwort *</label>
-                    <input type="password" id="own-new-password" class="form-input" placeholder="Neues Passwort eingeben">
+                    <label>Eigene E-Mail-Adresse (für Alarme, Passwort-Reset &amp; E-Mail-2FA)</label>
+                    <input type="email" id="own-email" class="form-input" placeholder="z.B. name@firma.de">
+                </div>
+                <div style="background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.3);border-radius:8px;padding:10px 12px;">
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:600;color:#6ee7b7;font-size:12.5px;">
+                        <input type="checkbox" id="own-receive-alerts">
+                        🔔 Bei Netzwerk- &amp; Geräte-Alarmen per E-Mail benachrichtigen
+                    </label>
+                </div>
+                <div class="form-group">
+                    <label>Zwei-Faktor-Authentifizierung (2FA) für mein Konto</label>
+                    <select id="own-2fa-mode" class="select-input" onchange="toggleTotpBox('own')">
+                        <option value="none">Deaktiviert (Nur Passwort)</option>
+                        <option value="email">📧 E-Mail-Sicherheitscode (6-stellig bei Anmeldung)</option>
+                        <option value="totp">📱 Authenticator-App (TOTP / RFC 6238)</option>
+                    </select>
+                </div>
+                <div id="own-totp-box" style="display:none;background:rgba(59,130,246,0.1);border:1px solid rgba(59,130,246,0.35);border-radius:8px;padding:10px 12px;">
+                    <div style="font-size:12px;color:#93c5fd;font-weight:600;margin-bottom:6px;">📱 TOTP-Geheimschlüssel (für Authenticator-App):</div>
+                    <div style="display:flex;gap:8px;align-items:center;">
+                        <input type="text" id="own-totp-secret" class="form-input" style="font-family:monospace;letter-spacing:2px;font-weight:700;" placeholder="Wird automatisch erzeugt">
+                        <button type="button" class="btn btn-sm" onclick="requestNewTotpSecret('own-totp-secret')">🔄 Neu</button>
+                    </div>
+                    <div style="font-size:11px;color:var(--text-secondary);margin-top:4px;">Tragen Sie diesen Base32-Schlüssel in Ihrer Authenticator-App ein (Zeitbasiert, 30 Sek.).</div>
+                </div>
+                <div class="form-group" style="border-top:1px solid var(--border-color);padding-top:10px;margin-top:4px;">
+                    <label>Neues Passwort vergeben (leer lassen, um aktuelles Passwort zu behalten)</label>
+                    <input type="password" id="own-new-password" class="form-input" placeholder="Mindestens 4 Zeichen (optional)">
                 </div>
             </div>
             <div class="modal-footer">
                 <button class="btn" onclick="closePasswordModal()">Abbrechen</button>
-                <button class="btn btn-primary" onclick="saveOwnPassword()">Passwort speichern</button>
+                <button class="btn btn-primary" onclick="saveOwnPassword()">💾 Profil &amp; Sicherheit speichern</button>
             </div>
         </div>
     </div>

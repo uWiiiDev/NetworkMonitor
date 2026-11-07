@@ -176,7 +176,7 @@ try {
             if ($currentUser['role'] === 'admin') {
                 $fullConf = $fullConfAll;
                 $smtpConf = isset($fullConf['smtp']) ? $fullConf['smtp'] : array();
-                $usersList = $pdo->query("SELECT id, username, full_name, role, is_active, last_login, created_at FROM users ORDER BY id ASC")->fetchAll();
+                $usersList = $pdo->query("SELECT id, username, full_name, email, receive_alerts, two_fa_mode, totp_secret, role, is_active, last_login, created_at FROM users ORDER BY id ASC")->fetchAll();
                 $adminData = array(
                     'db_config' => array(
                         'driver'   => $fullConf['db']['driver'],
@@ -734,13 +734,64 @@ try {
 
         case 'change_own_password':
             $newPass = isset($input['new_password']) ? $input['new_password'] : '';
-            if (strlen($newPass) < 4) {
+            $hasProfileFields = isset($input['email']) || isset($input['receive_alerts']) || isset($input['two_fa_mode']);
+            if (!$hasProfileFields && strlen($newPass) < 4) {
                 throw new InvalidArgumentException('Das neue Passwort muss mindestens 4 Zeichen lang sein.');
             }
-            $hash = password_hash($newPass, PASSWORD_DEFAULT);
-            $pdo->prepare("UPDATE users SET password_hash = :h WHERE id = :id")
-                ->execute(array(':h' => $hash, ':id' => $currentUser['id']));
-            echo json_encode(array('ok' => true));
+            if ($newPass !== '' && strlen($newPass) < 4) {
+                throw new InvalidArgumentException('Das neue Passwort muss mindestens 4 Zeichen lang sein.');
+            }
+
+            $email = isset($input['email']) ? trim($input['email']) : (isset($currentUser['email']) ? (string)$currentUser['email'] : '');
+            if ($email !== '' && !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+                throw new InvalidArgumentException('Bitte eine gültige E-Mail-Adresse eingeben.');
+            }
+            $recAlerts = isset($input['receive_alerts']) ? ((int)$input['receive_alerts'] ? 1 : 0) : (int)$currentUser['receive_alerts'];
+            $twoFaMode = isset($input['two_fa_mode']) && in_array($input['two_fa_mode'], array('none', 'email', 'totp'), true)
+                ? $input['two_fa_mode']
+                : (isset($currentUser['two_fa_mode']) ? $currentUser['two_fa_mode'] : 'none');
+            $totpSecret = isset($input['totp_secret']) ? strtoupper(preg_replace('/[^A-Z2-7]/i', '', $input['totp_secret'])) : (isset($currentUser['totp_secret']) ? (string)$currentUser['totp_secret'] : '');
+
+            if ($twoFaMode === 'email' && $email === '') {
+                throw new InvalidArgumentException('Für 2FA per E-Mail-Code muss eine gültige E-Mail-Adresse hinterlegt sein.');
+            }
+            if ($twoFaMode === 'totp' && $totpSecret === '') {
+                $totpSecret = Auth::generateTotpSecret();
+            }
+
+            if ($newPass !== '') {
+                $hash = password_hash($newPass, PASSWORD_DEFAULT);
+                $pdo->prepare("UPDATE users SET password_hash = :h, email = :em, receive_alerts = :ra, two_fa_mode = :tf, totp_secret = :ts WHERE id = :id")
+                    ->execute(array(
+                        ':h'  => $hash,
+                        ':em' => $email !== '' ? $email : null,
+                        ':ra' => $recAlerts,
+                        ':tf' => $twoFaMode,
+                        ':ts' => $totpSecret !== '' ? $totpSecret : null,
+                        ':id' => $currentUser['id'],
+                    ));
+            } else {
+                $pdo->prepare("UPDATE users SET email = :em, receive_alerts = :ra, two_fa_mode = :tf, totp_secret = :ts WHERE id = :id")
+                    ->execute(array(
+                        ':em' => $email !== '' ? $email : null,
+                        ':ra' => $recAlerts,
+                        ':tf' => $twoFaMode,
+                        ':ts' => $totpSecret !== '' ? $totpSecret : null,
+                        ':id' => $currentUser['id'],
+                    ));
+            }
+            echo json_encode(array(
+                'ok'           => true,
+                'totp_secret'  => $totpSecret,
+                'current_user' => Auth::getCurrentUser(),
+            ));
+            break;
+
+        case 'generate_totp_secret':
+            echo json_encode(array(
+                'ok'          => true,
+                'totp_secret' => Auth::generateTotpSecret(),
+            ));
             break;
 
         case 'test_db':
@@ -1007,6 +1058,10 @@ try {
             $uid = isset($input['id']) ? (int)$input['id'] : 0;
             $uname = isset($input['username']) ? trim($input['username']) : '';
             $fname = isset($input['full_name']) ? trim($input['full_name']) : '';
+            $email = isset($input['email']) ? trim($input['email']) : '';
+            $recAlerts = !empty($input['receive_alerts']) ? 1 : 0;
+            $twoFaMode = isset($input['two_fa_mode']) && in_array($input['two_fa_mode'], array('none', 'email', 'totp'), true) ? $input['two_fa_mode'] : 'none';
+            $totpSecret = isset($input['totp_secret']) ? strtoupper(preg_replace('/[^A-Z2-7]/i', '', $input['totp_secret'])) : '';
             $role = isset($input['role']) ? trim($input['role']) : 'viewer';
             $pass = isset($input['password']) ? $input['password'] : '';
             $active = isset($input['is_active']) ? ((int)$input['is_active'] ? 1 : 0) : 1;
@@ -1014,33 +1069,67 @@ try {
             if ($uname === '' || !in_array($role, array('viewer', 'operator', 'netadmin', 'admin'), true)) {
                 throw new InvalidArgumentException('Bitte gültigen Benutzernamen und Rolle angeben.');
             }
+            if ($email !== '' && !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+                throw new InvalidArgumentException('Bitte eine gültige E-Mail-Adresse eingeben.');
+            }
+            if ($twoFaMode === 'email' && $email === '') {
+                throw new InvalidArgumentException('Für 2FA per E-Mail-Code muss eine E-Mail-Adresse beim Benutzer hinterlegt sein.');
+            }
+            if ($twoFaMode === 'totp' && $totpSecret === '') {
+                $totpSecret = Auth::generateTotpSecret();
+            }
             if ($uid === (int)$currentUser['id'] && ($active === 0 || $role !== 'admin')) {
                 throw new InvalidArgumentException('Du kannst dein eigenes Admin-Konto nicht deaktivieren oder herabstufen.');
             }
 
             if ($uid > 0) {
                 if ($pass !== '') {
-                    $stmt = $pdo->prepare("UPDATE users SET username = :u, full_name = :n, role = :r, password_hash = :p, is_active = :a WHERE id = :id");
-                    $stmt->execute(array(':u' => $uname, ':n' => $fname, ':r' => $role, ':p' => password_hash($pass, PASSWORD_DEFAULT), ':a' => $active, ':id' => $uid));
+                    $stmt = $pdo->prepare("UPDATE users SET username = :u, full_name = :n, email = :em, receive_alerts = :ra, two_fa_mode = :tf, totp_secret = :ts, role = :r, password_hash = :p, is_active = :a WHERE id = :id");
+                    $stmt->execute(array(
+                        ':u'  => $uname,
+                        ':n'  => $fname,
+                        ':em' => $email !== '' ? $email : null,
+                        ':ra' => $recAlerts,
+                        ':tf' => $twoFaMode,
+                        ':ts' => $totpSecret !== '' ? $totpSecret : null,
+                        ':r'  => $role,
+                        ':p'  => password_hash($pass, PASSWORD_DEFAULT),
+                        ':a'  => $active,
+                        ':id' => $uid,
+                    ));
                 } else {
-                    $stmt = $pdo->prepare("UPDATE users SET username = :u, full_name = :n, role = :r, is_active = :a WHERE id = :id");
-                    $stmt->execute(array(':u' => $uname, ':n' => $fname, ':r' => $role, ':a' => $active, ':id' => $uid));
+                    $stmt = $pdo->prepare("UPDATE users SET username = :u, full_name = :n, email = :em, receive_alerts = :ra, two_fa_mode = :tf, totp_secret = :ts, role = :r, is_active = :a WHERE id = :id");
+                    $stmt->execute(array(
+                        ':u'  => $uname,
+                        ':n'  => $fname,
+                        ':em' => $email !== '' ? $email : null,
+                        ':ra' => $recAlerts,
+                        ':tf' => $twoFaMode,
+                        ':ts' => $totpSecret !== '' ? $totpSecret : null,
+                        ':r'  => $role,
+                        ':a'  => $active,
+                        ':id' => $uid,
+                    ));
                 }
             } else {
                 if ($pass === '') {
                     throw new InvalidArgumentException('Bitte ein Passwort für den neuen Benutzer vergeben.');
                 }
-                $stmt = $pdo->prepare("INSERT INTO users (username, password_hash, full_name, role, is_active, created_at) VALUES (:u, :p, :n, :r, :a, :now)");
+                $stmt = $pdo->prepare("INSERT INTO users (username, password_hash, full_name, email, receive_alerts, two_fa_mode, totp_secret, role, is_active, created_at) VALUES (:u, :p, :n, :em, :ra, :tf, :ts, :r, :a, :now)");
                 $stmt->execute(array(
                     ':u'   => $uname,
                     ':p'   => password_hash($pass, PASSWORD_DEFAULT),
                     ':n'   => $fname,
+                    ':em'  => $email !== '' ? $email : null,
+                    ':ra'  => $recAlerts,
+                    ':tf'  => $twoFaMode,
+                    ':ts'  => $totpSecret !== '' ? $totpSecret : null,
                     ':r'   => $role,
                     ':a'   => $active,
                     ':now' => date('Y-m-d H:i:s'),
                 ));
             }
-            echo json_encode(array('ok' => true));
+            echo json_encode(array('ok' => true, 'totp_secret' => $totpSecret));
             break;
 
         case 'delete_user':

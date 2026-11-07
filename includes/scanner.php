@@ -1033,9 +1033,36 @@ class NetworkScanner
     {
         $fullConf = $this->db->getConfig();
         $smtpConf = isset($fullConf['smtp']) ? $fullConf['smtp'] : array();
-        if (empty($smtpConf['enabled']) || empty($smtpConf['host']) || empty($smtpConf['to_email'])) {
+        if (empty($smtpConf['enabled']) || empty($smtpConf['host'])) {
             return;
         }
+
+        // Sammle Empfänger aus der globalen SMTP-Konfiguration UND aus allen aktiven Benutzern mit E-Mail-Alarm-Empfang
+        $recipientsMap = array();
+        if (!empty($smtpConf['to_email'])) {
+            foreach (preg_split('/[,;]+/', (string)$smtpConf['to_email']) as $rawR) {
+                $rClean = trim($rawR);
+                if ($rClean !== '' && filter_var($rClean, FILTER_VALIDATE_EMAIL)) {
+                    $recipientsMap[strtolower($rClean)] = $rClean;
+                }
+            }
+        }
+        try {
+            $uStmt = $this->pdo->query("SELECT email FROM users WHERE is_active = 1 AND receive_alerts = 1 AND email IS NOT NULL AND email != ''");
+            if ($uStmt) {
+                while ($uRow = $uStmt->fetch()) {
+                    $uEmail = trim((string)$uRow['email']);
+                    if ($uEmail !== '' && filter_var($uEmail, FILTER_VALIDATE_EMAIL)) {
+                        $recipientsMap[strtolower($uEmail)] = $uEmail;
+                    }
+                }
+            }
+        } catch (Exception $e) {}
+
+        if (empty($recipientsMap)) {
+            return;
+        }
+        $smtpConf['to_email'] = implode(', ', array_values($recipientsMap));
 
         try {
             $subject = sprintf('[NetworkMonitor] %d Geräte-Alarm(e) in %s (%s)', count($alerts), $scope['name'], $scope['cidr']);

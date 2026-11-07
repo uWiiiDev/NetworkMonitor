@@ -222,6 +222,12 @@ class Database
         $this->ensureColumnExists('devices', 'switch_snmp_community', 'VARCHAR(100) DEFAULT NULL');
         $this->ensureColumnExists('devices', 'switch_snmp_write_community', 'VARCHAR(100) DEFAULT NULL');
         $this->ensureColumnExists('devices', 'is_core', 'TINYINT(1) NOT NULL DEFAULT 0');
+        $this->ensureColumnExists('users', 'email', 'VARCHAR(190) DEFAULT NULL');
+        $this->ensureColumnExists('users', 'receive_alerts', 'TINYINT(1) NOT NULL DEFAULT 1');
+        $this->ensureColumnExists('users', 'two_fa_mode', "VARCHAR(20) NOT NULL DEFAULT 'none'");
+        $this->ensureColumnExists('users', 'totp_secret', 'VARCHAR(64) DEFAULT NULL');
+        $this->ensureColumnExists('users', 'otp_code_hash', 'VARCHAR(255) DEFAULT NULL');
+        $this->ensureColumnExists('users', 'otp_expires_at', 'DATETIME DEFAULT NULL');
     }
 
     private function initSqliteSchema()
@@ -331,12 +337,25 @@ class Database
                 username TEXT NOT NULL UNIQUE,
                 password_hash TEXT NOT NULL,
                 full_name TEXT DEFAULT NULL,
+                email TEXT DEFAULT NULL,
+                receive_alerts INTEGER NOT NULL DEFAULT 1,
+                two_fa_mode TEXT NOT NULL DEFAULT 'none',
+                totp_secret TEXT DEFAULT NULL,
+                otp_code_hash TEXT DEFAULT NULL,
+                otp_expires_at TEXT DEFAULT NULL,
                 role TEXT NOT NULL DEFAULT 'viewer',
                 is_active INTEGER NOT NULL DEFAULT 1,
                 last_login TEXT DEFAULT NULL,
                 created_at TEXT NOT NULL
             )
         ");
+
+        $this->ensureColumnExists('users', 'email', 'TEXT DEFAULT NULL');
+        $this->ensureColumnExists('users', 'receive_alerts', 'INTEGER NOT NULL DEFAULT 1');
+        $this->ensureColumnExists('users', 'two_fa_mode', "TEXT NOT NULL DEFAULT 'none'");
+        $this->ensureColumnExists('users', 'totp_secret', 'TEXT DEFAULT NULL');
+        $this->ensureColumnExists('users', 'otp_code_hash', 'TEXT DEFAULT NULL');
+        $this->ensureColumnExists('users', 'otp_expires_at', 'TEXT DEFAULT NULL');
 
         $this->pdo->exec("
             CREATE TABLE IF NOT EXISTS device_alerts (
