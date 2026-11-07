@@ -703,19 +703,54 @@ class SnmpClient
         // Drucker-MIB (Printer-MIB 1.3.6.1.2.1.43) NUR auf Nicht-Switches abfragen
         $printerInfo = null;
         if (!$isSwitchCandidate) {
-            $pageCountRaw = $this->getOid('1.3.6.1.2.1.43.10.2.1.4.1.1');
-            $supNames = $this->walkOid('1.3.6.1.2.1.43.11.1.1.6', 12);
+            // Drucker (insb. HP OfficeJet/LaserJet über WLAN) lesen beim Abruf der Printer-MIB die
+            // physischen Patronen-Chips über ihren internen I2C-Bus aus (~180-250 ms pro Patrone).
+            // Daher Timeout für die Drucker-MIB-Abfrage gezielt auf mind. 1000 ms erhöhen
+            // und GetNext (Einzelschritt) statt großem GetBulk(12) verwenden.
+            $sock = $this->getSocket();
+            if ($sock) {
+                $prtTimeoutMs = max(1000, $this->timeoutMs);
+                stream_set_timeout($sock, (int)floor($prtTimeoutMs / 1000), (int)(($prtTimeoutMs % 1000) * 1000));
+            }
+
+            $prtBase = $this->getOidsBatch(array(
+                '1.3.6.1.2.1.43.10.2.1.4.1.1', // prtMarkerLifeCount.1.1 (Gedruckte Seiten)
+                '1.3.6.1.2.1.43.16.5.1.2.1.1', // prtConsoleDisplayBufferText.1.1 (Display)
+            ), 2);
+            $pageCountRaw = isset($prtBase['1.3.6.1.2.1.43.10.2.1.4.1.1']) ? $prtBase['1.3.6.1.2.1.43.10.2.1.4.1.1'] : null;
+            if ($pageCountRaw === null && stripos((string)$sysDescr . ' ' . (string)$deviceModel, 'jet') !== false) {
+                $pageCountRaw = $this->getOid('1.3.6.1.2.1.43.10.2.1.4.1.1');
+            }
+            $supNames = $this->walkOid('1.3.6.1.2.1.43.11.1.1.6', 10, true);
             if ($pageCountRaw !== null || !empty($supNames)) {
-                $supMax   = $this->walkOid('1.3.6.1.2.1.43.11.1.1.8', 12);
-                $supLevel = $this->walkOid('1.3.6.1.2.1.43.11.1.1.9', 12);
-                $dispWalk = $this->walkOid('1.3.6.1.2.1.43.16.5.1.2', 4);
-                $dispText = !empty($dispWalk) ? $this->cleanSnmpValue(reset($dispWalk)) : '';
+                $dispText = isset($prtBase['1.3.6.1.2.1.43.16.5.1.2.1.1']) ? $this->cleanSnmpValue($prtBase['1.3.6.1.2.1.43.16.5.1.2.1.1']) : '';
+                if ($dispText === '') {
+                    $dispWalk = $this->walkOid('1.3.6.1.2.1.43.16.5.1.2', 2, true);
+                    $dispText = !empty($dispWalk) ? $this->cleanSnmpValue(reset($dispWalk)) : '';
+                }
+
+                // Für alle gefundenen Patronen/Toner-Suffixe gezielt MaxCapacity (.8) & Level (.9) in kleinen 4er-Batches abrufen
+                $capLevelOids = array();
+                $suffixes = array();
+                foreach ($supNames as $oid => $sName) {
+                    $suffix = substr($oid, strlen('1.3.6.1.2.1.43.11.1.1.6.'));
+                    if ($suffix !== false && $suffix !== '') {
+                        $suffixes[$oid] = $suffix;
+                        $capLevelOids[] = '1.3.6.1.2.1.43.11.1.1.8.' . $suffix;
+                        $capLevelOids[] = '1.3.6.1.2.1.43.11.1.1.9.' . $suffix;
+                    }
+                }
+                $capLevelMap = !empty($capLevelOids) ? $this->getOidsBatch($capLevelOids, 4) : array();
 
                 $supplies = array();
                 foreach ($supNames as $oid => $sName) {
-                    $suffix = substr($oid, strlen('1.3.6.1.2.1.43.11.1.1.6.'));
-                    $maxVal = isset($supMax['1.3.6.1.2.1.43.11.1.1.8.' . $suffix]) ? (int)$this->cleanSnmpValue($supMax['1.3.6.1.2.1.43.11.1.1.8.' . $suffix]) : 100;
-                    $curVal = isset($supLevel['1.3.6.1.2.1.43.11.1.1.9.' . $suffix]) ? (int)$this->cleanSnmpValue($supLevel['1.3.6.1.2.1.43.11.1.1.9.' . $suffix]) : 0;
+                    $suffix = isset($suffixes[$oid]) ? $suffixes[$oid] : substr($oid, strlen('1.3.6.1.2.1.43.11.1.1.6.'));
+                    $maxKey = '1.3.6.1.2.1.43.11.1.1.8.' . $suffix;
+                    $curKey = '1.3.6.1.2.1.43.11.1.1.9.' . $suffix;
+                    $maxRaw = isset($capLevelMap[$maxKey]) ? $capLevelMap[$maxKey] : $this->getOid($maxKey);
+                    $curRaw = isset($capLevelMap[$curKey]) ? $capLevelMap[$curKey] : $this->getOid($curKey);
+                    $maxVal = $maxRaw !== null ? (int)$this->cleanSnmpValue($maxRaw) : 100;
+                    $curVal = $curRaw !== null ? (int)$this->cleanSnmpValue($curRaw) : 0;
                     $pct = ($maxVal > 0 && $curVal >= 0) ? min(100, (int)round(($curVal / $maxVal) * 100)) : null;
                     $supplies[] = array(
                         'name'    => $this->cleanSnmpValue($sName),
@@ -730,6 +765,12 @@ class SnmpClient
                     'console_display' => $dispText,
                     'supplies'        => $supplies,
                 );
+            }
+
+            if ($sock) {
+                $sec = (int)floor($this->timeoutMs / 1000);
+                $usec = (int)(($this->timeoutMs % 1000) * 1000);
+                stream_set_timeout($sock, $sec, $usec);
             }
         }
 
@@ -793,6 +834,36 @@ class SnmpClient
     }
 
     /**
+     * Sendet ein SNMP-UDP-Paket über den persistenten Socket, verwirft eventuell verspätete
+     * Alt-Pakete im Empfangspuffer anhand der Request-ID und liefert die dekodierten Varbinds.
+     */
+    private function sendAndReceiveVarbinds($sock, $packet, $reqId)
+    {
+        if (!$sock) {
+            return null;
+        }
+        // Verwerfe eventuell verspätet eingetroffene UDP-Antworten früherer Anfragen
+        @stream_set_blocking($sock, false);
+        while (@fread($sock, 8192)) {
+        }
+        @stream_set_blocking($sock, true);
+
+        @fwrite($sock, $packet);
+        for ($attempt = 0; $attempt < 3; $attempt++) {
+            $resp = @fread($sock, 8192);
+            if (!$resp || strlen($resp) < 10) {
+                return null;
+            }
+            $varbinds = $this->decodeSnmpVarbinds($resp, $reqId);
+            if ($varbinds === 'STALE') {
+                continue;
+            }
+            return $varbinds;
+        }
+        return null;
+    }
+
+    /**
      * Fragt mehrere SNMP-OIDs gleichzeitig in gebündelten Multi-Varbind-UDP-Paketen ab.
      * Spart bis zu 90 % der Netzwerk-Roundtrips gegenüber Einzelabfragen.
      */
@@ -825,15 +896,11 @@ class SnmpClient
                      . $pdu;
             $packet = $this->berEncode(0x30, $msgBody);
 
-            @fwrite($sock, $packet);
-            $resp = @fread($sock, 8192);
-            if ($resp && strlen($resp) >= 10) {
-                $varbinds = $this->decodeSnmpVarbinds($resp);
-                if (is_array($varbinds)) {
-                    foreach ($varbinds as $vb) {
-                        if (!$vb['end'] && $vb['value'] !== null) {
-                            $results[$vb['oid']] = (string)$vb['value'];
-                        }
+            $varbinds = $this->sendAndReceiveVarbinds($sock, $packet, $reqId);
+            if (is_array($varbinds)) {
+                foreach ($varbinds as $vb) {
+                    if (!$vb['end'] && $vb['value'] !== null) {
+                        $results[$vb['oid']] = (string)$vb['value'];
                     }
                 }
             }
@@ -855,10 +922,9 @@ class SnmpClient
 
     /**
      * Führt einen hochperformanten SNMPv2c-Walk mittels GetBulkRequest (0xA5) über einen persistenten
-     * UDP-Socket durch (holt bis zu 28 Zeilen pro UDP-Paket statt 1 Zeile pro Paket).
-     * Verhindert zudem doppelte Timeouts durch php-snmp-Fallthroughs bei leeren MIB-Tabellen.
+     * UDP-Socket durch (bzw. per GetNextRequest 0xA1 bei langsamen Embedded-/Drucker-Agenten).
      */
-    public function walkOid($baseOid, $maxRows = 108)
+    public function walkOid($baseOid, $maxRows = 108, $useGetNext = false)
     {
         $baseOid = ltrim($baseOid, '.');
         $sock = $this->getSocket();
@@ -868,34 +934,35 @@ class SnmpClient
 
         $results = array();
         $currentOid = $baseOid;
-        $maxBulkLoops = max(2, (int)ceil($maxRows / 10) + 2);
+        $maxLoops = $useGetNext ? max(2, (int)$maxRows + 1) : max(2, (int)ceil($maxRows / 10) + 2);
 
-        for ($loop = 0; $loop < $maxBulkLoops && count($results) < $maxRows; $loop++) {
-            $batchMax = min(12, max(4, $maxRows - count($results)));
+        for ($loop = 0; $loop < $maxLoops && count($results) < $maxRows; $loop++) {
             $reqId = mt_rand(100, 30000);
             $oidBin = $this->encodeOid($currentOid);
             $varbind = $this->berEncode(0x30, $oidBin . "\x05\x00");
             $varbindList = $this->berEncode(0x30, $varbind);
 
-            // GetBulkRequest-PDU (0xA5): request-id, non-repeaters = 0, max-repetitions = $batchMax
-            $pduBody = $this->encodeInteger($reqId)
-                     . $this->encodeInteger(0)
-                     . $this->encodeInteger($batchMax)
-                     . $varbindList;
-            $pdu = $this->berEncode(0xA5, $pduBody);
+            if ($useGetNext) {
+                $pduBody = $this->encodeInteger($reqId)
+                         . $this->encodeInteger(0)
+                         . $this->encodeInteger(0)
+                         . $varbindList;
+                $pdu = $this->berEncode(0xA1, $pduBody); // 0xA1 = GetNextRequest-PDU
+            } else {
+                $batchMax = min(12, max(4, $maxRows - count($results)));
+                $pduBody = $this->encodeInteger($reqId)
+                         . $this->encodeInteger(0)
+                         . $this->encodeInteger($batchMax)
+                         . $varbindList;
+                $pdu = $this->berEncode(0xA5, $pduBody); // 0xA5 = GetBulkRequest-PDU
+            }
             $msgBody = $this->encodeInteger(1)
                      . $this->berEncode(0x04, $this->community)
                      . $pdu;
             $packet = $this->berEncode(0x30, $msgBody);
 
-            @fwrite($sock, $packet);
-            $resp = @fread($sock, 8192);
-            if (!$resp || strlen($resp) < 10) {
-                break;
-            }
-
-            $varbinds = $this->decodeSnmpVarbinds($resp);
-            if (empty($varbinds)) {
+            $varbinds = $this->sendAndReceiveVarbinds($sock, $packet, $reqId);
+            if (empty($varbinds) || !is_array($varbinds)) {
                 break;
             }
 
@@ -960,13 +1027,11 @@ class SnmpClient
                  . $pdu;
         $packet = $this->berEncode(0x30, $msgBody);
 
-        @fwrite($sock, $packet);
-        $resp = @fread($sock, 4096);
-
-        if (!$resp || strlen($resp) < 10) {
+        $list = $this->sendAndReceiveVarbinds($sock, $packet, $reqId);
+        if (empty($list) || !is_array($list) || $list[0]['end'] || $list[0]['value'] === null) {
             return null;
         }
-        return $this->decodeSnmpResponse($resp);
+        return array('oid' => $list[0]['oid'], 'value' => $list[0]['value']);
     }
 
         /**
@@ -1039,7 +1104,7 @@ class SnmpClient
     /**
      * Dekodiert alle in einem SNMPv2c-Antwortpaket (GetResponse / GetBulk) enthaltenen Varbinds als Liste.
      */
-    private function decodeSnmpVarbinds($bin)
+    private function decodeSnmpVarbinds($bin, $expectedReqId = null)
     {
         $pos = 0;
         $seq = $this->berReadElement($bin, $pos);
@@ -1057,6 +1122,12 @@ class SnmpClient
         $pbody = $pdu['value'];
         $ppos = 0;
         $reqId = $this->berReadElement($pbody, $ppos);
+        if ($expectedReqId !== null && $reqId && $reqId['tag'] === 0x02) {
+            $pduReqId = (int)$this->decodeValue(0x02, $reqId['value']);
+            if ($pduReqId !== (int)$expectedReqId) {
+                return 'STALE';
+            }
+        }
         $errStatus = $this->berReadElement($pbody, $ppos);
         $errIndex = $this->berReadElement($pbody, $ppos);
         if (!$errStatus || ord($errStatus['value']) !== 0) {
@@ -1104,7 +1175,7 @@ class SnmpClient
     private function decodeSnmpResponse($bin)
     {
         $list = $this->decodeSnmpVarbinds($bin);
-        if (empty($list) || $list[0]['end'] || $list[0]['value'] === null) {
+        if (empty($list) || !is_array($list) || $list[0]['end'] || $list[0]['value'] === null) {
             return null;
         }
         return array('oid' => $list[0]['oid'], 'value' => $list[0]['value']);

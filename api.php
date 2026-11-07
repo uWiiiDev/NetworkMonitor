@@ -15,6 +15,8 @@
  */
 
 header('Content-Type: application/json; charset=utf-8');
+header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+header('Pragma: no-cache');
 
 require_once __DIR__ . '/includes/db.php';
 require_once __DIR__ . '/includes/auth.php';
@@ -27,7 +29,7 @@ $isNetExpert = in_array($currentUser['role'], array('netadmin', 'admin'), true);
 $canEditRole = in_array($currentUser['role'], array('operator', 'netadmin', 'admin'), true);
 
 // Gib das PHP-Session-File-Lock sofort frei, damit parallele Requests (z.B. während eines Scans) niemals blockieren
-@session_write_close();
+Auth::closeSession();
 
 $action = isset($_GET['action']) ? $_GET['action'] : (isset($_POST['action']) ? $_POST['action'] : 'topology');
 
@@ -133,7 +135,7 @@ try {
                 SELECT a.*, s.name AS scope_name
                 FROM device_alerts a
                 LEFT JOIN scopes s ON a.scope_id = s.id
-                ORDER BY a.id DESC LIMIT 50
+                ORDER BY a.is_acknowledged ASC, a.id DESC LIMIT 100
             ")->fetchAll();
             $alerts = array();
             foreach ($rawAlerts as $alRow) {
@@ -141,7 +143,11 @@ try {
                     $alerts[] = $alRow;
                 }
             }
-            $unackCount = (int)$pdo->query("SELECT COUNT(*) FROM device_alerts WHERE is_acknowledged = 0")->fetchColumn();
+            $unackStmt = $pdo->query("SELECT COUNT(*) FROM device_alerts WHERE is_acknowledged = 0");
+            $unackCount = $unackStmt ? (int)$unackStmt->fetchColumn() : 0;
+            if ($unackStmt) {
+                $unackStmt->closeCursor();
+            }
 
             $macHistory = array();
             try {
@@ -1152,6 +1158,23 @@ try {
                 @file_put_contents($customConfPath, $backupCustomConf);
             }
 
+            // Falls als systemd-Dienst (.deb Paket) installiert: PHP_CLI_SERVER_WORKERS=6 nachrüsten,
+            // damit parallele API-Anfragen (z.B. Alarme quittieren während eines Scans) nicht blockieren.
+            $systemdUnit = '/lib/systemd/system/network-monitor.service';
+            if (is_file($systemdUnit) && is_writable($systemdUnit)) {
+                $unitContent = (string)@file_get_contents($systemdUnit);
+                if ($unitContent !== '' && strpos($unitContent, 'PHP_CLI_SERVER_WORKERS') === false) {
+                    $unitContent = str_replace(
+                        "Type=simple\n",
+                        "Type=simple\nEnvironment=\"PHP_CLI_SERVER_WORKERS=6\"\n",
+                        $unitContent
+                    );
+                    @file_put_contents($systemdUnit, $unitContent);
+                    @shell_exec('systemctl daemon-reload >/dev/null 2>&1');
+                    $outputLines[] = 'Systemd-Unit network-monitor.service auf Multi-Worker (PHP_CLI_SERVER_WORKERS=6) aktualisiert.';
+                }
+            }
+
             $newVersion = Database::getAppVersion();
             $newCommit = Database::getGitCommitShort();
 
@@ -1578,15 +1601,22 @@ try {
 
                 // ---------------------------------------------------------------------
         // ENDPOINT: ack_alerts
-        // Quittiert einen einzelnen Alarm oder alle offenen Alarme inklusive optionalem Techniker-Kommentar,
-        // Benutzername ('ack_by') und Zeitstempel ('ack_at').
+        // Quittiert einen einzelnen Alarm, eine Auswahl von Alarmen ('ids') oder alle offenen Alarme
+        // inklusive optionalem Techniker-Kommentar, Benutzername ('ack_by') und Zeitstempel ('ack_at').
         // ---------------------------------------------------------------------
         case 'ack_alerts':
             Auth::requireRole(array('operator', 'netadmin', 'admin'));
             $alertId = isset($input['id']) ? (int)$input['id'] : 0;
+            $alertIds = (isset($input['ids']) && is_array($input['ids'])) ? array_values(array_filter(array_map('intval', $input['ids']))) : array();
             $ackComment = isset($input['comment']) ? trim((string)$input['comment']) : '';
             $ackBy = isset($currentUser['username']) ? $currentUser['username'] : 'operator';
             $now = date('Y-m-d H:i:s');
+
+            // Stelle sicher, dass Quittierungsspalten auch auf älteren DB-Ständen existieren
+            $db->ensureColumnExists('device_alerts', 'ack_comment', 'TEXT DEFAULT NULL');
+            $db->ensureColumnExists('device_alerts', 'ack_by', 'VARCHAR(64) DEFAULT NULL');
+            $db->ensureColumnExists('device_alerts', 'ack_at', 'DATETIME DEFAULT NULL');
+
             if ($alertId > 0) {
                 $pdo->prepare("UPDATE device_alerts SET is_acknowledged = 1, ack_comment = :c, ack_by = :u, ack_at = :now WHERE id = :id")
                     ->execute(array(
@@ -1595,6 +1625,18 @@ try {
                         ':now' => $now,
                         ':id'  => $alertId,
                     ));
+            } elseif (!empty($alertIds)) {
+                $updSel = $pdo->prepare("UPDATE device_alerts SET is_acknowledged = 1, ack_comment = COALESCE(:c, ack_comment), ack_by = :u, ack_at = :now WHERE id = :id");
+                foreach ($alertIds as $aid) {
+                    if ($aid > 0) {
+                        $updSel->execute(array(
+                            ':c'   => $ackComment !== '' ? $ackComment : null,
+                            ':u'   => $ackBy,
+                            ':now' => $now,
+                            ':id'  => $aid,
+                        ));
+                    }
+                }
             } else {
                 $pdo->prepare("UPDATE device_alerts SET is_acknowledged = 1, ack_comment = COALESCE(:c, ack_comment), ack_by = :u, ack_at = :now WHERE is_acknowledged = 0")
                     ->execute(array(
@@ -1603,7 +1645,26 @@ try {
                         ':now' => $now,
                     ));
             }
-            echo json_encode(array('ok' => true, 'ack_by' => $ackBy, 'ack_at' => $now));
+
+            $updatedAlerts = $pdo->query("
+                SELECT a.*, s.name AS scope_name
+                FROM device_alerts a
+                LEFT JOIN scopes s ON a.scope_id = s.id
+                ORDER BY a.is_acknowledged ASC, a.id DESC LIMIT 100
+            ")->fetchAll();
+            $unackStmt = $pdo->query("SELECT COUNT(*) FROM device_alerts WHERE is_acknowledged = 0");
+            $unackRemaining = $unackStmt ? (int)$unackStmt->fetchColumn() : 0;
+            if ($unackStmt) {
+                $unackStmt->closeCursor();
+            }
+
+            echo json_encode(array(
+                'ok'           => true,
+                'ack_by'       => $ackBy,
+                'ack_at'       => $now,
+                'alerts'       => $updatedAlerts,
+                'unack_alerts' => $unackRemaining,
+            ));
             break;
 
                 // ---------------------------------------------------------------------

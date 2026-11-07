@@ -65,6 +65,7 @@ After=network.target
 
 [Service]
 Type=simple
+Environment="PHP_CLI_SERVER_WORKERS=6"
 EnvironmentFile=-/etc/default/network-monitor
 WorkingDirectory=/opt/network-monitor
 ExecStart=/bin/sh -c 'exec /usr/bin/php -d variables_order=EGPCS -S ${BIND_ADDR:-0.0.0.0}:${PORT:-8085} -t /opt/network-monitor'

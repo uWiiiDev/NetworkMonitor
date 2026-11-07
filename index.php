@@ -40,7 +40,7 @@ $gitShort = Database::getGitCommitShort();
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>NetworkMonitor - Automatischer Netzwerkplan & SNMP Switch Discovery</title>
-    <link rel="stylesheet" href="assets/style.css">
+    <link rel="stylesheet" href="assets/style.css?v=<?php echo htmlspecialchars($appVersion, ENT_QUOTES, 'UTF-8'); ?>">
     <script>
         try {
             var savedTheme = localStorage.getItem('nm_theme');
@@ -1054,9 +1054,11 @@ $gitShort = Database::getGitCommitShort();
                 <!-- Dynamisch per JS gefüllt -->
             </div>
             <div class="modal-footer" style="justify-content:space-between;flex-shrink:0;">
-                <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+                <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;flex:1;margin-right:12px;">
                     <?php if ($canEdit): ?>
-                        <button class="btn btn-sm btn-success" onclick="ackAllAlerts()">✓ Alle offenen Alarme quittieren (mit Kommentar)...</button>
+                        <input type="text" id="alert-ack-all-comment" class="form-input" style="max-width:260px;padding:5px 9px;font-size:12px;" placeholder="Sammel-Kommentar (optional, z.B. Geprüft)...">
+                        <button class="btn btn-sm btn-primary" onclick="ackSelectedAlerts()" title="Alle per Checkbox markierten Alarme quittieren">✓ Ausgewählte quittieren</button>
+                        <button class="btn btn-sm btn-success" onclick="ackAllAlerts()" title="Alle aktuell offenen (unquittierten) Alarme quittieren">✓ Alle offenen Alarme quittieren</button>
                         <button class="btn btn-sm btn-danger" onclick="clearAllAlerts()">🗑 Alarm-Historie leeren</button>
                     <?php else: ?>
                         <span style="font-size:12px;color:var(--text-secondary);">🔒 Das Quittieren und Kommentieren von Alarmen ist Operatoren, Netzwerkexperten und Administratoren vorbehalten.</span>
@@ -1102,6 +1104,6 @@ $gitShort = Database::getGitCommitShort();
     <script>
         window.CURRENT_USER = <?php echo json_encode($currentUser); ?>;
     </script>
-    <script src="assets/app.js"></script>
+    <script src="assets/app.js?v=<?php echo htmlspecialchars($appVersion, ENT_QUOTES, 'UTF-8'); ?>"></script>
 </body>
 </html>

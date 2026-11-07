@@ -290,12 +290,15 @@ class NetworkScanner
                 $snmpPortsJson = null;
                 $hasBridgeTable = false;
 
-                // Detail-SNMP-Abfrage (Interfaces, Bridge-MIB MAC-Tabelle, LLDP) NUR für Geräte,
-                // die beim schnellen Multi-Host-UDP-Check geantwortet haben oder eine eigene Switch-SNMP-Community besitzen!
+                // Detail-SNMP-Abfrage (Interfaces, Bridge-MIB MAC-Tabelle, LLDP, Printer-MIB) für Geräte,
+                // die beim schnellen Multi-Host-UDP-Check geantwortet haben, eine eigene Switch-SNMP-Community besitzen,
+                // bereits zuvor per SNMP erkannt wurden oder als Netzwerkdrucker (Port 515/631/9100) aktiv sind!
                 $customSnmpComm = (isset($prevDevicesByIp[$ip]) && !empty($prevDevicesByIp[$ip]['switch_snmp_community']))
                     ? trim($prevDevicesByIp[$ip]['switch_snmp_community'])
                     : '';
-                if (isset($responsiveSnmpIps[$ip]) || $customSnmpComm !== '') {
+                $wasSnmpBefore = isset($prevDevicesByIp[$ip]) && (!empty($prevDevicesByIp[$ip]['snmp_enabled']) || in_array($prevDevicesByIp[$ip]['device_type'], array('switch', 'printer'), true));
+                $hasPrinterPort = in_array(9100, $openPorts, true) || in_array(631, $openPorts, true) || in_array(515, $openPorts, true) || stripos((string)$vendor, 'printer') !== false;
+                if (isset($responsiveSnmpIps[$ip]) || $customSnmpComm !== '' || $wasSnmpBefore || $hasPrinterPort) {
                     $devComm = ($customSnmpComm !== '') ? $customSnmpComm : $community;
                     $snmpClient = new SnmpClient($ip, $devComm, $this->config['snmp_timeout_ms']);
                     $snmpData = $snmpClient->probeDevice();
@@ -1047,12 +1050,11 @@ class NetworkScanner
     private function insertAnomalyAlertIfNew(array &$newAlerts, $deviceId, $scopeId, $ip, $deviceName, $alertType, $severity, $message, $dedupToken, $now)
     {
         try {
-            $cutoff = date('Y-m-d H:i:s', time() - 43200); // 12h Deduplizierungsfenster für unbestätigte identische Anomalien
+            $cutoff = date('Y-m-d H:i:s', time() - 43200); // 12h Deduplizierungsfenster für identische Anomalien
             $chk = $this->pdo->prepare("
-                SELECT id, message FROM device_alerts
+                SELECT id, message, is_acknowledged FROM device_alerts
                 WHERE alert_type = :atype
                   AND device_id = :did
-                  AND is_acknowledged = 0
                   AND created_at >= :cutoff
                 ORDER BY id DESC LIMIT 10
             ");
@@ -1061,11 +1063,15 @@ class NetworkScanner
                 ':did'    => (int)$deviceId,
                 ':cutoff' => $cutoff,
             ));
-            while ($existing = $chk->fetch()) {
+            $existingRows = $chk->fetchAll();
+            foreach ($existingRows as $existing) {
                 if ($dedupToken === '' || strpos((string)$existing['message'], $dedupToken) !== false) {
-                    // Aktualisiere Zeitstempel und Nachrichtentext des offenen Alarms ohne Spam-Duplikat
-                    $upd = $this->pdo->prepare("UPDATE device_alerts SET message = :msg, created_at = :now WHERE id = :id");
-                    $upd->execute(array(':msg' => $message, ':now' => $now, ':id' => (int)$existing['id']));
+                    // Falls der Alarm noch unquittiert ist, aktualisiere Zeitstempel und Nachrichtentext ohne Spam-Duplikat;
+                    // falls er bereits quittiert wurde, respektiere die Quittierung und erzeuge keinen neuen Duplikat-Alarm!
+                    if ((int)$existing['is_acknowledged'] === 0) {
+                        $upd = $this->pdo->prepare("UPDATE device_alerts SET message = :msg, created_at = :now WHERE id = :id");
+                        $upd->execute(array(':msg' => $message, ':now' => $now, ':id' => (int)$existing['id']));
+                    }
                     return;
                 }
             }
@@ -1120,12 +1126,11 @@ class NetworkScanner
         }
         try {
             $uStmt = $this->pdo->query("SELECT email FROM users WHERE is_active = 1 AND receive_alerts = 1 AND email IS NOT NULL AND email != ''");
-            if ($uStmt) {
-                while ($uRow = $uStmt->fetch()) {
-                    $uEmail = trim((string)$uRow['email']);
-                    if ($uEmail !== '' && filter_var($uEmail, FILTER_VALIDATE_EMAIL)) {
-                        $recipientsMap[strtolower($uEmail)] = $uEmail;
-                    }
+            $uRows = $uStmt ? $uStmt->fetchAll() : array();
+            foreach ($uRows as $uRow) {
+                $uEmail = trim((string)$uRow['email']);
+                if ($uEmail !== '' && filter_var($uEmail, FILTER_VALIDATE_EMAIL)) {
+                    $recipientsMap[strtolower($uEmail)] = $uEmail;
                 }
             }
         } catch (Exception $e) {}
@@ -1223,7 +1228,7 @@ class NetworkScanner
         // Manuell verknüpfte Geräte (is_manual = 1) vorab als bereits verknüpft vormerken
         $manStmt = $this->pdo->prepare("SELECT target_device_id FROM links WHERE scope_id = :sid AND is_manual = 1");
         $manStmt->execute(array(':sid' => (int)$scopeId));
-        while ($mRow = $manStmt->fetch()) {
+        foreach ($manStmt->fetchAll() as $mRow) {
             $linkedTargets[(int)$mRow['target_device_id']] = true;
         }
 

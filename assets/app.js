@@ -858,7 +858,7 @@ function renderMacFinderResults() {
  * und aktualisiert alle Ansichten.
  */
 function loadTopologyData(callback) {
-    fetch('api.php?action=topology')
+    fetch('api.php?action=topology&_t=' + Date.now(), { cache: 'no-store', credentials: 'same-origin' })
         .then(function (r) {
             if (r.status === 401) {
                 window.location.href = 'login.php';
@@ -7367,7 +7367,10 @@ function renderAlertsModal() {
     if (alerts.length === 0) {
         html += '<div style="padding:24px;text-align:center;color:var(--text-secondary);background:rgba(15,23,42,0.4);border-radius:8px;border:1px solid var(--border-color);">Keine Alarme oder Netzwerk-Anomalien protokolliert – alle überwachten Systeme und Switch-Ports verhalten sich unauffällig.</div>';
     } else {
-        html += '<table class="data-table"><thead><tr><th>Zeitpunkt</th><th>Kategorie / Typ</th><th>Gerät / Switch</th><th>IP-Adresse</th><th>Details &amp; Steckplatz</th><th>Quittierung &amp; Kommentar</th></tr></thead><tbody>';
+        var canAck = userCanEdit();
+        html += '<table class="data-table"><thead><tr>' +
+            (canAck ? '<th style="width:32px;text-align:center;"><input type="checkbox" id="alert-sel-all-cb" onclick="toggleSelectAllAlerts(this)" title="Alle offenen Alarme auswählen / abwählen"></th>' : '') +
+            '<th>Zeitpunkt</th><th>Kategorie / Typ</th><th>Gerät / Switch</th><th>IP-Adresse</th><th>Details &amp; Steckplatz</th><th>Quittierung &amp; Kommentar</th></tr></thead><tbody>';
         for (var a = 0; a < alerts.length; a++) {
             var al = alerts[a];
             var alId = parseInt(al.id, 10);
@@ -7403,24 +7406,24 @@ function renderAlertsModal() {
                     '<div style="display:flex;flex-direction:column;gap:4px;min-width:210px;">' +
                         '<div style="display:flex;align-items:center;justify-content:space-between;gap:6px;">' +
                             '<span style="font-size:11px;color:#6ee7b7;">✅ ' + ackMeta + '</span>' +
-                            (userCanEdit() ? '<button class="btn btn-sm" style="padding:1px 6px;font-size:10.5px;" onclick="toggleAlertCommentBox(' + alId + ')" title="Quittierungs-Kommentar bearbeiten">💬✎</button>' : '') +
+                            (canAck ? '<button type="button" class="btn btn-sm" style="padding:1px 6px;font-size:10.5px;" onclick="toggleAlertCommentBox(' + alId + ')" title="Quittierungs-Kommentar bearbeiten">💬✎</button>' : '') +
                         '</div>' +
                         (al.ack_comment
                             ? '<div style="background:rgba(16,185,129,0.1);border:1px solid rgba(16,185,129,0.3);border-radius:5px;padding:4px 8px;font-size:11.5px;color:#e2e8f0;">💬 ' + escapeHtml(al.ack_comment) + '</div>'
                             : '') +
-                        (userCanEdit()
+                        (canAck
                             ? '<div id="alert-ack-box-' + alId + '" style="display:none;gap:4px;margin-top:2px;">' +
                                   '<input type="text" id="alert-ack-inp-' + alId + '" class="form-input" style="padding:4px 7px;font-size:11.5px;" placeholder="Kommentar zur Quittierung..." value="' + escapeHtml(al.ack_comment || '') + '" onkeydown="if(event.key===\'Enter\') ackSingleAlert(' + alId + ');">' +
-                                  '<button class="btn btn-sm btn-primary" style="padding:3px 8px;font-size:11px;" onclick="ackSingleAlert(' + alId + ')">💾</button>' +
+                                  '<button type="button" class="btn btn-sm btn-primary" style="padding:3px 8px;font-size:11px;" onclick="ackSingleAlert(' + alId + ')">💾</button>' +
                               '</div>'
                             : '') +
                     '</div>';
             } else {
-                if (userCanEdit()) {
+                if (canAck) {
                     ackCellHtml =
                         '<div style="display:flex;gap:4px;align-items:center;min-width:220px;">' +
                             '<input type="text" id="alert-ack-inp-' + alId + '" class="form-input" style="padding:4px 7px;font-size:11.5px;flex:1;" placeholder="Kommentar (optional)..." onkeydown="if(event.key===\'Enter\') ackSingleAlert(' + alId + ');">' +
-                            '<button class="btn btn-sm btn-success" style="padding:4px 9px;font-size:11px;white-space:nowrap;" onclick="ackSingleAlert(' + alId + ')" title="Alarm mit Kommentar quittieren">✓ Quittieren</button>' +
+                            '<button type="button" class="btn btn-sm btn-success" style="padding:4px 9px;font-size:11px;white-space:nowrap;" onclick="ackSingleAlert(' + alId + ')" title="Alarm mit Kommentar quittieren">✓ Quittieren</button>' +
                         '</div>';
                 } else {
                     ackCellHtml = '<span class="badge badge-offline" style="font-size:10.5px;">Offen (Unquittiert)</span>';
@@ -7428,6 +7431,7 @@ function renderAlertsModal() {
             }
 
             html += '<tr style="' + (isUnack ? 'background:rgba(239,68,68,0.08);font-weight:600;' : 'opacity:0.84;') + '">' +
+                (canAck ? '<td style="text-align:center;"><input type="checkbox" class="alert-sel-cb" value="' + alId + '" data-unack="' + (isUnack ? '1' : '0') + '"></td>' : '') +
                 '<td style="white-space:nowrap;font-size:12px;">' + escapeHtml(al.created_at || '-') + (isUnack ? ' <span class="badge badge-offline" style="font-size:9px;">NEU</span>' : '') + '</td>' +
                 '<td style="white-space:nowrap;">' + evBadge + '</td>' +
                 '<td><b ' + devClickAttr + '>' + escapeHtml(al.device_name || '-') + '</b></td>' +
@@ -7456,6 +7460,34 @@ function toggleAlertCommentBox(alertId) {
 }
 
 /**
+ * Übernimmt die vom Backend zurückgelieferte aktualisierte Alarm-Liste sofort in den Frontend-Zustand.
+ */
+function applyAckAlertsResponse(res) {
+    if (res && Array.isArray(res.alerts)) {
+        AppState.alerts = res.alerts;
+    }
+    if (res && res.unack_alerts !== undefined) {
+        AppState.unackAlerts = parseInt(res.unack_alerts || 0, 10);
+    }
+    updateTopbarAlertsBadge();
+    renderAlertsModal();
+    loadTopologyData(function () {
+        renderAlertsModal();
+    });
+}
+
+/**
+ * Wählt alle Alarm-Checkboxen im Modal aus oder ab.
+ */
+function toggleSelectAllAlerts(masterCb) {
+    var checked = !!(masterCb && masterCb.checked);
+    var boxes = document.querySelectorAll('.alert-sel-cb');
+    for (var i = 0; i < boxes.length; i++) {
+        boxes[i].checked = checked;
+    }
+}
+
+/**
  * Quittiert einen einzelnen Alarm inklusive optionalem Techniker-Kommentar.
  */
 function ackSingleAlert(alertId) {
@@ -7464,22 +7496,71 @@ function ackSingleAlert(alertId) {
         return;
     }
     var inp = document.getElementById('alert-ack-inp-' + alertId);
+    var allInp = document.getElementById('alert-ack-all-comment');
     var comment = inp ? inp.value.trim() : '';
-    fetch('api.php?action=ack_alerts', {
+    if (!comment && allInp && allInp.value.trim()) {
+        comment = allInp.value.trim();
+    }
+    fetch('api.php?action=ack_alerts&_t=' + Date.now(), {
         method: 'POST',
+        cache: 'no-store',
+        credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: alertId, comment: comment })
+        body: JSON.stringify({ id: parseInt(alertId, 10), comment: comment })
     })
     .then(function (r) { return r.json(); })
     .then(function (res) {
-        if (res.ok) {
+        if (res && res.ok) {
             showToast('✅ Alarm quittiert' + (comment ? (' („' + comment + '“)') : '') + '.');
-            loadTopologyData(function () {
-                renderAlertsModal();
-            });
+            applyAckAlertsResponse(res);
         } else {
-            showToast('Fehler: ' + (res.error || 'Unbekannt'));
+            showToast('Fehler beim Quittieren: ' + ((res && res.error) ? res.error : 'Unbekannt'));
         }
+    })
+    .catch(function (err) {
+        showToast('Netzwerkfehler beim Quittieren: ' + (err && err.message ? err.message : String(err)));
+    });
+}
+
+/**
+ * Quittiert alle per Checkbox ausgewählten Alarme gleichzeitig.
+ */
+function ackSelectedAlerts() {
+    if (!userCanEdit()) {
+        showToast('Keine Berechtigung: Nur Operatoren, Netzwerkexperten und Administratoren dürfen Alarme quittieren.');
+        return;
+    }
+    var boxes = document.querySelectorAll('.alert-sel-cb:checked');
+    var ids = [];
+    for (var i = 0; i < boxes.length; i++) {
+        var idVal = parseInt(boxes[i].value, 10);
+        if (idVal > 0) ids.push(idVal);
+    }
+    if (ids.length === 0) {
+        showToast('Bitte markiere zuerst mindestens einen Alarm per Checkbox (oder nutze „Alle offenen Alarme quittieren“).');
+        return;
+    }
+    var allInp = document.getElementById('alert-ack-all-comment');
+    var comment = allInp ? allInp.value.trim() : '';
+    fetch('api.php?action=ack_alerts&_t=' + Date.now(), {
+        method: 'POST',
+        cache: 'no-store',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: ids, comment: comment })
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (res) {
+        if (res && res.ok) {
+            if (allInp) allInp.value = '';
+            showToast('✅ ' + ids.length + ' ausgewählte Alarme quittiert' + (comment ? (' („' + comment + '“)') : '') + '.');
+            applyAckAlertsResponse(res);
+        } else {
+            showToast('Fehler beim Quittieren: ' + ((res && res.error) ? res.error : 'Unbekannt'));
+        }
+    })
+    .catch(function (err) {
+        showToast('Netzwerkfehler beim Quittieren: ' + (err && err.message ? err.message : String(err)));
     });
 }
 
@@ -7518,25 +7599,27 @@ function ackAllAlerts() {
         showToast('Keine Berechtigung: Nur Operatoren, Netzwerkexperten und Administratoren dürfen Alarme quittieren.');
         return;
     }
-    var comment = prompt('Optionaler Quittierungs-Kommentar für alle offenen Alarme (z.B. „Geprüft / Wartung"): ', '');
-    if (comment === null) {
-        return; // Abbrechen geklickt
-    }
-    fetch('api.php?action=ack_alerts', {
+    var allInp = document.getElementById('alert-ack-all-comment');
+    var comment = allInp ? allInp.value.trim() : '';
+    fetch('api.php?action=ack_alerts&_t=' + Date.now(), {
         method: 'POST',
+        cache: 'no-store',
+        credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ comment: comment.trim() })
+        body: JSON.stringify({ comment: comment })
     })
     .then(function (r) { return r.json(); })
     .then(function (res) {
-        if (res.ok) {
-            showToast('✅ Alle offenen Alarme wurden quittiert.');
-            loadTopologyData(function () {
-                renderAlertsModal();
-            });
+        if (res && res.ok) {
+            if (allInp) allInp.value = '';
+            showToast('✅ Alle offenen Alarme wurden quittiert' + (comment ? (' („' + comment + '“)') : '') + '.');
+            applyAckAlertsResponse(res);
         } else {
-            showToast('Fehler: ' + (res.error || 'Unbekannt'));
+            showToast('Fehler beim Quittieren: ' + ((res && res.error) ? res.error : 'Unbekannt'));
         }
+    })
+    .catch(function (err) {
+        showToast('Netzwerkfehler beim Quittieren: ' + (err && err.message ? err.message : String(err)));
     });
 }
 
@@ -7545,19 +7628,30 @@ function ackAllAlerts() {
  */
 function clearAllAlerts() {
     if (!confirm('Gesamte Alarm-Historie wirklich löschen?')) return;
-    fetch('api.php?action=clear_alerts', {
+    fetch('api.php?action=clear_alerts&_t=' + Date.now(), {
         method: 'POST',
+        cache: 'no-store',
+        credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({})
     })
     .then(function (r) { return r.json(); })
     .then(function (res) {
-        if (res.ok) {
+        if (res && res.ok) {
+            AppState.alerts = [];
+            AppState.unackAlerts = 0;
+            updateTopbarAlertsBadge();
+            renderAlertsModal();
             showToast('Alarm-Historie geleert.');
             loadTopologyData(function () {
                 renderAlertsModal();
             });
+        } else {
+            showToast('Fehler: ' + ((res && res.error) ? res.error : 'Unbekannt'));
         }
+    })
+    .catch(function (err) {
+        showToast('Netzwerkfehler: ' + (err && err.message ? err.message : String(err)));
     });
 }
 

@@ -89,8 +89,12 @@ class Database
 
         // Schema-Initialisierung nur einmalig pro Datenbank-Version ausführen,
         // um unnötige DDL-Schema-Locks bei parallelen Lese-/Schreibzugriffen zu vermeiden!
-        $targetSchemaVer = 1123;
-        $curSchemaVer = (int)$this->pdo->query('PRAGMA user_version')->fetchColumn();
+        $targetSchemaVer = 1126;
+        $verStmt = $this->pdo->query('PRAGMA user_version');
+        $curSchemaVer = $verStmt ? (int)$verStmt->fetchColumn() : 0;
+        if ($verStmt) {
+            $verStmt->closeCursor();
+        }
         if ($curSchemaVer < $targetSchemaVer) {
             $this->initSqliteSchema();
             $this->seedInitialDataIfEmpty();
@@ -270,9 +274,10 @@ class Database
             return;
         }
         $sql = file_get_contents($sqlFile);
-        $statements = array_filter(array_map('trim', explode(';', $sql)));
+        $cleanSql = preg_replace('/^\s*--.*$/m', '', $sql);
+        $statements = array_filter(array_map('trim', explode(';', $cleanSql)));
         foreach ($statements as $stmt) {
-            if ($stmt !== '' && strpos($stmt, '--') !== 0) {
+            if ($stmt !== '') {
                 $this->pdo->exec($stmt);
             }
         }
@@ -508,10 +513,13 @@ class Database
         $this->pdo->exec("CREATE INDEX IF NOT EXISTS idx_logs_started ON scan_logs(started_at)");
     }
 
-    private function ensureColumnExists($table, $column, $definition)
+    public function ensureColumnExists($table, $column, $definition)
     {
         try {
-            $this->pdo->query("SELECT `$column` FROM `$table` LIMIT 1");
+            $stmt = $this->pdo->query("SELECT `$column` FROM `$table` LIMIT 1");
+            if ($stmt) {
+                $stmt->closeCursor();
+            }
         } catch (Exception $e) {
             try {
                 $this->pdo->exec("ALTER TABLE `$table` ADD COLUMN `$column` $definition");
@@ -526,7 +534,11 @@ class Database
         $now = date('Y-m-d H:i:s');
 
         // 1. Standard-Admin-Konto anlegen, falls noch keine Benutzer existieren (ohne Demo-/Test-Accounts)
-        $userCount = (int)$this->pdo->query("SELECT COUNT(*) FROM users")->fetchColumn();
+        $uStmt = $this->pdo->query("SELECT COUNT(*) FROM users");
+        $userCount = $uStmt ? (int)$uStmt->fetchColumn() : 0;
+        if ($uStmt) {
+            $uStmt->closeCursor();
+        }
         if ($userCount === 0) {
             $insUser = $this->pdo->prepare("
                 INSERT INTO users (username, password_hash, full_name, role, is_active, created_at)
@@ -542,7 +554,11 @@ class Database
             ));
 
             // 2. Lokalen Scope beim allerersten Datenbank-Start anlegen
-            $count = (int)$this->pdo->query("SELECT COUNT(*) FROM scopes")->fetchColumn();
+            $sStmt = $this->pdo->query("SELECT COUNT(*) FROM scopes");
+            $count = $sStmt ? (int)$sStmt->fetchColumn() : 0;
+            if ($sStmt) {
+                $sStmt->closeCursor();
+            }
             if ($count === 0) {
                 $localCidr = '192.168.1.0/24';
                 $gatewayIp = '192.168.1.1';

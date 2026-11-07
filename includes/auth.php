@@ -15,12 +15,18 @@ require_once __DIR__ . '/mailer.php';
 
 class Auth
 {
+    private static $cachedUser = null;
+    private static $sessionClosed = false;
+
     /**
      * Initialisiert die PHP-Session inklusive HTTP-Sicherheits-Headern (Clickjacking- & MIME-Sniffing-Schutz)
      * sowie HttpOnly-Cookie-Einstellungen zum Schutz vor Session-Diebstahl per XSS.
      */
     public static function startSession()
     {
+        if (self::$sessionClosed) {
+            return;
+        }
         if (!headers_sent()) {
             @header('X-Frame-Options: SAMEORIGIN');
             @header('X-Content-Type-Options: nosniff');
@@ -31,6 +37,18 @@ class Auth
         if (session_status() === PHP_SESSION_NONE) {
             @session_start();
         }
+    }
+
+    /**
+     * Gibt das exklusive PHP-Session-Dateilock frei, ohne dass nachfolgende Rollenprüfungen
+     * innerhalb desselben Requests die Session erneut öffnen und sperren.
+     */
+    public static function closeSession()
+    {
+        if (session_status() === PHP_SESSION_ACTIVE) {
+            @session_write_close();
+        }
+        self::$sessionClosed = true;
     }
 
     /**
@@ -113,6 +131,9 @@ class Auth
      */
     public static function getCurrentUser()
     {
+        if (self::$cachedUser !== null) {
+            return self::$cachedUser;
+        }
         self::startSession();
         if (empty($_SESSION['nm_user_id'])) {
             return null;
@@ -121,10 +142,12 @@ class Auth
         $stmt = $pdo->prepare("SELECT id, username, full_name, email, receive_alerts, two_fa_mode, totp_secret, role, is_active, last_login FROM users WHERE id = :id");
         $stmt->execute(array(':id' => (int)$_SESSION['nm_user_id']));
         $user = $stmt->fetch();
+        $stmt->closeCursor();
         if (!$user || (int)$user['is_active'] !== 1) {
             self::logout();
             return null;
         }
+        self::$cachedUser = $user;
         return $user;
     }
 
@@ -144,6 +167,7 @@ class Auth
         $cleanInput = trim($username);
         $stmt->execute(array(':u' => $cleanInput, ':e' => $cleanInput));
         $user = $stmt->fetch();
+        $stmt->closeCursor();
 
         if (!$user) {
             self::recordFailedAttempt();
@@ -216,6 +240,7 @@ class Auth
         $stmt = $pdo->prepare("SELECT * FROM users WHERE id = :id LIMIT 1");
         $stmt->execute(array(':id' => (int)$_SESSION['nm_2fa_pending_user_id']));
         $user = $stmt->fetch();
+        $stmt->closeCursor();
         if (!$user || (int)$user['is_active'] !== 1) {
             unset($_SESSION['nm_2fa_pending_user_id'], $_SESSION['nm_2fa_mode']);
             return null;
