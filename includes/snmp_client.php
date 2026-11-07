@@ -214,6 +214,16 @@ class SnmpClient
         $vlanCurWalk    = $this->walkOid('1.3.6.1.2.1.17.7.1.4.2.1.3', 64);
         $vlanStaticName = $this->walkOid('1.3.6.1.2.1.17.7.1.4.3.1.1', 64);
 
+        // Cisco Catalyst / IOS Core-Switch Erweiterung:
+        // CISCO-VTP-MIB (vtpVlanName 1.3.6.1.4.1.9.9.46.1.3.1.1.4.1),
+        // CISCO-VLAN-MEMBERSHIP-MIB (vmVlan 1.3.6.1.4.1.9.9.68.1.2.2.1.2),
+        // Trunk-Status (vlanTrunkPortDynamicStatus 1.3.6.1.4.1.9.9.46.1.6.1.1.14, 1=trunking) & Native-VLAN (.1.1.5)
+        $isCiscoDevice = (stripos((string)$sysDescr, 'cisco') !== false || strpos((string)$sysObjectId, '1.3.6.1.4.1.9.') !== false);
+        $ciscoVtpNames   = ($isCiscoDevice || empty($vlanStaticName)) ? $this->walkOid('1.3.6.1.4.1.9.9.46.1.3.1.1.4.1', 64) : array();
+        $ciscoVmVlan     = ($isCiscoDevice || empty($pvidWalk)) ? $this->walkOid('1.3.6.1.4.1.9.9.68.1.2.2.1.2', 108) : array();
+        $ciscoTrunkStat  = $isCiscoDevice ? $this->walkOid('1.3.6.1.4.1.9.9.46.1.6.1.1.14', 108) : array();
+        $ciscoNativeVlan = !empty($ciscoTrunkStat) ? $this->walkOid('1.3.6.1.4.1.9.9.46.1.6.1.1.5', 108) : array();
+
         $vlansById = array(1 => array('id' => 1, 'name' => 'Default'));
         foreach ($vlanCurWalk as $vOid => $vVal) {
             $vParts = explode('.', $vOid);
@@ -227,6 +237,18 @@ class SnmpClient
             $vid = (int)end($vParts);
             $cleanVName = $this->cleanSnmpValue($vName);
             if ($vid >= 1 && $vid <= 4094) {
+                $vlansById[$vid] = array(
+                    'id'   => $vid,
+                    'name' => ($cleanVName !== '' && $cleanVName !== (string)$vid) ? $cleanVName : ($vid === 1 ? 'Default' : ('VLAN ' . $vid)),
+                );
+            }
+        }
+        foreach ($ciscoVtpNames as $vOid => $vName) {
+            $vParts = explode('.', $vOid);
+            $vid = (int)end($vParts);
+            // Interne Cisco FDDI/TokenRing Default-VLANs 1002..1005 überspringen
+            if ($vid >= 1 && $vid <= 4094 && ($vid < 1002 || $vid > 1005)) {
+                $cleanVName = $this->cleanSnmpValue($vName);
                 $vlansById[$vid] = array(
                     'id'   => $vid,
                     'name' => ($cleanVName !== '' && $cleanVName !== (string)$vid) ? $cleanVName : ($vid === 1 ? 'Default' : ('VLAN ' . $vid)),
@@ -304,7 +326,28 @@ class SnmpClient
                 $outBytes = isset($ifOutOctets['1.3.6.1.2.1.2.2.1.16.' . $ifIndex]) ? (float)$this->cleanSnmpValue($ifOutOctets['1.3.6.1.2.1.2.2.1.16.' . $ifIndex]) : 0;
                 $inErr    = isset($ifInErrors['1.3.6.1.2.1.2.2.1.14.' . $ifIndex]) ? (int)$this->cleanSnmpValue($ifInErrors['1.3.6.1.2.1.2.2.1.14.' . $ifIndex]) : 0;
                 $adminVal = isset($ifAdminWalk['1.3.6.1.2.1.2.2.1.7.' . $ifIndex]) ? trim((string)$ifAdminWalk['1.3.6.1.2.1.2.2.1.7.' . $ifIndex]) : '1';
-                $pvidVal  = isset($pvidWalk['1.3.6.1.2.1.17.7.1.4.5.1.1.' . $ifIndex]) ? (int)$this->cleanSnmpValue($pvidWalk['1.3.6.1.2.1.17.7.1.4.5.1.1.' . $ifIndex]) : 1;
+                $pvidVal  = isset($pvidWalk['1.3.6.1.2.1.17.7.1.4.5.1.1.' . $ifIndex]) ? (int)$this->cleanSnmpValue($pvidWalk['1.3.6.1.2.1.17.7.1.4.5.1.1.' . $ifIndex]) : 0;
+                $portMode = 'access';
+
+                // Cisco Catalyst: Trunk-Status (1 = trunking) & vmVlan / Native VLAN auslesen
+                if (isset($ciscoTrunkStat['1.3.6.1.4.1.9.9.46.1.6.1.1.14.' . $ifIndex])) {
+                    $trVal = trim((string)$this->cleanSnmpValue($ciscoTrunkStat['1.3.6.1.4.1.9.9.46.1.6.1.1.14.' . $ifIndex]));
+                    if ($trVal === '1' || stripos($trVal, 'trunking') !== false) {
+                        $portMode = 'trunk';
+                    }
+                }
+                if ($portMode === 'trunk' && isset($ciscoNativeVlan['1.3.6.1.4.1.9.9.46.1.6.1.1.5.' . $ifIndex])) {
+                    $natVlan = (int)$this->cleanSnmpValue($ciscoNativeVlan['1.3.6.1.4.1.9.9.46.1.6.1.1.5.' . $ifIndex]);
+                    if ($natVlan >= 1 && $natVlan <= 4094) {
+                        $pvidVal = $natVlan;
+                    }
+                } elseif ($pvidVal <= 0 && isset($ciscoVmVlan['1.3.6.1.4.1.9.9.68.1.2.2.1.2.' . $ifIndex])) {
+                    $vmV = (int)$this->cleanSnmpValue($ciscoVmVlan['1.3.6.1.4.1.9.9.68.1.2.2.1.2.' . $ifIndex]);
+                    if ($vmV >= 1 && $vmV <= 4094) {
+                        $pvidVal = $vmV;
+                    }
+                }
+
                 if ($pvidVal < 1 || $pvidVal > 4094) {
                     $pvidVal = 1;
                 }
@@ -319,6 +362,7 @@ class SnmpClient
                     'status'       => ($statusVal === '1' || stripos((string)$statusVal, 'up') !== false) ? 'up' : 'down',
                     'admin_status' => ($adminVal === '1' || stripos((string)$adminVal, 'up') !== false) ? 'up' : 'down',
                     'vlan'         => $pvidVal,
+                    'port_mode'    => $portMode,
                     'speed'        => $speedStr,
                     'rx_mb'        => $inBytes > 0 ? round($inBytes / 1048576, 1) : 0,
                     'tx_mb'        => $outBytes > 0 ? round($outBytes / 1048576, 1) : 0,
@@ -374,6 +418,56 @@ class SnmpClient
             }
         }
 
+        // Cisco Catalyst IOS / IOS-XE: Per-VLAN MAC-Tabellen-Abfrage via Community-Indexing ("public@VLAN")
+        if ((stripos((string)$sysDescr, 'cisco ios') !== false || !empty($ciscoVtpNames)) && count($vlansById) > 1) {
+            $queriedExtraVlans = 0;
+            foreach ($vlansById as $vid => $vMeta) {
+                if ($vid <= 1 || $vid >= 1002) {
+                    continue;
+                }
+                if ($queriedExtraVlans >= 10) {
+                    break;
+                }
+                $queriedExtraVlans++;
+                $vlanClient = new self($this->ip, $this->community . '@' . $vid, 500);
+                $vBpWalk = $vlanClient->walkOid('1.3.6.1.2.1.17.1.4.1.2', 108);
+                $vBpMap = $bridgePortToIfIndex;
+                foreach ($vBpWalk as $void => $vval) {
+                    $vparts = explode('.', $void);
+                    $vBpMap[(int)end($vparts)] = (int)$this->cleanSnmpValue($vval);
+                }
+                $vFdbWalk = $vlanClient->walkOid('1.3.6.1.2.1.17.4.3.1.2', 200);
+                foreach ($vFdbWalk as $void => $vval) {
+                    $vparts = explode('.', $void);
+                    if (count($vparts) >= 6) {
+                        $mBytes = array_slice($vparts, -6);
+                        $hParts = array();
+                        $okM = true;
+                        foreach ($mBytes as $mb) {
+                            $n = (int)$mb;
+                            if ($n < 0 || $n > 255) {
+                                $okM = false;
+                                break;
+                            }
+                            $hParts[] = sprintf('%02X', $n);
+                        }
+                        if ($okM) {
+                            $mac = implode(':', $hParts);
+                            $bPort = (int)$this->cleanSnmpValue($vval);
+                            $ifIdx = isset($vBpMap[$bPort]) ? $vBpMap[$bPort] : $bPort;
+                            $pName = isset($interfaces[$ifIdx]['name']) ? $interfaces[$ifIdx]['name'] : ('Port ' . $bPort);
+                            $macTable[$mac] = array(
+                                'bridge_port' => $bPort,
+                                'if_index'    => $ifIdx,
+                                'port_name'   => $pName,
+                                'vlan'        => $vid,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         // LLDP Nachbarschaftstabelle: lldpRemSysName (1.0.8802.1.1.2.1.4.1.1.9) & lldpRemPortId (.7) / lldpRemPortDesc (.8)
         $lldpNeighbors = array();
         $lldpWalk = $this->walkOid('1.0.8802.1.1.2.1.4.1.1.9', 32);
@@ -406,6 +500,38 @@ class SnmpClient
                     'remote_name' => $remName,
                     'remote_port' => $remPort !== '' ? $remPort : 'Uplink',
                 );
+            }
+        }
+
+        // Cisco CDP Nachbarschaftstabelle (CISCO-CDP-MIB: cdpCacheDeviceId .1.6 & cdpCacheDevicePort .1.7)
+        if ($isCiscoDevice) {
+            $cdpDevWalk = $this->walkOid('1.3.6.1.4.1.9.9.23.1.2.1.1.6', 32);
+            $cdpPortWalk = !empty($cdpDevWalk) ? $this->walkOid('1.3.6.1.4.1.9.9.23.1.2.1.1.7', 32) : array();
+            foreach ($cdpDevWalk as $oid => $val) {
+                $parts = explode('.', $oid);
+                $ifIdx = isset($parts[count($parts) - 2]) ? (int)$parts[count($parts) - 2] : 0;
+                $remName = $this->cleanSnmpValue($val);
+                if ($remName !== '' && $ifIdx > 0) {
+                    $suffix = substr($oid, strlen('1.3.6.1.4.1.9.9.23.1.2.1.1.6.'));
+                    $remPort = isset($cdpPortWalk['1.3.6.1.4.1.9.9.23.1.2.1.1.7.' . $suffix])
+                        ? $this->cleanSnmpValue($cdpPortWalk['1.3.6.1.4.1.9.9.23.1.2.1.1.7.' . $suffix])
+                        : 'CDP-Trunk';
+                    $portName = isset($interfaces[$ifIdx]['name']) ? $interfaces[$ifIdx]['name'] : ('Port ' . $ifIdx);
+                    $alreadyInLldp = false;
+                    foreach ($lldpNeighbors as $ln) {
+                        if ($ln['local_port'] === $portName && strcasecmp($ln['remote_name'], $remName) === 0) {
+                            $alreadyInLldp = true;
+                            break;
+                        }
+                    }
+                    if (!$alreadyInLldp) {
+                        $lldpNeighbors[] = array(
+                            'local_port'  => $portName,
+                            'remote_name' => $remName,
+                            'remote_port' => $remPort !== '' ? $remPort : 'CDP-Uplink',
+                        );
+                    }
+                }
             }
         }
 
@@ -939,6 +1065,13 @@ class SnmpClient
     public static function buildVendorCliCommands($profile, array $params)
     {
         $portName = isset($params['port_name']) ? trim((string)$params['port_name']) : '';
+        $portMode = (isset($params['port_mode']) && strtolower(trim((string)$params['port_mode'])) === 'trunk') ? 'trunk' : 'access';
+        $trunkAllowedRaw = isset($params['trunk_allowed_vlans']) ? trim((string)$params['trunk_allowed_vlans']) : 'all';
+        $trunkAllowed = preg_replace('/[^0-9,\-a-zA-Z]/', '', $trunkAllowedRaw);
+        if ($trunkAllowed === '') {
+            $trunkAllowed = 'all';
+        }
+
         $createVlanId = isset($params['create_vlan_id']) ? (int)$params['create_vlan_id'] : 0;
         $createVlanName = isset($params['create_vlan_name']) ? trim((string)$params['create_vlan_name']) : '';
         $vlanId = isset($params['vlan_id']) ? (int)$params['vlan_id'] : 0;
@@ -972,6 +1105,16 @@ class SnmpClient
                     $commands[] = 'untagged ' . $portName;
                     $commands[] = 'exit';
                 }
+                if ($portMode === 'trunk' && strtolower($trunkAllowed) !== 'all') {
+                    foreach (explode(',', $trunkAllowed) as $tv) {
+                        $tvInt = (int)$tv;
+                        if ($tvInt >= 1 && $tvInt <= 4094 && $tvInt !== $vlanId) {
+                            $commands[] = 'vlan ' . $tvInt;
+                            $commands[] = 'tagged ' . $portName;
+                            $commands[] = 'exit';
+                        }
+                    }
+                }
                 $commands[] = 'interface ' . $portName;
                 if ($hasAlias) {
                     if ($cleanAlias === '') {
@@ -1004,7 +1147,14 @@ class SnmpClient
                     $commands[] = 'exit';
                 }
                 $commands[] = 'interface ' . $portName;
-                if ($vlanId >= 1 && $vlanId <= 4094) {
+                if ($portMode === 'trunk') {
+                    if (strtolower($trunkAllowed) !== 'all') {
+                        $commands[] = 'switchport general allowed vlan ' . $trunkAllowed . ' tagged';
+                    }
+                    if ($vlanId >= 1 && $vlanId <= 4094) {
+                        $commands[] = 'switchport pvid ' . $vlanId;
+                    }
+                } elseif ($vlanId >= 1 && $vlanId <= 4094) {
                     $commands[] = 'switchport general allowed vlan ' . $vlanId . ' untagged';
                     $commands[] = 'switchport pvid ' . $vlanId;
                 }
@@ -1035,7 +1185,15 @@ class SnmpClient
                 }
                 $commands[] = 'configure';
                 $commands[] = 'interface ' . $portName;
-                if ($vlanId >= 1 && $vlanId <= 4094) {
+                if ($portMode === 'trunk') {
+                    $commands[] = 'switchport mode trunk';
+                    if ($vlanId >= 1 && $vlanId <= 4094) {
+                        $commands[] = 'switchport trunk native vlan ' . $vlanId;
+                    }
+                    if (strtolower($trunkAllowed) !== 'all') {
+                        $commands[] = 'switchport trunk allowed vlan ' . $trunkAllowed;
+                    }
+                } elseif ($vlanId >= 1 && $vlanId <= 4094) {
                     $commands[] = 'vlan pvid ' . $vlanId;
                     $commands[] = 'vlan participation include ' . $vlanId;
                 }
@@ -1080,7 +1238,7 @@ class SnmpClient
                         $commands[] = 'name ' . $cleanVlanName;
                     }
                     $commands[] = 'normal ' . $portName;
-                    $commands[] = 'untagged ' . $portName;
+                    $commands[] = ($portMode === 'trunk') ? ('fixed ' . $portName) : ('untagged ' . $portName);
                     $commands[] = 'exit';
                 }
                 $commands[] = 'interface port-channel ' . $portName;
@@ -1103,7 +1261,7 @@ class SnmpClient
                 break;
 
             case 'cisco_ios':
-                // Klassisches Cisco IOS / Catalyst / Arista / Dell / FS.com
+                // Klassisches Cisco IOS / IOS-XE / Catalyst Core-Switch / Arista / Dell / FS.com
                 $pagingCmd = 'terminal length 0';
                 $commands[] = 'configure terminal';
                 if ($createVlanId >= 2 && $createVlanId <= 4094) {
@@ -1114,7 +1272,15 @@ class SnmpClient
                     $commands[] = 'exit';
                 }
                 $commands[] = 'interface ' . $portName;
-                if ($vlanId >= 1 && $vlanId <= 4094) {
+                $commands[] = 'switchport'; // Falls Port am L3-Core-Switch zuvor als "no switchport" (Routed Port) konfiguriert war
+                if ($portMode === 'trunk') {
+                    $commands[] = 'switchport trunk encapsulation dot1q';
+                    $commands[] = 'switchport mode trunk';
+                    if ($vlanId >= 1 && $vlanId <= 4094) {
+                        $commands[] = 'switchport trunk native vlan ' . $vlanId;
+                    }
+                    $commands[] = 'switchport trunk allowed vlan ' . (strtolower($trunkAllowed) === 'all' ? 'all' : $trunkAllowed);
+                } elseif ($vlanId >= 1 && $vlanId <= 4094) {
                     $commands[] = 'switchport mode access';
                     $commands[] = 'switchport access vlan ' . $vlanId;
                 }
@@ -1148,7 +1314,17 @@ class SnmpClient
                     }
                 }
                 $commands[] = 'interface ' . $portName;
-                if ($vlanId >= 1 && $vlanId <= 4094) {
+                if ($portMode === 'trunk') {
+                    $commands[] = 'switchport mode trunk';
+                    if ($vlanId >= 1 && $vlanId <= 4094) {
+                        $commands[] = 'switchport trunk native vlan ' . $vlanId;
+                    }
+                    if (strtolower($trunkAllowed) === 'all') {
+                        $commands[] = 'switchport trunk allowed vlan add all';
+                    } else {
+                        $commands[] = 'switchport trunk allowed vlan add ' . $trunkAllowed;
+                    }
+                } elseif ($vlanId >= 1 && $vlanId <= 4094) {
                     $commands[] = 'switchport mode access';
                     $commands[] = 'switchport access vlan ' . $vlanId;
                 }
@@ -1289,12 +1465,15 @@ class SnmpClient
             $commands = $built['commands'];
         }
 
+        $enablePass = isset($params['enable_pass']) && (string)$params['enable_pass'] !== '' ? (string)$params['enable_pass'] : $pass;
+
         $payload = base64_encode(json_encode(array(
-            'ip'         => $ip,
-            'user'       => $user,
-            'pass'       => $pass,
-            'paging_cmd' => $pagingCmd,
-            'commands'   => $commands
+            'ip'          => $ip,
+            'user'        => $user,
+            'pass'        => $pass,
+            'enable_pass' => $enablePass,
+            'paging_cmd'  => $pagingCmd,
+            'commands'    => $commands
         )));
 
         $pyScript = <<<'PY'
@@ -1304,6 +1483,7 @@ data = json.loads(base64.b64decode(sys.argv[1]).decode('utf-8'))
 ip = data['ip']
 user = data['user']
 pw = data['pass']
+enable_pw = data.get('enable_pass', pw)
 paging_cmd = data.get('paging_cmd', '')
 commands = data['commands']
 
@@ -1365,7 +1545,7 @@ if matched == b'>' and b'] >' not in buf:
     buf = b''
     m2 = read_until([b'#', b'Password:', b'password:'], 5.0)
     if m2 in [b'Password:', b'password:']:
-        os.write(fd, (pw + '\r').encode('utf-8'))
+        os.write(fd, (enable_pw + '\r').encode('utf-8'))
         buf = b''
         read_until([b'#'], 5.0)
 

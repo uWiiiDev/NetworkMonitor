@@ -42,7 +42,9 @@ try {
                 if (preg_match('/^profile:[a-z0-9_]+\|(.*)$/i', $rawWrite, $wm)) {
                     $rawWrite = $wm[1];
                 }
-                $dRow['has_ssh_pass'] = !empty($dRow['switch_ssh_pass']) ? 1 : 0;
+                $rawSshPass = isset($dRow['switch_ssh_pass']) ? (string)$dRow['switch_ssh_pass'] : '';
+                $dRow['has_ssh_pass'] = ($rawSshPass !== '') ? 1 : 0;
+                $dRow['has_enable_pass'] = (strpos($rawSshPass, "\n__EN__:") !== false) ? 1 : 0;
                 $dRow['has_snmp_write'] = ($rawWrite !== '') ? 1 : 0;
                 unset($dRow['switch_ssh_pass']);
                 unset($dRow['switch_snmp_write_community']);
@@ -291,12 +293,30 @@ try {
 
             $sshUser = isset($input['switch_ssh_user']) ? trim($input['switch_ssh_user']) : '';
             $sshPass = isset($input['switch_ssh_pass']) ? (string)$input['switch_ssh_pass'] : '';
+            $enablePassInput = isset($input['switch_enable_pass']) ? (string)$input['switch_enable_pass'] : '';
             $snmpComm = isset($input['switch_snmp_community']) ? trim($input['switch_snmp_community']) : '';
             $snmpWrite = isset($input['switch_snmp_write_community']) ? trim($input['switch_snmp_write_community']) : '';
             $cliProfOverride = isset($input['cli_profile']) ? strtolower(trim($input['cli_profile'])) : 'auto';
 
-            // Bestehendes Passwort / Write-Community beibehalten, falls leer gelassen
-            $finalSshPass = ($sshPass !== '') ? $sshPass : (isset($dev['switch_ssh_pass']) ? $dev['switch_ssh_pass'] : null);
+            // Bestehendes SSH-Passwort & optionales Enable-Secret auspacken
+            $prevCombinedPass = isset($dev['switch_ssh_pass']) ? (string)$dev['switch_ssh_pass'] : '';
+            $prevSshPass = $prevCombinedPass;
+            $prevEnablePass = '';
+            if (strpos($prevCombinedPass, "\n__EN__:") !== false) {
+                $partsP = explode("\n__EN__:", $prevCombinedPass, 2);
+                $prevSshPass = $partsP[0];
+                $prevEnablePass = $partsP[1];
+            }
+
+            $cleanSshPass = ($sshPass !== '') ? $sshPass : $prevSshPass;
+            $cleanEnablePass = ($enablePassInput !== '') ? $enablePassInput : $prevEnablePass;
+            $finalSshPass = $cleanSshPass;
+            if ($cleanSshPass !== '' && $cleanEnablePass !== '') {
+                $finalSshPass = $cleanSshPass . "\n__EN__:" . $cleanEnablePass;
+            } elseif ($cleanSshPass === '') {
+                $finalSshPass = null;
+            }
+
             $prevRawWrite = isset($dev['switch_snmp_write_community']) ? (string)$dev['switch_snmp_write_community'] : '';
             if (preg_match('/^profile:[a-z0-9_]+\|(.*)$/i', $prevRawWrite, $pwm)) {
                 $prevRawWrite = $pwm[1];
@@ -328,11 +348,12 @@ try {
             $profInfo = SnmpClient::detectSwitchCliProfile($dev);
 
             $sshTestResult = null;
-            if (!empty($input['test_connection']) && $profInfo['profile'] !== 'snmp_set' && $sshUser !== '' && !empty($finalSshPass)) {
+            if (!empty($input['test_connection']) && $profInfo['profile'] !== 'snmp_set' && $sshUser !== '' && $cleanSshPass !== '') {
                 @set_time_limit(45);
-                $sshTestResult = SnmpClient::configureSwitchViaSsh($dev['ip_address'], $sshUser, $finalSshPass, array(
+                $sshTestResult = SnmpClient::configureSwitchViaSsh($dev['ip_address'], $sshUser, $cleanSshPass, array(
                     'action_type' => 'test',
-                    'cli_profile' => $profInfo['profile']
+                    'cli_profile' => $profInfo['profile'],
+                    'enable_pass' => $cleanEnablePass !== '' ? $cleanEnablePass : $cleanSshPass,
                 ));
             }
 
@@ -347,7 +368,8 @@ try {
 
             echo json_encode(array(
                 'ok'                    => true,
-                'has_ssh_pass'          => !empty($finalSshPass) ? 1 : 0,
+                'has_ssh_pass'          => ($cleanSshPass !== '') ? 1 : 0,
+                'has_enable_pass'       => ($cleanEnablePass !== '') ? 1 : 0,
                 'has_snmp_write'        => ($cleanWriteComm !== '') ? 1 : 0,
                 'cli_profile'           => $profInfo['profile'],
                 'cli_profile_label'     => $profInfo['label'],
@@ -381,8 +403,18 @@ try {
                 $rawWriteComm = $rwm[1];
             }
 
+            $storedCombinedPass = isset($dev['switch_ssh_pass']) ? (string)$dev['switch_ssh_pass'] : '';
+            $storedSshPass = $storedCombinedPass;
+            $storedEnablePass = '';
+            if (strpos($storedCombinedPass, "\n__EN__:") !== false) {
+                $partsP = explode("\n__EN__:", $storedCombinedPass, 2);
+                $storedSshPass = $partsP[0];
+                $storedEnablePass = $partsP[1];
+            }
+
             $sshUser = !empty($input['switch_ssh_user']) ? trim($input['switch_ssh_user']) : (!empty($dev['switch_ssh_user']) ? $dev['switch_ssh_user'] : '');
-            $sshPass = !empty($input['switch_ssh_pass']) ? (string)$input['switch_ssh_pass'] : (!empty($dev['switch_ssh_pass']) ? $dev['switch_ssh_pass'] : '');
+            $sshPass = !empty($input['switch_ssh_pass']) ? (string)$input['switch_ssh_pass'] : $storedSshPass;
+            $enablePass = !empty($input['switch_enable_pass']) ? (string)$input['switch_enable_pass'] : ($storedEnablePass !== '' ? $storedEnablePass : $sshPass);
 
             $portName = isset($input['port_name']) ? trim($input['port_name']) : '';
             if ($portName === '') {
@@ -390,14 +422,17 @@ try {
             }
 
             $params = array(
-                'action_type'      => 'configure_port',
-                'cli_profile'      => $activeProfile,
-                'port_name'        => $portName,
-                'vlan_id'          => isset($input['vlan_id']) ? (int)$input['vlan_id'] : 0,
-                'create_vlan_id'   => isset($input['create_vlan_id']) ? (int)$input['create_vlan_id'] : 0,
-                'create_vlan_name' => isset($input['create_vlan_name']) ? trim($input['create_vlan_name']) : '',
-                'admin_status'     => isset($input['admin_status']) ? trim($input['admin_status']) : '',
-                'save_config'      => isset($input['save_config']) ? (bool)$input['save_config'] : true,
+                'action_type'         => 'configure_port',
+                'cli_profile'         => $activeProfile,
+                'enable_pass'         => $enablePass,
+                'port_name'           => $portName,
+                'port_mode'           => isset($input['port_mode']) ? trim($input['port_mode']) : 'access',
+                'trunk_allowed_vlans' => isset($input['trunk_allowed_vlans']) ? trim($input['trunk_allowed_vlans']) : 'all',
+                'vlan_id'             => isset($input['vlan_id']) ? (int)$input['vlan_id'] : 0,
+                'create_vlan_id'      => isset($input['create_vlan_id']) ? (int)$input['create_vlan_id'] : 0,
+                'create_vlan_name'    => isset($input['create_vlan_name']) ? trim($input['create_vlan_name']) : '',
+                'admin_status'        => isset($input['admin_status']) ? trim($input['admin_status']) : '',
+                'save_config'         => isset($input['save_config']) ? (bool)$input['save_config'] : true,
             );
             if (array_key_exists('alias', $input)) {
                 $params['alias'] = trim((string)$input['alias']);

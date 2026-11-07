@@ -3141,6 +3141,7 @@ function buildRealSwitchGraphicModel(dev) {
                 status: (pi.status === 'up' || (mapped && mapped.list.length > 0)) ? 'up' : 'down',
                 admin_status: pi.admin_status || 'up',
                 vlan: pi.vlan ? parseInt(pi.vlan, 10) : 1,
+                port_mode: pi.port_mode || ((mapped && mapped.isUplink) ? 'trunk' : 'access'),
                 speed: pi.speed || ((mapped && mapped.list.length > 0) ? '1 Gbps' : 'Down'),
                 alias: pi.alias || (mapped && mapped.list.length > 0 ? mapped.list[0].name : ''),
                 rawAlias: pi.alias || '',
@@ -3266,6 +3267,7 @@ function buildRealSwitchGraphicModel(dev) {
         vlans: normalizeSwitchVlansMap(snmp.vlans),
         sshUser: dev.switch_ssh_user || '',
         hasSshPass: parseInt(dev.has_ssh_pass || 0, 10) === 1,
+        hasEnablePass: parseInt(dev.has_enable_pass || 0, 10) === 1,
         snmpCommunity: dev.switch_snmp_community || 'public',
         hasSnmpWrite: parseInt(dev.has_snmp_write || 0, 10) === 1,
         cliProfile: dev.cli_profile || 'cisco_smb',
@@ -3381,6 +3383,10 @@ function openSwitchGraphicModal(devId, isDemoPreview, keepSelectedPortName) {
                     '<div class="form-group" style="margin:0;">' +
                         '<label>SSH-Passwort ' + (model.hasSshPass ? '<span style="color:#34d399;">(gespeichert)</span>' : '') + '</label>' +
                         '<input type="password" id="sw-cred-ssh-pass" class="form-input" value="" placeholder="' + (model.hasSshPass ? '•••••••• (leer = behalten)' : 'SSH-Passwort eingeben') + '">' +
+                    '</div>' +
+                    '<div class="form-group" style="margin:0;">' +
+                        '<label>Enable-Secret (optional für Cisco IOS)</label>' +
+                        '<input type="password" id="sw-cred-enable-pass" class="form-input" value="" placeholder="' + (model.hasEnablePass ? '•••••••• (gespeichert)' : 'Leer = wie SSH-Passwort') + '">' +
                     '</div>' +
                     '<div class="form-group" style="margin:0;">' +
                         '<label>SNMPv2c Lese-Community</label>' +
@@ -3820,17 +3826,30 @@ function selectSwitchGraphicPort(portKey) {
               '</div>'
             : '';
 
+        var isTrunkMode = (p.port_mode === 'trunk' || p.isUplink);
+
         sshConfigHtml =
             '<div style="margin-top:14px;padding-top:12px;border-top:1px solid rgba(59,130,246,0.35);">' +
                 '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px;">' +
-                    '<div style="font-size:12.5px;font-weight:700;color:#60a5fa;text-transform:uppercase;letter-spacing:0.04em;">⚙️ Live Port- &amp; VLAN-Konfiguration per SSH (Port ' + escapeHtml(p.name) + ')</div>' +
-                    '<span style="font-size:11.5px;color:var(--text-secondary);">Änderungen werden direkt per SSH auf <b>' + escapeHtml(model.switchIp || '') + '</b> ausgeführt</span>' +
+                    '<div style="font-size:12.5px;font-weight:700;color:#60a5fa;text-transform:uppercase;letter-spacing:0.04em;">⚙️ Live Port- &amp; VLAN-Konfiguration per SSH / SNMP (Port ' + escapeHtml(p.name) + ')</div>' +
+                    '<span style="font-size:11.5px;color:var(--text-secondary);">Profil: <b style="color:#e9d5ff;">' + escapeHtml(model.cliProfileLabel || 'Cisco CLI') + '</b> auf <b>' + escapeHtml(model.switchIp || '') + '</b></span>' +
                 '</div>' +
                 uplinkWarnHtml +
-                '<div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));gap:10px;align-items:end;">' +
+                '<div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(195px, 1fr));gap:10px;align-items:end;">' +
                     '<div class="form-group" style="margin:0;">' +
-                        '<label>Access-VLAN (PVID) auf Port ' + escapeHtml(p.name) + '</label>' +
+                        '<label>Switchport-Modus</label>' +
+                        '<select id="sw-port-mode-select" class="select-input" onchange="onSwitchPortModeChange()">' +
+                            '<option value="access" ' + (!isTrunkMode ? 'selected' : '') + '>🔌 Access-Port (1 Endgeräte-VLAN)</option>' +
+                            '<option value="trunk" ' + (isTrunkMode ? 'selected' : '') + '>🔗 802.1Q Trunk-Port (Uplink / AP / Core)</option>' +
+                        '</select>' +
+                    '</div>' +
+                    '<div class="form-group" style="margin:0;">' +
+                        '<label id="sw-port-vlan-label">' + (isTrunkMode ? 'Native VLAN (Ungetaggt auf Trunk)' : ('Access-VLAN (PVID) auf ' + escapeHtml(p.name))) + '</label>' +
                         '<select id="sw-port-vlan-select" class="select-input" onchange="onSwitchVlanSelectChange()">' + vlanOpts + '</select>' +
+                    '</div>' +
+                    '<div id="sw-trunk-allowed-wrap" class="form-group" style="margin:0;display:' + (isTrunkMode ? 'block' : 'none') + ';">' +
+                        '<label style="color:#93c5fd;">Erlaubte Trunk-VLANs (Tagged)</label>' +
+                        '<input type="text" id="sw-trunk-allowed-input" class="form-input" value="all" placeholder="all oder z.B. 1,10,20,99">' +
                     '</div>' +
                     '<div id="sw-new-vlan-id-wrap" class="form-group" style="margin:0;display:none;">' +
                         '<label style="color:#fcd34d;">Neue VLAN-ID (2–4094)</label>' +
@@ -3855,9 +3874,9 @@ function selectSwitchGraphicPort(portKey) {
                 '<div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px;flex-wrap:wrap;gap:10px;">' +
                     '<label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#cbd5e1;cursor:pointer;">' +
                         '<input type="checkbox" id="sw-port-save-flash" checked> ' +
-                        '<span>Dauerhaft im Switch-Flash sichern (<code>copy running-config startup-config</code>)</span>' +
+                        '<span>Dauerhaft im Switch-Flash sichern (<code>write memory</code> / <code>copy run start</code>)</span>' +
                     '</label>' +
-                    '<button id="btn-apply-sw-port" class="btn btn-primary" onclick="applySwitchPortConfig(\'' + p.key + '\')">⚡ Jetzt per SSH auf Switch anwenden</button>' +
+                    '<button id="btn-apply-sw-port" class="btn btn-primary" onclick="applySwitchPortConfig(\'' + p.key + '\')">⚡ Jetzt auf Switch anwenden</button>' +
                 '</div>' +
                 '<div id="sw-port-config-status" style="margin-top:10px;font-size:12px;display:none;"></div>' +
             '</div>';
@@ -3888,6 +3907,16 @@ function toggleSwitchCredsForm() {
     box.style.display = (box.style.display === 'none') ? 'block' : 'none';
 }
 
+function onSwitchPortModeChange() {
+    var modeSel = document.getElementById('sw-port-mode-select');
+    var trWrap = document.getElementById('sw-trunk-allowed-wrap');
+    var vlanLbl = document.getElementById('sw-port-vlan-label');
+    if (!modeSel) return;
+    var isTrunk = (modeSel.value === 'trunk');
+    if (trWrap) trWrap.style.display = isTrunk ? 'block' : 'none';
+    if (vlanLbl) vlanLbl.textContent = isTrunk ? 'Native VLAN (Ungetaggt auf Trunk)' : 'Access-VLAN (PVID)';
+}
+
 function onSwitchVlanSelectChange() {
     var sel = document.getElementById('sw-port-vlan-select');
     var idWrap = document.getElementById('sw-new-vlan-id-wrap');
@@ -3902,6 +3931,7 @@ function saveSwitchCredentials(devId, testConn) {
     var profEl = document.getElementById('sw-cred-cli-profile');
     var userEl = document.getElementById('sw-cred-ssh-user');
     var passEl = document.getElementById('sw-cred-ssh-pass');
+    var enPassEl = document.getElementById('sw-cred-enable-pass');
     var commEl = document.getElementById('sw-cred-snmp-comm');
     var writeEl = document.getElementById('sw-cred-snmp-write');
     var msgEl = document.getElementById('sw-creds-status-msg');
@@ -3912,6 +3942,7 @@ function saveSwitchCredentials(devId, testConn) {
         cli_profile: profEl ? profEl.value : 'auto',
         switch_ssh_user: userEl ? userEl.value : '',
         switch_ssh_pass: passEl ? passEl.value : '',
+        switch_enable_pass: enPassEl ? enPassEl.value : '',
         switch_snmp_community: commEl ? commEl.value : 'public',
         switch_snmp_write_community: writeEl ? writeEl.value : '',
         test_connection: testConn ? 1 : 0
@@ -3948,6 +3979,7 @@ function saveSwitchCredentials(devId, testConn) {
                 AppState.devices[i].switch_ssh_user = payload.switch_ssh_user;
                 AppState.devices[i].switch_snmp_community = payload.switch_snmp_community;
                 AppState.devices[i].has_ssh_pass = res.has_ssh_pass ? 1 : 0;
+                AppState.devices[i].has_enable_pass = res.has_enable_pass ? 1 : 0;
                 AppState.devices[i].has_snmp_write = res.has_snmp_write ? 1 : 0;
                 if (res.cli_profile) {
                     AppState.devices[i].cli_profile = res.cli_profile;
@@ -3990,6 +4022,8 @@ function applySwitchPortConfig(portKey) {
     var p = SwitchGraphicState.portsByKey[portKey];
     if (!p || !SwitchGraphicState.currentDevId) return;
 
+    var modeSel = document.getElementById('sw-port-mode-select');
+    var trAllowedEl = document.getElementById('sw-trunk-allowed-input');
     var vlanSel = document.getElementById('sw-port-vlan-select');
     var newVlanIdEl = document.getElementById('sw-new-vlan-id');
     var newVlanNameEl = document.getElementById('sw-new-vlan-name');
@@ -3999,6 +4033,8 @@ function applySwitchPortConfig(portKey) {
     var statusBox = document.getElementById('sw-port-config-status');
     var btn = document.getElementById('btn-apply-sw-port');
 
+    var portModeVal = modeSel ? modeSel.value : 'access';
+    var trunkAllowedVal = trAllowedEl ? (trAllowedEl.value.trim() || 'all') : 'all';
     var selectedVlanVal = vlanSel ? vlanSel.value : String(p.vlan || 1);
     var createVlanId = 0;
     var createVlanName = '';
@@ -4017,10 +4053,10 @@ function applySwitchPortConfig(portKey) {
     var targetAdm = admEl ? admEl.value : 'up';
 
     // Sicherheitsabfrage bei Änderungen am Uplink-Port
-    if (p.isUplink && (targetVlanId !== (p.vlan || 1) || targetAdm === 'down')) {
+    if (p.isUplink && (targetVlanId !== (p.vlan || 1) || targetAdm === 'down' || portModeVal === 'access')) {
         var okUplink = confirm(
             'WARNUNG: Port ' + p.name + ' ist der Uplink-Port dieses Switches!\n\n' +
-            'Wenn du das VLAN auf diesem Port änderst oder den Port abschaltest, ist der Switch möglicherweise über das Netzwerk nicht mehr erreichbar.\n\n' +
+            'Wenn du das VLAN/Modus auf diesem Port änderst oder den Port abschaltest, ist der Switch möglicherweise über das Netzwerk nicht mehr erreichbar.\n\n' +
             'Möchtest du die Änderung trotzdem auf Port ' + p.name + ' anwenden?'
         );
         if (!okUplink) return;
@@ -4029,6 +4065,8 @@ function applySwitchPortConfig(portKey) {
     var payload = {
         device_id: SwitchGraphicState.currentDevId,
         port_name: p.name,
+        port_mode: portModeVal,
+        trunk_allowed_vlans: trunkAllowedVal,
         vlan_id: targetVlanId,
         create_vlan_id: createVlanId,
         create_vlan_name: createVlanName,
