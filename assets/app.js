@@ -2718,7 +2718,7 @@ function selectDevice(deviceId) {
     }
 
     var snmpHtml = '';
-    if (parseInt(dev.snmp_enabled, 10) === 1) {
+    if (parseInt(dev.snmp_enabled, 10) === 1 || dev.snmp_ports_json) {
         var snmpDetails = {};
         if (dev.snmp_ports_json) {
             try { snmpDetails = JSON.parse(dev.snmp_ports_json); } catch (e) {}
@@ -2759,9 +2759,12 @@ function selectDevice(deviceId) {
         }
 
         snmpHtml = '<div style="background:rgba(16,185,129,0.06);border:1px solid rgba(16,185,129,0.25);border-radius:8px;padding:10px;display:flex;flex-direction:column;gap:8px;">' +
-            '<div style="display:flex;justify-content:space-between;align-items:center;">' +
+            '<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap;">' +
                 '<span class="badge badge-snmp">SNMP v2c Daten verfügbar</span>' +
-                '<button class="btn btn-sm btn-primary" onclick="openSnmpModal(' + dev.id + ')">🔍 Alle SNMP-Daten öffnen</button>' +
+                '<div style="display:flex;gap:4px;">' +
+                    (userCanEdit() ? '<button class="btn btn-sm" onclick="probeSingleDeviceSnmp(' + dev.id + ')" title="SNMP-Daten &amp; Drucker-Füllstände jetzt live abfragen">🔄 Aktualisieren</button>' : '') +
+                    '<button class="btn btn-sm btn-primary" onclick="openSnmpModal(' + dev.id + ')">🔍 Alle SNMP-Daten öffnen</button>' +
+                '</div>' +
             '</div>' +
             '<div class="kv-grid" style="margin-top:2px;">' +
                 '<div class="kv-label">sysName</div><div class="kv-val">' + renderCopyableValue(dev.snmp_sysname, 'SNMP sysName', '') + '</div>' +
@@ -2772,6 +2775,11 @@ function selectDevice(deviceId) {
                 '<div class="kv-label">Interfaces</div><div class="kv-val">' + ifCount + ' Ports / ' + macCount + ' gelernte MACs</div>' +
                 printerMiniHtml +
             '</div>' +
+        '</div>';
+    } else if (userCanEdit() && (dev.device_type === 'printer' || dev.device_type === 'switch' || dev.device_type === 'router' || dev.device_type === 'ap')) {
+        snmpHtml = '<div style="background:rgba(59,130,246,0.06);border:1px solid rgba(59,130,246,0.25);border-radius:8px;padding:10px;display:flex;justify-content:space-between;align-items:center;gap:8px;">' +
+            '<span style="font-size:11.5px;color:var(--text-secondary);">SNMP v2c Status / Drucker-Füllstände einzeln prüfen:</span>' +
+            '<button class="btn btn-sm btn-primary" onclick="probeSingleDeviceSnmp(' + dev.id + ')">🔄 SNMP jetzt abfragen</button>' +
         '</div>';
     }
 
@@ -4293,6 +4301,38 @@ function normalizeSwitchVlansMap(rawVlans) {
         out['1'] = 'Default';
     }
     return out;
+}
+
+/**
+ * Fragt ein einzelnes Gerät (z.B. Netzwerkdrucker für Tintenfüllstände oder Switch) gezielt per SNMP v2c ab.
+ */
+function probeSingleDeviceSnmp(devId) {
+    if (!userCanEdit()) {
+        showToast('Keine Berechtigung.');
+        return;
+    }
+    showToast('🔄 Frage SNMP-Daten & Drucker-Füllstände live ab...');
+    fetch('api.php?action=probe_device_snmp&_t=' + Date.now(), {
+        method: 'POST',
+        cache: 'no-store',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: parseInt(devId, 10) })
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (res) {
+        if (res && res.ok) {
+            showToast('✅ SNMP-Daten erfolgreich aktualisiert!');
+            loadTopologyData(function () {
+                selectDevice(parseInt(devId, 10));
+            });
+        } else {
+            showToast('SNMP-Abfrage fehlgeschlagen: ' + ((res && res.error) ? res.error : 'Unbekannt'));
+        }
+    })
+    .catch(function (err) {
+        showToast('Netzwerkfehler bei SNMP-Abfrage: ' + (err && err.message ? err.message : String(err)));
+    });
 }
 
 /**

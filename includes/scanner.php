@@ -137,7 +137,7 @@ class NetworkScanner
             }
 
             // Vorherigen Gerätestand dieses Scopes für die Alarm- & Anomalie-Auswertung merken
-            $prevStmt = $this->pdo->prepare("SELECT id, ip_address, mac_address, vendor, hostname, custom_name, device_type, status, alert_mode, last_alert_state, switch_snmp_community, snmp_ports_json FROM devices WHERE scope_id = :sid");
+            $prevStmt = $this->pdo->prepare("SELECT id, ip_address, mac_address, vendor, hostname, custom_name, device_type, status, alert_mode, last_alert_state, snmp_enabled, switch_snmp_community, snmp_ports_json FROM devices WHERE scope_id = :sid");
             $prevStmt->execute(array(':sid' => $scope['id']));
             $prevRows = $prevStmt->fetchAll();
             $prevDevicesByIp = array();
@@ -296,13 +296,31 @@ class NetworkScanner
                 $customSnmpComm = (isset($prevDevicesByIp[$ip]) && !empty($prevDevicesByIp[$ip]['switch_snmp_community']))
                     ? trim($prevDevicesByIp[$ip]['switch_snmp_community'])
                     : '';
-                $wasSnmpBefore = isset($prevDevicesByIp[$ip]) && (!empty($prevDevicesByIp[$ip]['snmp_enabled']) || in_array($prevDevicesByIp[$ip]['device_type'], array('switch', 'printer'), true));
-                $hasPrinterPort = in_array(9100, $openPorts, true) || in_array(631, $openPorts, true) || in_array(515, $openPorts, true) || stripos((string)$vendor, 'printer') !== false;
+                $wasSnmpBefore = isset($prevDevicesByIp[$ip]) && (!empty($prevDevicesByIp[$ip]['snmp_enabled']) || !empty($prevDevicesByIp[$ip]['snmp_ports_json']) || in_array($prevDevicesByIp[$ip]['device_type'], array('switch', 'printer'), true));
+                $hasPrinterPort = isset($openPorts[9100]) || isset($openPorts[631]) || isset($openPorts[515])
+                    || in_array(9100, $openPorts, true) || in_array(631, $openPorts, true) || in_array(515, $openPorts, true)
+                    || stripos((string)$vendor, 'printer') !== false
+                    || stripos((string)$hostname, 'drucker') !== false
+                    || stripos((string)$hostname, 'printer') !== false;
                 if (isset($responsiveSnmpIps[$ip]) || $customSnmpComm !== '' || $wasSnmpBefore || $hasPrinterPort) {
                     $devComm = ($customSnmpComm !== '') ? $customSnmpComm : $community;
-                    $snmpClient = new SnmpClient($ip, $devComm, $this->config['snmp_timeout_ms']);
+                    $probeTimeoutMs = ($hasPrinterPort || (isset($prevDevicesByIp[$ip]) && $prevDevicesByIp[$ip]['device_type'] === 'printer'))
+                        ? max(1000, (int)$this->config['snmp_timeout_ms'])
+                        : (int)$this->config['snmp_timeout_ms'];
+                    $snmpClient = new SnmpClient($ip, $devComm, $probeTimeoutMs);
                     $snmpData = $snmpClient->probeDevice();
                     if ($snmpData !== null) {
+                        // Falls ein Drucker im Energiesparmodus kurzzeitig keine Supplies liefert, vorherige Tintenfüllstände bewahren
+                        if ((empty($snmpData['printer']) || empty($snmpData['printer']['supplies'])) && !empty($prevDevicesByIp[$ip]['snmp_ports_json'])) {
+                            $prevSnmpArr = @json_decode($prevDevicesByIp[$ip]['snmp_ports_json'], true);
+                            if (is_array($prevSnmpArr) && !empty($prevSnmpArr['printer'])) {
+                                if (empty($snmpData['printer'])) {
+                                    $snmpData['printer'] = $prevSnmpArr['printer'];
+                                } elseif (empty($snmpData['printer']['supplies']) && !empty($prevSnmpArr['printer']['supplies'])) {
+                                    $snmpData['printer']['supplies'] = $prevSnmpArr['printer']['supplies'];
+                                }
+                            }
+                        }
                         $snmpEnabled = 1;
                         $snmpSysName = $snmpData['sysName'];
                         $snmpSysDescr = $snmpData['sysDescr'];
@@ -1586,7 +1604,7 @@ class NetworkScanner
                     os_guess = :os_guess,
                     open_ports = :open_ports,
                     service_info = COALESCE(:service_info, service_info),
-                    snmp_enabled = :snmp_enabled,
+                    snmp_enabled = CASE WHEN :snmp_enabled = 1 THEN 1 ELSE snmp_enabled END,
                     snmp_sysname = COALESCE(:snmp_sysname, snmp_sysname),
                     snmp_sysdescr = COALESCE(:snmp_sysdescr, snmp_sysdescr),
                     snmp_sysobjectid = COALESCE(:snmp_sysobjectid, snmp_sysobjectid),

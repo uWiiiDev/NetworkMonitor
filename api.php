@@ -301,6 +301,63 @@ try {
             ));
             break;
 
+        // ---------------------------------------------------------------------
+        // ENDPOINT: probe_device_snmp
+        // Fragt ein einzelnes Gerät (z.B. Netzwerkdrucker für Tintenfüllstände oder Switch) gezielt per SNMP v2c ab.
+        // ---------------------------------------------------------------------
+        case 'probe_device_snmp':
+            Auth::requireRole(array('operator', 'netadmin', 'admin'));
+            $devId = isset($input['id']) ? (int)$input['id'] : 0;
+            if ($devId <= 0) {
+                throw new InvalidArgumentException('Ungültige Geräte-ID.');
+            }
+            $devStmt = $pdo->prepare("
+                SELECT d.*, s.snmp_community AS scope_snmp_community
+                FROM devices d
+                LEFT JOIN scopes s ON d.scope_id = s.id
+                WHERE d.id = :id
+            ");
+            $devStmt->execute(array(':id' => $devId));
+            $devRow = $devStmt->fetch();
+            $devStmt->closeCursor();
+            if (!$devRow) {
+                throw new InvalidArgumentException('Gerät nicht gefunden.');
+            }
+            $comm = !empty($devRow['switch_snmp_community'])
+                ? trim($devRow['switch_snmp_community'])
+                : (!empty($devRow['scope_snmp_community']) ? trim($devRow['scope_snmp_community']) : 'public');
+            require_once __DIR__ . '/includes/snmp_client.php';
+            $client = new SnmpClient($devRow['ip_address'], $comm, 1200);
+            $snmpData = $client->probeDevice();
+            if ($snmpData === null) {
+                throw new RuntimeException('SNMP-Abfrage auf ' . $devRow['ip_address'] . ' (Community "' . $comm . '") lieferte keine Antwort (Gerät evtl. im Energiesparmodus oder SNMP deaktiviert).');
+            }
+            $pdo->prepare("
+                UPDATE devices SET
+                    snmp_enabled = 1,
+                    snmp_sysname = COALESCE(:sname, snmp_sysname),
+                    snmp_sysdescr = COALESCE(:sdescr, snmp_sysdescr),
+                    snmp_sysobjectid = COALESCE(:soid, snmp_sysobjectid),
+                    snmp_location = COALESCE(:sloc, snmp_location),
+                    snmp_ports_json = :sjson,
+                    status = 'online',
+                    last_seen = :now
+                WHERE id = :id
+            ")->execute(array(
+                ':sname'  => $snmpData['sysName'],
+                ':sdescr' => $snmpData['sysDescr'],
+                ':soid'   => $snmpData['sysObjectID'],
+                ':sloc'   => $snmpData['sysLocation'],
+                ':sjson'  => json_encode($snmpData),
+                ':now'    => date('Y-m-d H:i:s'),
+                ':id'     => $devId,
+            ));
+            echo json_encode(array(
+                'ok'        => true,
+                'snmp_data' => $snmpData,
+            ));
+            break;
+
                 // ---------------------------------------------------------------------
         // ENDPOINT: save_scope
         // Erstellt einen neuen IP-Scope (Subnetz/VLAN) oder aktualisiert einen bestehenden Scope.
