@@ -132,12 +132,16 @@ class NetworkScanner
                 }
             }
 
-            // Vorherigen Gerätestand dieses Scopes für die Alarm-Auswertung merken
-            $prevStmt = $this->pdo->prepare("SELECT id, ip_address, hostname, custom_name, status, alert_mode, last_alert_state, switch_snmp_community FROM devices WHERE scope_id = :sid");
+            // Vorherigen Gerätestand dieses Scopes für die Alarm- & Anomalie-Auswertung merken
+            $prevStmt = $this->pdo->prepare("SELECT id, ip_address, mac_address, vendor, hostname, custom_name, device_type, status, alert_mode, last_alert_state, switch_snmp_community, snmp_ports_json FROM devices WHERE scope_id = :sid");
             $prevStmt->execute(array(':sid' => $scope['id']));
             $prevDevicesByIp = array();
+            $knownMacsBeforeScan = array();
             while ($pr = $prevStmt->fetch()) {
                 $prevDevicesByIp[$pr['ip_address']] = $pr;
+                if (!empty($pr['mac_address'])) {
+                    $knownMacsBeforeScan[strtoupper(trim($pr['mac_address']))] = true;
+                }
                 // Sicherheits-Nach-Ping für überwachte Geräte, falls ein einzelnes Ping-Paket verloren ging
                 $am = isset($pr['alert_mode']) ? $pr['alert_mode'] : 'none';
                 if (($am === 'offline' || $am === 'both') && !isset($liveHosts[$pr['ip_address']])) {
@@ -156,6 +160,19 @@ class NetworkScanner
                     }
                 }
             }
+
+            // Alle bisher global bekannten MAC-Adressen (aus devices & mac_port_history) vor diesem Scan laden
+            $hadBaseline = !empty($prevDevicesByIp);
+            try {
+                $allMacStmt = $this->pdo->query("SELECT mac_address FROM devices WHERE mac_address IS NOT NULL AND mac_address != ''");
+                while ($mr = $allMacStmt->fetch()) {
+                    $knownMacsBeforeScan[strtoupper(trim($mr['mac_address']))] = true;
+                }
+                $histMacStmt = $this->pdo->query("SELECT DISTINCT mac_address FROM mac_port_history");
+                while ($hmr = $histMacStmt->fetch()) {
+                    $knownMacsBeforeScan[strtoupper(trim($hmr['mac_address']))] = true;
+                }
+            } catch (Exception $e) {}
 
             // Alle bisherigen Geräte dieses Scopes zunächst als offline markieren (sofern nicht manuell)
             $this->pdo->prepare("UPDATE devices SET status = 'offline' WHERE scope_id = :sid")
@@ -316,8 +333,10 @@ class NetworkScanner
             // Topologie-Verbindungen (Layer 2 Switch-Ports + Layer 3 Gateway) neu berechnen
             $this->rebuildTopologyLinks($scope['id'], $gatewayIp);
 
-            // 8. Geräte-Alarme (Online / Offline Statuswechsel) auswerten & ggf. SMTP-E-Mail senden
+            // 8. Geräte-Alarme (Online / Offline Statuswechsel) & Automatische Netzwerk-Anomalie-Wächter auswerten
             $alertsCount = $this->processDeviceAlerts($scope, $prevDevicesByIp);
+            $anomalyCount = $this->processNetworkAnomalies($scope, $prevDevicesByIp, $knownMacsBeforeScan, $hadBaseline, $gatewayIp);
+            $alertsCount += $anomalyCount;
 
             $finishedAt = date('Y-m-d H:i:s');
             $durationSec = round(microtime(true) - $scanStartMicro, 2);
@@ -579,6 +598,369 @@ class NetworkScanner
         }
 
         return count($newAlerts);
+    }
+
+    /**
+     * Automatischer Anomalie- & Sicherheits-Wächter (Layer 2 / Layer 3 Watchdogs):
+     * 1. ARP-Spoofing / IP-Adresskonflikt (arp_conflict): Bekannte IP ändert plötzlich ihre MAC-Adresse
+     * 2. Neues unbekanntes Gerät im Netz (new_mac): Noch nie gesehene MAC-Adresse taucht im Scope / am Switch-Port auf
+     * 3. Mehrfach-MAC-Warnung pro Port / Rogue-Switch-Erkennung (rogue_switch): > X MACs an einem normalen Access-Port
+     * 4. Port-Fehler- & Loop/MAC-Flapping-Alarm (port_errors & mac_flapping): Hohe Paketfehler oder häufiger Port-Wechsel
+     */
+    private function processNetworkAnomalies($scope, array $prevDevicesByIp, array $knownMacsBeforeScan, $hadBaseline, $gatewayIp = null)
+    {
+        $enableArpSpoof = !isset($this->config['anomaly_arp_spoofing']) || (int)$this->config['anomaly_arp_spoofing'] === 1;
+        $enableNewMac = (!isset($this->config['anomaly_new_mac']) || (int)$this->config['anomaly_new_mac'] === 1) && $hadBaseline;
+        $maxMacsPerPort = isset($this->config['anomaly_rogue_switch_max_macs']) ? (int)$this->config['anomaly_rogue_switch_max_macs'] : 3;
+        $portErrThresh = isset($this->config['anomaly_port_error_threshold']) ? (int)$this->config['anomaly_port_error_threshold'] : 50;
+        $macFlapThresh = isset($this->config['anomaly_mac_flapping_threshold']) ? (int)$this->config['anomaly_mac_flapping_threshold'] : 3;
+
+        $stmt = $this->pdo->prepare("SELECT * FROM devices WHERE scope_id = :sid");
+        $stmt->execute(array(':sid' => (int)$scope['id']));
+        $currentDevices = $stmt->fetchAll();
+        if (empty($currentDevices)) {
+            return 0;
+        }
+
+        $now = date('Y-m-d H:i:s');
+        $newAlerts = array();
+        $devByMac = array();
+        $infraMacs = array();
+
+        foreach ($currentDevices as $cd) {
+            if (!empty($cd['mac_address'])) {
+                $mKey = strtoupper(trim($cd['mac_address']));
+                $devByMac[$mKey] = $cd;
+                if (in_array($cd['device_type'], array('router', 'switch', 'ap'), true) || ($gatewayIp && $cd['ip_address'] === $gatewayIp)) {
+                    $infraMacs[$mKey] = true;
+                }
+            }
+        }
+
+        // Aktuellen Switch-Port pro MAC aus mac_port_history nachschlagen (für präzise Ortsangabe in Alarmen)
+        $latestPortByMac = array();
+        try {
+            $histStmt = $this->pdo->query("SELECT mac_address, switch_name, switch_ip, port_name, vlan_id FROM mac_port_history ORDER BY id ASC");
+            while ($hr = $histStmt->fetch()) {
+                $latestPortByMac[strtoupper(trim($hr['mac_address']))] = $hr;
+            }
+        } catch (Exception $e) {}
+
+        foreach ($currentDevices as $dev) {
+            if ($dev['status'] !== 'online') {
+                continue;
+            }
+            $ip = $dev['ip_address'];
+            $devLabel = !empty($dev['custom_name']) ? $dev['custom_name'] : (!empty($dev['hostname']) ? $dev['hostname'] : $ip);
+            $curMac = !empty($dev['mac_address']) ? strtoupper(trim($dev['mac_address'])) : '';
+
+            // 1. ⚡ ARP-Spoofing / IP-Adresskonflikt-Erkennung
+            if ($enableArpSpoof && $curMac !== '' && isset($prevDevicesByIp[$ip])) {
+                $prevMac = !empty($prevDevicesByIp[$ip]['mac_address']) ? strtoupper(trim($prevDevicesByIp[$ip]['mac_address'])) : '';
+                if ($prevMac !== '' && $prevMac !== $curMac) {
+                    $prevVendor = !empty($prevDevicesByIp[$ip]['vendor']) ? $prevDevicesByIp[$ip]['vendor'] : 'Unbekannt';
+                    $curVendor = !empty($dev['vendor']) ? $dev['vendor'] : 'Unbekannt';
+                    $portHint = '';
+                    if (isset($latestPortByMac[$curMac])) {
+                        $lp = $latestPortByMac[$curMac];
+                        $portHint = sprintf(' [Aktuell an Switch "%s" Port %s]', $lp['switch_name'], $lp['port_name']);
+                    }
+                    $msg = sprintf(
+                        '⚡ ARP-SPOOFING / IP-KONFLIKT: Die IP-Adresse %s ("%s") hat ihre MAC-Adresse geändert von %s (%s) auf %s (%s)!%s Verdacht auf doppelt vergebene IP oder Man-in-the-Middle-Angriff.',
+                        $ip,
+                        $devLabel,
+                        $prevMac,
+                        $prevVendor,
+                        $curMac,
+                        $curVendor,
+                        $portHint
+                    );
+                    $this->insertAnomalyAlertIfNew($newAlerts, (int)$dev['id'], (int)$scope['id'], $ip, $devLabel, 'arp_conflict', 'critical', $msg, $prevMac . '->' . $curMac, $now);
+                }
+            }
+
+            // 2. 🚨 „Neues unbekanntes Gerät im Netz“-Alarm
+            if ($enableNewMac && $curMac !== '' && !isset($knownMacsBeforeScan[$curMac])) {
+                $curVendor = !empty($dev['vendor']) ? $dev['vendor'] : 'Unbekannter Hersteller';
+                $portHint = '';
+                if (isset($latestPortByMac[$curMac])) {
+                    $lp = $latestPortByMac[$curMac];
+                    $portHint = sprintf(' [Gesteckt an Switch "%s" (%s) Port %s, VLAN %d]', $lp['switch_name'], $lp['switch_ip'], $lp['port_name'], (int)$lp['vlan_id']);
+                }
+                $msg = sprintf(
+                    '🚨 NEUES GERÄT IM NETZ: Noch nie gesehene MAC-Adresse %s (%s) mit IP %s ("%s", Typ: %s) wurde erstmals im Scope "%s" entdeckt!%s',
+                    $curMac,
+                    $curVendor,
+                    $ip,
+                    $devLabel,
+                    strtoupper($dev['device_type']),
+                    $scope['name'],
+                    $portHint
+                );
+                $this->insertAnomalyAlertIfNew($newAlerts, (int)$dev['id'], (int)$scope['id'], $ip, $devLabel, 'new_mac', 'warning', $msg, $curMac, $now);
+                $knownMacsBeforeScan[$curMac] = true;
+            }
+        }
+
+        // 3. 🔌 Rogue-Switch / Mehrfach-MAC pro Port & 4a. 📉 Port-Fehler-Alarm auf Managed Switches
+        foreach ($currentDevices as $sw) {
+            if ($sw['device_type'] !== 'switch' && (int)$sw['snmp_enabled'] !== 1) {
+                continue;
+            }
+            if (empty($sw['snmp_ports_json'])) {
+                continue;
+            }
+            $snmp = @json_decode($sw['snmp_ports_json'], true);
+            if (!is_array($snmp)) {
+                continue;
+            }
+            $swLabel = !empty($sw['custom_name']) ? $sw['custom_name'] : (!empty($sw['snmp_sysname']) ? $sw['snmp_sysname'] : (!empty($sw['hostname']) ? $sw['hostname'] : $sw['ip_address']));
+            $swIp = $sw['ip_address'];
+
+            // Ermittle Uplink-/Trunk-/Inter-Switch-Ports dieses Switches, damit Trunks nicht als Rogue-Switch gemeldet werden
+            $uplinkPortNames = array();
+            if (!empty($snmp['lldp_neighbors']) && is_array($snmp['lldp_neighbors'])) {
+                foreach ($snmp['lldp_neighbors'] as $nbr) {
+                    if (!empty($nbr['local_port'])) {
+                        $uplinkPortNames[strtolower(trim($nbr['local_port']))] = true;
+                    }
+                }
+            }
+            if (!empty($snmp['interfaces']) && is_array($snmp['interfaces'])) {
+                foreach ($snmp['interfaces'] as $ifRow) {
+                    if (!empty($ifRow['name']) && isset($ifRow['port_mode']) && $ifRow['port_mode'] === 'trunk') {
+                        $uplinkPortNames[strtolower(trim($ifRow['name']))] = true;
+                    }
+                }
+            }
+            if (!empty($snmp['mac_table']) && is_array($snmp['mac_table'])) {
+                foreach ($snmp['mac_table'] as $mAddr => $pInfo) {
+                    $mUpper = strtoupper(trim($mAddr));
+                    if (isset($infraMacs[$mUpper]) && !empty($pInfo['port_name'])) {
+                        $uplinkPortNames[strtolower(trim($pInfo['port_name']))] = true;
+                    }
+                }
+            }
+
+            // 3. Prüfe Access-Ports auf Mehrfach-MACs (Rogue-Switch / unautorisierter Hub / Mini-AP)
+            if ($maxMacsPerPort > 0 && !empty($snmp['mac_table']) && is_array($snmp['mac_table'])) {
+                $macsByPort = array();
+                foreach ($snmp['mac_table'] as $mAddr => $pInfo) {
+                    $mUpper = strtoupper(trim($mAddr));
+                    if (!empty($sw['mac_address']) && $mUpper === strtoupper(trim($sw['mac_address']))) {
+                        continue;
+                    }
+                    $pName = !empty($pInfo['port_name']) ? trim($pInfo['port_name']) : ('Port ' . (isset($pInfo['bridge_port']) ? $pInfo['bridge_port'] : '?'));
+                    $pKeyLow = strtolower($pName);
+                    if (isset($uplinkPortNames[$pKeyLow])) {
+                        continue; // Uplink-/Trunk-Ports überspringen
+                    }
+                    if (!isset($macsByPort[$pName])) {
+                        $macsByPort[$pName] = array();
+                    }
+                    $macsByPort[$pName][] = $mUpper;
+
+                    // Prüfe auch reine Layer-2-MACs am Switch-Port auf unbekannte neue MAC
+                    if ($enableNewMac && !isset($knownMacsBeforeScan[$mUpper])) {
+                        $l2Vend = OuiLookup::lookupVendor($mUpper);
+                        $msgNewL2 = sprintf(
+                            '🚨 NEUES GERÄT AM SWITCH-PORT: Unbekannte MAC-Adresse %s (%s) wurde erstmals direkt an Switch "%s" (%s) auf Port %s erkannt!',
+                            $mUpper,
+                            $l2Vend ? $l2Vend : 'Unbekannter Hersteller',
+                            $swLabel,
+                            $swIp,
+                            $pName
+                        );
+                        $this->insertAnomalyAlertIfNew($newAlerts, (int)$sw['id'], (int)$scope['id'], $swIp, $swLabel, 'new_mac', 'warning', $msgNewL2, $mUpper, $now);
+                        $knownMacsBeforeScan[$mUpper] = true;
+                    }
+                }
+
+                foreach ($macsByPort as $pName => $macList) {
+                    $macCount = count($macList);
+                    if ($macCount > $maxMacsPerPort) {
+                        $sampleLabels = array();
+                        foreach (array_slice($macList, 0, 5) as $sm) {
+                            if (isset($devByMac[$sm])) {
+                                $dRow = $devByMac[$sm];
+                                $dTitle = !empty($dRow['custom_name']) ? $dRow['custom_name'] : (!empty($dRow['hostname']) ? $dRow['hostname'] : $dRow['ip_address']);
+                                $sampleLabels[] = $sm . ' (' . $dTitle . ')';
+                            } else {
+                                $sampleLabels[] = $sm;
+                            }
+                        }
+                        if ($macCount > 5) {
+                            $sampleLabels[] = '+' . ($macCount - 5) . ' weitere';
+                        }
+                        $msg = sprintf(
+                            '🔌 ROGUE-SWITCH / MEHRFACH-MAC WARNUNG: An Access-Port %s von Switch "%s" (%s) wurden %d verschiedene MAC-Adressen gleichzeitig erkannt (Schwellenwert: max. %d): %s. Verdacht auf unautorisierten Desktop-Switch, Hub oder privaten WLAN-AP!',
+                            $pName,
+                            $swLabel,
+                            $swIp,
+                            $macCount,
+                            $maxMacsPerPort,
+                            implode(', ', $sampleLabels)
+                        );
+                        $this->insertAnomalyAlertIfNew($newAlerts, (int)$sw['id'], (int)$scope['id'], $swIp, $swLabel, 'rogue_switch', 'warning', $msg, 'port:' . $pName, $now);
+                    }
+                }
+            }
+
+            // 4a. 📉 Switch-Port Paketfehler-Überwachung (ifInErrors)
+            if ($portErrThresh > 0 && !empty($snmp['interfaces']) && is_array($snmp['interfaces'])) {
+                $prevIfErrors = array();
+                if (isset($prevDevicesByIp[$swIp]) && !empty($prevDevicesByIp[$swIp]['snmp_ports_json'])) {
+                    $prevSnmp = @json_decode($prevDevicesByIp[$swIp]['snmp_ports_json'], true);
+                    if (!empty($prevSnmp['interfaces']) && is_array($prevSnmp['interfaces'])) {
+                        foreach ($prevSnmp['interfaces'] as $pIf) {
+                            if (!empty($pIf['name'])) {
+                                $prevIfErrors[$pIf['name']] = isset($pIf['in_errors']) ? (int)$pIf['in_errors'] : 0;
+                            }
+                        }
+                    }
+                }
+
+                foreach ($snmp['interfaces'] as $ifRow) {
+                    $ifName = isset($ifRow['name']) ? $ifRow['name'] : '';
+                    $curErr = isset($ifRow['in_errors']) ? (int)$ifRow['in_errors'] : 0;
+                    if ($ifName === '' || $curErr < $portErrThresh) {
+                        continue;
+                    }
+                    $prevErr = isset($prevIfErrors[$ifName]) ? $prevIfErrors[$ifName] : 0;
+                    $deltaErr = max(0, $curErr - $prevErr);
+                    if ($prevErr < $portErrThresh || $deltaErr >= $portErrThresh) {
+                        $msg = sprintf(
+                            '📉 PORT-FEHLER ALARM: Switch "%s" (%s) meldet auf Port %s erhöhte Paketfehler (%d Fehler gesamt%s). Verdacht auf defektes Patchkabel, Duplex-Mismatch oder EMV-Störung!',
+                            $swLabel,
+                            $swIp,
+                            $ifName,
+                            $curErr,
+                            $deltaErr > 0 ? (', +' . $deltaErr . ' seit letztem Scan') : ''
+                        );
+                        $this->insertAnomalyAlertIfNew($newAlerts, (int)$sw['id'], (int)$scope['id'], $swIp, $swLabel, 'port_errors', 'warning', $msg, 'errport:' . $ifName, $now);
+                    }
+                }
+            }
+        }
+
+        // 4b. 🌪️ MAC-Flapping / Loop-Erkennung (Häufiger Switch-Port-Wechsel derselben MAC innerhalb der letzten 60 Minuten)
+        if ($macFlapThresh >= 2) {
+            try {
+                $since60m = date('Y-m-d H:i:s', time() - 3600);
+                $flapStmt = $this->pdo->prepare("
+                    SELECT mac_address, COUNT(*) AS station_cnt
+                    FROM mac_port_history
+                    WHERE first_seen >= :since
+                    GROUP BY mac_address
+                    HAVING COUNT(*) >= :thresh
+                ");
+                $flapStmt->execute(array(
+                    ':since'  => $since60m,
+                    ':thresh' => $macFlapThresh,
+                ));
+                while ($fRow = $flapStmt->fetch()) {
+                    $fMac = strtoupper(trim($fRow['mac_address']));
+                    $stCount = (int)$fRow['station_cnt'];
+                    $detStmt = $this->pdo->prepare("
+                        SELECT switch_id, switch_name, switch_ip, port_name
+                        FROM mac_port_history
+                        WHERE mac_address = :mac AND first_seen >= :since
+                        ORDER BY id DESC LIMIT 5
+                    ");
+                    $detStmt->execute(array(':mac' => $fMac, ':since' => $since60m));
+                    $stations = $detStmt->fetchAll();
+                    $distinctPorts = array();
+                    $pathParts = array();
+                    $lastSwId = 0;
+                    $lastSwIp = '';
+                    $lastSwName = 'Switch';
+                    foreach (array_reverse($stations) as $st) {
+                        $pKey = $st['switch_id'] . ':' . $st['port_name'];
+                        $distinctPorts[$pKey] = true;
+                        $pathParts[] = ($st['switch_name'] ? $st['switch_name'] : 'Switch') . ' [' . $st['port_name'] . ']';
+                        $lastSwId = (int)$st['switch_id'];
+                        $lastSwIp = $st['switch_ip'] ? $st['switch_ip'] : '';
+                        $lastSwName = $st['switch_name'] ? $st['switch_name'] : 'Switch';
+                    }
+                    if (count($distinctPorts) >= 2) {
+                        $knDev = isset($devByMac[$fMac]) ? $devByMac[$fMac] : null;
+                        $alertDevId = $knDev ? (int)$knDev['id'] : $lastSwId;
+                        $alertIp = $knDev ? $knDev['ip_address'] : ($lastSwIp !== '' ? $lastSwIp : $scope['cidr']);
+                        $alertName = $knDev ? (!empty($knDev['custom_name']) ? $knDev['custom_name'] : (!empty($knDev['hostname']) ? $knDev['hostname'] : $knDev['ip_address'])) : $lastSwName;
+                        $msg = sprintf(
+                            '🌪️ MAC-FLAPPING / LOOP-ALARM: Die MAC-Adresse %s (%s) hat innerhalb der letzten 60 Minuten %d× den Switch-Port gewechselt (%s)! Verdacht auf Netzwerkschleife (Layer-2 Loop), falsch konfigurierten Repeater oder MAC-Spoofing.',
+                            $fMac,
+                            $alertName,
+                            $stCount,
+                            implode(' → ', $pathParts)
+                        );
+                        $this->insertAnomalyAlertIfNew($newAlerts, $alertDevId, (int)$scope['id'], $alertIp, $alertName, 'mac_flapping', 'critical', $msg, 'flap:' . $fMac, $now);
+                    }
+                }
+            } catch (Exception $e) {}
+        }
+
+        if (!empty($newAlerts)) {
+            $this->sendAlertEmailsIfConfigured($scope, $newAlerts);
+        }
+
+        return count($newAlerts);
+    }
+
+    /**
+     * Legt einen Anomalie-Alarm dedupliziert in device_alerts an (verhindert identische Mehrfach-Alarme bei jedem 15-Min-Cron-Lauf,
+     * solange der bestehende Alarm für denselben Vorfall noch unbestätigt ist).
+     */
+    private function insertAnomalyAlertIfNew(array &$newAlerts, $deviceId, $scopeId, $ip, $deviceName, $alertType, $severity, $message, $dedupToken, $now)
+    {
+        try {
+            $cutoff = date('Y-m-d H:i:s', time() - 43200); // 12h Deduplizierungsfenster für unbestätigte identische Anomalien
+            $chk = $this->pdo->prepare("
+                SELECT id, message FROM device_alerts
+                WHERE alert_type = :atype
+                  AND device_id = :did
+                  AND is_acknowledged = 0
+                  AND created_at >= :cutoff
+                ORDER BY id DESC LIMIT 10
+            ");
+            $chk->execute(array(
+                ':atype'  => $alertType,
+                ':did'    => (int)$deviceId,
+                ':cutoff' => $cutoff,
+            ));
+            while ($existing = $chk->fetch()) {
+                if ($dedupToken === '' || strpos((string)$existing['message'], $dedupToken) !== false) {
+                    // Aktualisiere Zeitstempel und Nachrichtentext des offenen Alarms ohne Spam-Duplikat
+                    $upd = $this->pdo->prepare("UPDATE device_alerts SET message = :msg, created_at = :now WHERE id = :id");
+                    $upd->execute(array(':msg' => $message, ':now' => $now, ':id' => (int)$existing['id']));
+                    return;
+                }
+            }
+
+            $ins = $this->pdo->prepare("
+                INSERT INTO device_alerts (device_id, scope_id, ip_address, device_name, alert_type, severity, message, email_sent, is_acknowledged, created_at)
+                VALUES (:did, :sid, :ip, :dname, :atype, :sev, :msg, 0, 0, :now)
+            ");
+            $ins->execute(array(
+                ':did'   => (int)$deviceId,
+                ':sid'   => (int)$scopeId,
+                ':ip'    => (string)$ip,
+                ':dname' => (string)$deviceName,
+                ':atype' => (string)$alertType,
+                ':sev'   => (string)$severity,
+                ':msg'   => (string)$message,
+                ':now'   => $now,
+            ));
+            $alertId = (int)$this->pdo->lastInsertId();
+            $newAlerts[] = array(
+                'id'          => $alertId,
+                'ip_address'  => (string)$ip,
+                'device_name' => (string)$deviceName,
+                'severity'    => (string)$severity,
+                'message'     => (string)$message,
+                'created_at'  => $now,
+            );
+        } catch (Exception $e) {}
     }
 
     private function sendAlertEmailsIfConfigured($scope, array $alerts)

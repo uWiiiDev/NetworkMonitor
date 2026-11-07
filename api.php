@@ -149,6 +149,14 @@ try {
             $cronLogPath = __DIR__ . '/data/cron_scan.log';
             $cronCmdLine = $cronScheduleExpr . ' /usr/bin/php ' . $cliScanReal . ' --all >> ' . $cronLogPath . ' 2>&1 # NetworkMonitor-AutoScan';
 
+            $anomalyConfig = array(
+                'anomaly_arp_spoofing'           => !isset($fullConfAll['scanner']['anomaly_arp_spoofing']) || (int)$fullConfAll['scanner']['anomaly_arp_spoofing'] === 1 ? 1 : 0,
+                'anomaly_new_mac'                => !isset($fullConfAll['scanner']['anomaly_new_mac']) || (int)$fullConfAll['scanner']['anomaly_new_mac'] === 1 ? 1 : 0,
+                'anomaly_rogue_switch_max_macs'  => isset($fullConfAll['scanner']['anomaly_rogue_switch_max_macs']) ? (int)$fullConfAll['scanner']['anomaly_rogue_switch_max_macs'] : 3,
+                'anomaly_port_error_threshold'   => isset($fullConfAll['scanner']['anomaly_port_error_threshold']) ? (int)$fullConfAll['scanner']['anomaly_port_error_threshold'] : 50,
+                'anomaly_mac_flapping_threshold' => isset($fullConfAll['scanner']['anomaly_mac_flapping_threshold']) ? (int)$fullConfAll['scanner']['anomaly_mac_flapping_threshold'] : 3,
+            );
+
             $adminData = null;
             if ($currentUser['role'] === 'admin') {
                 $fullConf = $fullConfAll;
@@ -165,15 +173,20 @@ try {
                         'conn_error'    => $db->getConnectionError(),
                     ),
                     'scanner_config' => array(
-                        'max_hosts_per_scan'     => $fullConf['scanner']['max_hosts_per_scan'],
-                        'ping_batch_size'        => $fullConf['scanner']['ping_batch_size'],
-                        'port_host_batch_size'   => $fullConf['scanner']['port_host_batch_size'],
-                        'snmp_batch_size'        => $fullConf['scanner']['snmp_batch_size'],
-                        'default_snmp_community' => $fullConf['scanner']['default_snmp_community'],
-                        'retention_days'         => isset($fullConf['scanner']['retention_days']) ? (int)$fullConf['scanner']['retention_days'] : 14,
-                        'stale_offline_days'     => isset($fullConf['scanner']['stale_offline_days']) ? (int)$fullConf['scanner']['stale_offline_days'] : 30,
-                        'cron_interval_minutes'  => $detectedCronMin,
-                        'cron_active'            => $cronActive ? 1 : 0,
+                        'max_hosts_per_scan'             => $fullConf['scanner']['max_hosts_per_scan'],
+                        'ping_batch_size'                => $fullConf['scanner']['ping_batch_size'],
+                        'port_host_batch_size'           => $fullConf['scanner']['port_host_batch_size'],
+                        'snmp_batch_size'                => $fullConf['scanner']['snmp_batch_size'],
+                        'default_snmp_community'         => $fullConf['scanner']['default_snmp_community'],
+                        'retention_days'                 => isset($fullConf['scanner']['retention_days']) ? (int)$fullConf['scanner']['retention_days'] : 14,
+                        'stale_offline_days'             => isset($fullConf['scanner']['stale_offline_days']) ? (int)$fullConf['scanner']['stale_offline_days'] : 30,
+                        'cron_interval_minutes'          => $detectedCronMin,
+                        'cron_active'                    => $cronActive ? 1 : 0,
+                        'anomaly_arp_spoofing'           => $anomalyConfig['anomaly_arp_spoofing'],
+                        'anomaly_new_mac'                => $anomalyConfig['anomaly_new_mac'],
+                        'anomaly_rogue_switch_max_macs'  => $anomalyConfig['anomaly_rogue_switch_max_macs'],
+                        'anomaly_port_error_threshold'   => $anomalyConfig['anomaly_port_error_threshold'],
+                        'anomaly_mac_flapping_threshold' => $anomalyConfig['anomaly_mac_flapping_threshold'],
                     ),
                     'smtp_config' => array(
                         'enabled'    => !empty($smtpConf['enabled']) ? 1 : 0,
@@ -201,15 +214,16 @@ try {
                 'mac_history'  => $macHistory,
                 'admin'        => $adminData,
                 'system'       => array(
-                    'php_version'   => PHP_VERSION,
-                    'db_driver'     => strtoupper($db->getActiveDriver()),
-                    'nmap_found'    => ($nmapPath !== ''),
-                    'nmap_path'     => $nmapPath !== '' ? $nmapPath : 'Nicht installiert (nutzt schnellen PHP Parallel-Ping & ARP)',
-                    'snmp_mode'     => $snmpExt ? 'PHP-SNMP Extension + Native UDP SNMPv2c' : 'Integrierter Pure-PHP UDP SNMPv2c Client (aktiv)',
-                    'server_time'   => date('Y-m-d H:i:s'),
-                    'cron_active'   => $cronActive ? 1 : 0,
-                    'cron_interval' => $detectedCronMin,
-                    'cron_cmd'      => $cronCmdLine,
+                    'php_version'    => PHP_VERSION,
+                    'db_driver'      => strtoupper($db->getActiveDriver()),
+                    'nmap_found'     => ($nmapPath !== ''),
+                    'nmap_path'      => $nmapPath !== '' ? $nmapPath : 'Nicht installiert (nutzt schnellen PHP Parallel-Ping & ARP)',
+                    'snmp_mode'      => $snmpExt ? 'PHP-SNMP Extension + Native UDP SNMPv2c' : 'Integrierter Pure-PHP UDP SNMPv2c Client (aktiv)',
+                    'server_time'    => date('Y-m-d H:i:s'),
+                    'cron_active'    => $cronActive ? 1 : 0,
+                    'cron_interval'  => $detectedCronMin,
+                    'cron_cmd'       => $cronCmdLine,
+                    'anomaly_config' => $anomalyConfig,
                 ),
             ));
             break;
@@ -829,6 +843,19 @@ try {
             $scanner = new NetworkScanner();
             $stats = $scanner->cleanupOldScans($retDays, $staleDays);
             echo json_encode(array('ok' => true, 'cleanup' => $stats));
+            break;
+
+        case 'admin_save_anomaly_config':
+            Auth::requireRole(array('admin'));
+            $anomalySettings = array(
+                'anomaly_arp_spoofing'           => !empty($input['anomaly_arp_spoofing']) ? 1 : 0,
+                'anomaly_new_mac'                => !empty($input['anomaly_new_mac']) ? 1 : 0,
+                'anomaly_rogue_switch_max_macs'  => isset($input['anomaly_rogue_switch_max_macs']) ? max(0, (int)$input['anomaly_rogue_switch_max_macs']) : 3,
+                'anomaly_port_error_threshold'   => isset($input['anomaly_port_error_threshold']) ? max(0, (int)$input['anomaly_port_error_threshold']) : 50,
+                'anomaly_mac_flapping_threshold' => isset($input['anomaly_mac_flapping_threshold']) ? max(0, (int)$input['anomaly_mac_flapping_threshold']) : 3,
+            );
+            Database::saveCustomConfig(array(), $anomalySettings);
+            echo json_encode(array('ok' => true, 'anomaly_config' => $anomalySettings));
             break;
 
         case 'save_user':

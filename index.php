@@ -462,6 +462,59 @@ $isAdmin = ($userRole === 'admin');
                         </div>
                     </div>
 
+                    <!-- 🛡️ Automatischer Anomalie- & Sicherheits-Wächter (Layer 2 / Layer 3 Watchdogs) -->
+                    <div style="background:var(--bg-panel);border:1px solid rgba(245,158,11,0.45);border-radius:10px;padding:18px;display:flex;flex-direction:column;gap:14px;">
+                        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+                            <div>
+                                <h3 style="font-size:15px;color:#fcd34d;">🛡️ Automatischer Anomalie- &amp; Sicherheits-Wächter (Layer 2 / Layer 3 Watchdogs)</h3>
+                                <div style="font-size:12.5px;color:var(--text-secondary);">
+                                    Überwacht bei jedem Scan (und im 15-Minuten-Cronjob) vollautomatisch ARP-Tabellen, Switch-Ports, Fehlerzähler und die MAC-Historie auf verdächtiges Verhalten.
+                                </div>
+                            </div>
+                            <span class="badge" style="background:rgba(16,185,129,0.2);border:1px solid #10b981;color:#34d399;font-size:11.5px;">🛡️ 4 WÄCHTER AKTIV</span>
+                        </div>
+
+                        <div style="display:grid;grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));gap:12px;">
+                            <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;background:var(--bg-card);border:1px solid var(--border-color);padding:10px 12px;border-radius:8px;font-size:12.5px;">
+                                <input type="checkbox" id="adm-anom-arp" checked style="width:16px;height:16px;margin-top:2px;">
+                                <div>
+                                    <div style="font-weight:700;color:#fca5a5;">⚡ 1. ARP-Spoofing &amp; IP-Konflikt-Alarm</div>
+                                    <div style="color:var(--text-secondary);font-size:11.5px;margin-top:2px;">Meldet sofort kritischen Alarm, wenn sich die MAC-Adresse einer bekannten IP-Adresse plötzlich ändert (Man-in-the-Middle / doppelte IP).</div>
+                                </div>
+                            </label>
+
+                            <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;background:var(--bg-card);border:1px solid var(--border-color);padding:10px 12px;border-radius:8px;font-size:12.5px;">
+                                <input type="checkbox" id="adm-anom-newmac" checked style="width:16px;height:16px;margin-top:2px;">
+                                <div>
+                                    <div style="font-weight:700;color:#fcd34d;">🚨 2. „Neues unbekanntes Gerät im Netz“-Alarm</div>
+                                    <div style="color:var(--text-secondary);font-size:11.5px;margin-top:2px;">Meldet jede noch nie gesehene MAC-Adresse beim ersten Auftauchen im Subnetz oder an einem Switch-Port inkl. Hersteller &amp; Buchse.</div>
+                                </div>
+                            </label>
+                        </div>
+
+                        <div style="display:grid;grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));gap:12px;">
+                            <div class="form-group">
+                                <label>🔌 3. Rogue-Switch-Schutz: Max. MACs pro Access-Port (0 = aus)</label>
+                                <input type="number" id="adm-anom-maxmacs" class="form-input" min="0" max="100" value="3" title="Warnung wenn an einem normalen Endgeräte-Port (kein Uplink/Trunk) mehr als X Geräte hängen">
+                            </div>
+                            <div class="form-group">
+                                <label>🌪️ 4a. MAC-Flapping / Loop-Alarm (Port-Wechsel / 60 Min., 0 = aus)</label>
+                                <input type="number" id="adm-anom-flap" class="form-input" min="0" max="50" value="3" title="Kritischer Alarm wenn eine MAC-Adresse innerhalb einer Stunde mindestens X-mal den Switch-Port wechselt">
+                            </div>
+                            <div class="form-group">
+                                <label>📉 4b. Switch-Port Paketfehler-Alarm (ab X Fehlern, 0 = aus)</label>
+                                <input type="number" id="adm-anom-porterr" class="form-input" min="0" max="100000" value="50" title="Warnung wenn ein Switch-Port erhöhte Paketfehler (ifInErrors) meldet">
+                            </div>
+                        </div>
+
+                        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+                            <div style="font-size:11.5px;color:var(--text-secondary);">
+                                💡 Alle erkannten Anomalien erscheinen oben im <b>🔔 Alarm-Center</b> (mit Anti-Spam-Deduplizierung) und werden bei aktivem SMTP-Server automatisch per E-Mail gemeldet.
+                            </div>
+                            <button class="btn btn-primary btn-sm" onclick="saveAdminAnomalyConfig()">🛡️ Anomalie-Wächter speichern</button>
+                        </div>
+                    </div>
+
                     <!-- 3. Benutzer- & Rechteverwaltung -->
                     <div style="background:var(--bg-panel);border:1px solid var(--border-color);border-radius:10px;padding:18px;">
                         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">

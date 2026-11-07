@@ -63,6 +63,17 @@ return array(
         'stale_offline_days'     => 30,
         // Standard-Intervall für den automatischen Hintergrund-Cronjob in Minuten (z.B. 15)
         'cron_interval_minutes'  => 15,
+        // Automatische Anomalie- & Sicherheits-Wächter (Layer 2 / Layer 3 Watchdogs):
+        // 1. ARP-Spoofing / IP-Adresskonflikt-Alarm (MAC-Adresse einer bekannten IP ändert sich plötzlich)
+        'anomaly_arp_spoofing'           => 1,
+        // 2. Alarm bei neuen, noch nie gesehenen MAC-Adressen im Netzwerk / an einem Switch-Port
+        'anomaly_new_mac'                => 1,
+        // 3. Rogue-Switch / Mehrfach-MAC-Warnung: Max. erlaubte Endgeräte-MACs an einem einzelnen Access-Port (0 = deaktiviert)
+        'anomaly_rogue_switch_max_macs'  => 3,
+        // 4a. Switch-Port Paketfehler-Schwellenwert (ifInErrors pro Port / Anstieg, 0 = deaktiviert)
+        'anomaly_port_error_threshold'   => 50,
+        // 4b. MAC-Flapping / Loop-Alarm: Anzahl unterschiedlicher Switch-Ports einer MAC innerhalb von 60 Min. (0 = deaktiviert)
+        'anomaly_mac_flapping_threshold' => 3,
     ),
 
     // SMTP-Einstellungen für E-Mail-Alarm-Benachrichtigungen (im Adminbereich konfigurierbar)

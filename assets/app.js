@@ -4955,6 +4955,21 @@ function renderAdminSection() {
         var cVal = (parseInt(sc.cron_active || 0, 10) === 1 && sc.cron_interval_minutes) ? String(sc.cron_interval_minutes) : '0';
         document.getElementById('adm-cron-interval').value = cVal;
     }
+    if (document.getElementById('adm-anom-arp')) {
+        document.getElementById('adm-anom-arp').checked = (sc.anomaly_arp_spoofing === undefined) ? true : (parseInt(sc.anomaly_arp_spoofing, 10) === 1);
+    }
+    if (document.getElementById('adm-anom-newmac')) {
+        document.getElementById('adm-anom-newmac').checked = (sc.anomaly_new_mac === undefined) ? true : (parseInt(sc.anomaly_new_mac, 10) === 1);
+    }
+    if (document.getElementById('adm-anom-maxmacs')) {
+        document.getElementById('adm-anom-maxmacs').value = (sc.anomaly_rogue_switch_max_macs !== undefined) ? sc.anomaly_rogue_switch_max_macs : 3;
+    }
+    if (document.getElementById('adm-anom-flap')) {
+        document.getElementById('adm-anom-flap').value = (sc.anomaly_mac_flapping_threshold !== undefined) ? sc.anomaly_mac_flapping_threshold : 3;
+    }
+    if (document.getElementById('adm-anom-porterr')) {
+        document.getElementById('adm-anom-porterr').value = (sc.anomaly_port_error_threshold !== undefined) ? sc.anomaly_port_error_threshold : 50;
+    }
 
     var smtp = adm.smtp_config || {};
     if (document.getElementById('adm-smtp-host')) {
@@ -5438,7 +5453,36 @@ function renderAlertsModal() {
     var body = document.getElementById('alerts-modal-body');
     if (!body) return;
 
-    // Übersicht überwachter Geräte
+    var anomCfg = (AppState.system && AppState.system.anomaly_config) ? AppState.system.anomaly_config : {
+        anomaly_arp_spoofing: 1,
+        anomaly_new_mac: 1,
+        anomaly_rogue_switch_max_macs: 3,
+        anomaly_port_error_threshold: 50,
+        anomaly_mac_flapping_threshold: 3
+    };
+
+    var arpOn = parseInt(anomCfg.anomaly_arp_spoofing, 10) === 1;
+    var newMacOn = parseInt(anomCfg.anomaly_new_mac, 10) === 1;
+    var maxMacs = parseInt(anomCfg.anomaly_rogue_switch_max_macs, 10) || 0;
+    var flapCnt = parseInt(anomCfg.anomaly_mac_flapping_threshold, 10) || 0;
+    var pErrCnt = parseInt(anomCfg.anomaly_port_error_threshold, 10) || 0;
+
+    var html =
+        '<div style="background:rgba(15,23,42,0.85);border:1px solid rgba(245,158,11,0.4);border-radius:8px;padding:12px;margin-bottom:10px;">' +
+            '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;margin-bottom:8px;">' +
+                '<div style="font-size:12px;font-weight:700;color:#fcd34d;text-transform:uppercase;">🛡️ Automatischer Anomalie- &amp; Sicherheits-Wächter (Layer 2 / Layer 3)</div>' +
+                (userIsAdmin() ? '<button class="btn btn-sm" style="padding:2px 8px;font-size:11px;border-color:rgba(245,158,11,0.5);color:#fcd34d;" onclick="closeAlertsModal(); switchView(\'admin\');">⚙️ Schwellenwerte anpassen</button>' : '') +
+            '</div>' +
+            '<div style="display:flex;gap:8px;flex-wrap:wrap;font-size:11.5px;">' +
+                '<span class="badge" style="padding:4px 8px;background:' + (arpOn ? 'rgba(16,185,129,0.18);border:1px solid #10b981;color:#34d399;' : 'rgba(148,163,184,0.15);color:#94a3b8;') + '">⚡ ARP-Spoofing / IP-Konflikt: ' + (arpOn ? 'AKTIV' : 'AUS') + '</span>' +
+                '<span class="badge" style="padding:4px 8px;background:' + (newMacOn ? 'rgba(16,185,129,0.18);border:1px solid #10b981;color:#34d399;' : 'rgba(148,163,184,0.15);color:#94a3b8;') + '">🚨 Neue unbekannte MAC-Erkennung: ' + (newMacOn ? 'AKTIV' : 'AUS') + '</span>' +
+                '<span class="badge" style="padding:4px 8px;background:' + (maxMacs > 0 ? 'rgba(16,185,129,0.18);border:1px solid #10b981;color:#34d399;' : 'rgba(148,163,184,0.15);color:#94a3b8;') + '">🔌 Rogue-Switch-Schutz: ' + (maxMacs > 0 ? ('>' + maxMacs + ' MACs/Port') : 'AUS') + '</span>' +
+                '<span class="badge" style="padding:4px 8px;background:' + (flapCnt > 0 ? 'rgba(16,185,129,0.18);border:1px solid #10b981;color:#34d399;' : 'rgba(148,163,184,0.15);color:#94a3b8;') + '">🌪️ MAC-Flapping / Loop: ' + (flapCnt > 0 ? ('ab ' + flapCnt + '× Wechsel/h') : 'AUS') + '</span>' +
+                '<span class="badge" style="padding:4px 8px;background:' + (pErrCnt > 0 ? 'rgba(16,185,129,0.18);border:1px solid #10b981;color:#34d399;' : 'rgba(148,163,184,0.15);color:#94a3b8;') + '">📉 Port-Paketfehler: ' + (pErrCnt > 0 ? ('ab ' + pErrCnt + ' Fehlern') : 'AUS') + '</span>' +
+            '</div>' +
+        '</div>';
+
+    // Übersicht überwachter Geräte (Online / Offline Watchdog)
     var monitoredDevs = [];
     for (var i = 0; i < AppState.devices.length; i++) {
         var d = AppState.devices[i];
@@ -5447,8 +5491,8 @@ function renderAlertsModal() {
         }
     }
 
-    var html = '<div style="background:rgba(15,23,42,0.7);border:1px solid var(--border-color);border-radius:8px;padding:12px;">' +
-        '<div style="font-size:12px;font-weight:700;color:#93c5fd;text-transform:uppercase;margin-bottom:8px;">Aktuell überwachte Geräte (' + monitoredDevs.length + ')</div>';
+    html += '<div style="background:rgba(15,23,42,0.7);border:1px solid var(--border-color);border-radius:8px;padding:12px;">' +
+        '<div style="font-size:12px;font-weight:700;color:#93c5fd;text-transform:uppercase;margin-bottom:8px;">Überwachte Geräte auf Online/Offline-Ausfall (' + monitoredDevs.length + ')</div>';
 
     if (monitoredDevs.length > 0) {
         html += '<div style="display:flex;gap:8px;flex-wrap:wrap;">';
@@ -5466,31 +5510,47 @@ function renderAlertsModal() {
         }
         html += '</div>';
     } else {
-        html += '<div style="font-size:12.5px;color:var(--text-secondary);">Noch keine Geräte für Alarme aktiviert. Klicke im Netzwerkplan auf ein Gerät und wähle rechts unter <b>„🔔 Alarm-Überwachung“</b> den gewünschten Modus aus.</div>';
+        html += '<div style="font-size:12.5px;color:var(--text-secondary);">Noch keine Einzelgeräte für Online-/Offline-Ausfallalarme markiert. (Die 4 automatischen Anomalie-Wächter oben überwachen bereits das gesamte Netzwerk).</div>';
     }
     html += '</div>';
 
-    // Liste der ausgelösten Alarme
+    // Liste der ausgelösten Alarme & Anomalien
     var alerts = AppState.alerts || [];
-    html += '<div style="font-size:12px;font-weight:700;color:var(--text-secondary);text-transform:uppercase;margin-top:4px;">Ausgelöste Alarm-Ereignisse (' + alerts.length + ')</div>';
+    html += '<div style="font-size:12px;font-weight:700;color:var(--text-secondary);text-transform:uppercase;margin-top:8px;">Ausgelöste Alarm- &amp; Anomalie-Ereignisse (' + alerts.length + ')</div>';
 
     if (alerts.length === 0) {
-        html += '<div style="padding:24px;text-align:center;color:var(--text-secondary);background:rgba(15,23,42,0.4);border-radius:8px;border:1px solid var(--border-color);">Keine Alarme protokolliert – alle überwachten Systeme laufen normal.</div>';
+        html += '<div style="padding:24px;text-align:center;color:var(--text-secondary);background:rgba(15,23,42,0.4);border-radius:8px;border:1px solid var(--border-color);">Keine Alarme oder Netzwerk-Anomalien protokolliert – alle überwachten Systeme und Switch-Ports verhalten sich unauffällig.</div>';
     } else {
-        html += '<table class="data-table"><thead><tr><th>Zeitpunkt</th><th>Ereignis</th><th>Gerät</th><th>IP-Adresse</th><th>Details</th></tr></thead><tbody>';
+        html += '<table class="data-table"><thead><tr><th>Zeitpunkt</th><th>Kategorie / Typ</th><th>Gerät / Switch</th><th>IP-Adresse</th><th>Details &amp; Steckplatz</th></tr></thead><tbody>';
         for (var a = 0; a < alerts.length; a++) {
             var al = alerts[a];
+            var aType = al.alert_type || al.event_type || 'offline_alarm';
             var isUnack = parseInt(al.is_acknowledged || 0, 10) === 0;
-            var evBadge = '<span class="badge badge-offline">OFFLINE ALARM</span>';
-            if (al.event_type === 'online_recovery') {
-                evBadge = '<span class="badge badge-online">WIEDER ONLINE</span>';
-            } else if (al.event_type === 'online_alarm') {
-                evBadge = '<span class="badge" style="background:rgba(59,130,246,0.2);color:#93c5fd;">ONLINE ALARM</span>';
+            var evBadge = '<span class="badge badge-offline">🔴 OFFLINE ALARM</span>';
+            if (aType === 'online_recovery') {
+                evBadge = '<span class="badge badge-online">🟢 WIEDER ONLINE</span>';
+            } else if (aType === 'online_alarm') {
+                evBadge = '<span class="badge" style="background:rgba(59,130,246,0.2);color:#93c5fd;">🔵 ONLINE ALARM</span>';
+            } else if (aType === 'arp_conflict') {
+                evBadge = '<span class="badge" style="background:rgba(239,68,68,0.25);border:1px solid #ef4444;color:#fca5a5;">⚡ ARP-SPOOFING / IP-KONFLIKT</span>';
+            } else if (aType === 'new_mac') {
+                evBadge = '<span class="badge" style="background:rgba(245,158,11,0.22);border:1px solid #f59e0b;color:#fcd34d;">🚨 NEUES GERÄT (MAC)</span>';
+            } else if (aType === 'rogue_switch') {
+                evBadge = '<span class="badge" style="background:rgba(168,85,247,0.25);border:1px solid #a855f7;color:#e9d5ff;">🔌 ROGUE-SWITCH / MULTI-MAC</span>';
+            } else if (aType === 'mac_flapping') {
+                evBadge = '<span class="badge" style="background:rgba(239,68,68,0.25);border:1px solid #ef4444;color:#fca5a5;">🌪️ MAC-FLAPPING / LOOP</span>';
+            } else if (aType === 'port_errors') {
+                evBadge = '<span class="badge" style="background:rgba(245,158,11,0.22);border:1px solid #f59e0b;color:#fcd34d;">📉 PORT-FEHLER</span>';
             }
-            html += '<tr style="' + (isUnack ? 'background:rgba(239,68,68,0.08);font-weight:600;' : 'opacity:0.75;') + '">' +
+
+            var devClickAttr = parseInt(al.device_id, 10) > 0
+                ? 'onclick="closeAlertsModal(); selectDevice(' + parseInt(al.device_id, 10) + ');" style="cursor:pointer;color:#60a5fa;text-decoration:underline;" title="Gerät im Netzwerkplan öffnen"'
+                : '';
+
+            html += '<tr style="' + (isUnack ? 'background:rgba(239,68,68,0.08);font-weight:600;' : 'opacity:0.78;') + '">' +
                 '<td style="white-space:nowrap;font-size:12px;">' + escapeHtml(al.created_at || '-') + (isUnack ? ' <span class="badge badge-offline" style="font-size:9px;">NEU</span>' : '') + '</td>' +
-                '<td>' + evBadge + '</td>' +
-                '<td><b>' + escapeHtml(al.device_name || '-') + '</b></td>' +
+                '<td style="white-space:nowrap;">' + evBadge + '</td>' +
+                '<td><b ' + devClickAttr + '>' + escapeHtml(al.device_name || '-') + '</b></td>' +
                 '<td style="font-family:monospace;color:#93c5fd;">' + escapeHtml(al.ip_address || '-') + '</td>' +
                 '<td style="font-size:12px;">' + escapeHtml(al.message || '') + '</td>' +
             '</tr>';
@@ -5499,6 +5559,30 @@ function renderAlertsModal() {
     }
 
     body.innerHTML = html;
+}
+
+function saveAdminAnomalyConfig() {
+    var payload = {
+        anomaly_arp_spoofing: document.getElementById('adm-anom-arp') && document.getElementById('adm-anom-arp').checked ? 1 : 0,
+        anomaly_new_mac: document.getElementById('adm-anom-newmac') && document.getElementById('adm-anom-newmac').checked ? 1 : 0,
+        anomaly_rogue_switch_max_macs: document.getElementById('adm-anom-maxmacs') ? parseInt(document.getElementById('adm-anom-maxmacs').value || '0', 10) : 3,
+        anomaly_mac_flapping_threshold: document.getElementById('adm-anom-flap') ? parseInt(document.getElementById('adm-anom-flap').value || '0', 10) : 3,
+        anomaly_port_error_threshold: document.getElementById('adm-anom-porterr') ? parseInt(document.getElementById('adm-anom-porterr').value || '0', 10) : 50
+    };
+    fetch('api.php?action=admin_save_anomaly_config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (res) {
+        if (res.ok) {
+            showToast('🛡️ Einstellungen für den automatischen Anomalie-Wächter gespeichert!');
+            loadTopologyData();
+        } else {
+            showToast('Fehler: ' + (res.error || 'Unbekannt'));
+        }
+    });
 }
 
 function ackAllAlerts() {
