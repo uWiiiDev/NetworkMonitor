@@ -271,18 +271,31 @@ $gitShort = Database::getGitCommitShort();
 
             <!-- TAB 2: Inventory Table -->
             <section id="view-inventory" class="view-pane">
-                <div class="map-toolbar">
-                    <div class="toolbar-group">
+                <div class="map-toolbar" style="flex-wrap:wrap;gap:8px;">
+                    <div class="toolbar-group" style="flex-wrap:wrap;">
                         <div class="panel-title">Gefundene Hosts &amp; Managed Switches</div>
-                        <input type="text" id="inv-search" class="search-input" placeholder="In Tabelle filtern (IP, MAC, Port, Dose)..." oninput="renderInventoryTable()" style="width:230px;">
+                        <input type="text" id="inv-search" class="search-input" placeholder="Schnellsuche (IP, MAC, Port, Dose)..." oninput="renderInventoryTable()" style="width:210px;">
                         <button class="btn btn-sm" style="border-color:#3b82f6;background:rgba(59,130,246,0.16);color:#93c5fd;font-weight:600;" onclick="openMacFinderModal(document.getElementById('inv-search').value)" title="Gezielte MAC-Adress-, Netzwerkdosen- &amp; Switch-Port-Suche öffnen">
                             🔍 MAC / Port / Dosen-Finder
                         </button>
                     </div>
-                    <div class="toolbar-group">
+                    <div class="toolbar-group" style="flex-wrap:wrap;">
+                        <div style="display:flex;align-items:center;gap:6px;">
+                            <span style="font-size:12px;color:var(--text-secondary);white-space:nowrap;">📊 Gruppieren &amp; Summen:</span>
+                            <select id="inv-group-by" class="select-input" style="padding:4px 8px;font-size:12px;width:auto;" onchange="setInventoryGroupBy(this.value)">
+                                <option value="">Keine Gruppierung (Flache Liste + Gruppen-Chips)</option>
+                                <option value="custom_group">Nach Eigener Gerätegruppe</option>
+                                <option value="device_type">Nach Gerätetyp (Switch, Server, Client...)</option>
+                                <option value="vendor">Nach Hersteller (OUI)</option>
+                                <option value="os_guess">Nach Betriebssystem</option>
+                                <option value="switch_name">Nach Switch / Verteiler</option>
+                                <option value="scope_name">Nach Netzwerk-Scope</option>
+                                <option value="status">Nach Status (Online / Offline)</option>
+                            </select>
+                        </div>
                         <div class="dropdown">
                             <button class="btn btn-sm" onclick="toggleDropdown('dd-inv-cols', event)">
-                                ☷ Spalten ein-/ausblenden ▾
+                                ☷ Spalten ▾
                             </button>
                             <div id="dd-inv-cols" class="dropdown-menu dropdown-right" style="width:240px;" onclick="event.stopPropagation();">
                                 <div class="dropdown-header">Sichtbare Tabellenspalten</div>
@@ -296,12 +309,16 @@ $gitShort = Database::getGitCommitShort();
                         <button class="btn btn-sm btn-primary" onclick="exportInventoryCsv()">CSV Export</button>
                     </div>
                 </div>
-                <div class="content-scroll">
+                <div id="inv-filter-summary-bar" style="padding:8px 16px;background:rgba(15,23,42,0.75);border-bottom:1px solid var(--border-color);display:flex;flex-direction:column;gap:6px;font-size:12px;"></div>
+                <div class="content-scroll" style="position:relative;">
                     <table class="data-table">
                         <thead id="inventory-thead"></thead>
                         <tbody id="inventory-tbody"></tbody>
+                        <tfoot id="inventory-tfoot"></tfoot>
                     </table>
                 </div>
+                <!-- Excel-ähnliches Spaltenfilter-Popup -->
+                <div id="inv-excel-filter-popover" onclick="event.stopPropagation();" style="display:none;position:fixed;z-index:2500;width:310px;background:var(--bg-panel);border:1px solid #3b82f6;border-radius:10px;box-shadow:0 20px 45px rgba(0,0,0,0.75);padding:12px;font-size:12px;"></div>
             </section>
 
             <!-- TAB 3: Einstellungen / Adminbereich (Datenbank, Scanner, Benutzer, Cronjob & System) -->
@@ -961,21 +978,23 @@ $gitShort = Database::getGitCommitShort();
         </div>
     </div>
 
-    <!-- Modal: Alarm-Zentrale (Online/Offline Geräte-Alarme) -->
+    <!-- Modal: Alarm-Zentrale (Online/Offline Geräte-Alarme & Quittierung mit Kommentar) -->
     <div id="alerts-modal" class="modal-backdrop">
-        <div class="modal" style="width:820px;max-width:95vw;max-height:88vh;display:flex;flex-direction:column;">
+        <div class="modal" style="width:940px;max-width:96vw;max-height:90vh;display:flex;flex-direction:column;">
             <div class="panel-header" style="flex-shrink:0;">
-                <span class="panel-title">🔔 Geräte-Alarme &amp; Status-Ereignisse</span>
+                <span class="panel-title">🔔 Geräte-Alarme, Sicherheits-Ereignisse &amp; Quittierung</span>
                 <button class="btn btn-sm" onclick="closeAlertsModal()">×</button>
             </div>
             <div id="alerts-modal-body" class="modal-body" style="overflow-y:auto;flex:1;display:block;">
                 <!-- Dynamisch per JS gefüllt -->
             </div>
             <div class="modal-footer" style="justify-content:space-between;flex-shrink:0;">
-                <div style="display:flex;gap:8px;">
-                    <button class="btn btn-sm" onclick="ackAllAlerts()">✓ Alle als gelesen markieren</button>
+                <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
                     <?php if ($canEdit): ?>
+                        <button class="btn btn-sm btn-success" onclick="ackAllAlerts()">✓ Alle offenen Alarme quittieren (mit Kommentar)...</button>
                         <button class="btn btn-sm btn-danger" onclick="clearAllAlerts()">🗑 Alarm-Historie leeren</button>
+                    <?php else: ?>
+                        <span style="font-size:12px;color:var(--text-secondary);">🔒 Das Quittieren und Kommentieren von Alarmen ist Operatoren, Netzwerkexperten und Administratoren vorbehalten.</span>
                     <?php endif; ?>
                 </div>
                 <button class="btn btn-primary" onclick="closeAlertsModal()">Schließen</button>

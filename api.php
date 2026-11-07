@@ -1422,13 +1422,28 @@ try {
             break;
 
         case 'ack_alerts':
+            Auth::requireRole(array('operator', 'netadmin', 'admin'));
             $alertId = isset($input['id']) ? (int)$input['id'] : 0;
+            $ackComment = isset($input['comment']) ? trim((string)$input['comment']) : '';
+            $ackBy = isset($currentUser['username']) ? $currentUser['username'] : 'operator';
+            $now = date('Y-m-d H:i:s');
             if ($alertId > 0) {
-                $pdo->prepare("UPDATE device_alerts SET is_acknowledged = 1 WHERE id = :id")->execute(array(':id' => $alertId));
+                $pdo->prepare("UPDATE device_alerts SET is_acknowledged = 1, ack_comment = :c, ack_by = :u, ack_at = :now WHERE id = :id")
+                    ->execute(array(
+                        ':c'   => $ackComment !== '' ? $ackComment : null,
+                        ':u'   => $ackBy,
+                        ':now' => $now,
+                        ':id'  => $alertId,
+                    ));
             } else {
-                $pdo->exec("UPDATE device_alerts SET is_acknowledged = 1 WHERE is_acknowledged = 0");
+                $pdo->prepare("UPDATE device_alerts SET is_acknowledged = 1, ack_comment = COALESCE(:c, ack_comment), ack_by = :u, ack_at = :now WHERE is_acknowledged = 0")
+                    ->execute(array(
+                        ':c'   => $ackComment !== '' ? $ackComment : null,
+                        ':u'   => $ackBy,
+                        ':now' => $now,
+                    ));
             }
-            echo json_encode(array('ok' => true));
+            echo json_encode(array('ok' => true, 'ack_by' => $ackBy, 'ack_at' => $now));
             break;
 
         case 'clear_alerts':

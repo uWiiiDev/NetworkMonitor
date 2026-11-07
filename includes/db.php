@@ -228,6 +228,9 @@ class Database
         $this->ensureColumnExists('users', 'totp_secret', 'VARCHAR(64) DEFAULT NULL');
         $this->ensureColumnExists('users', 'otp_code_hash', 'VARCHAR(255) DEFAULT NULL');
         $this->ensureColumnExists('users', 'otp_expires_at', 'DATETIME DEFAULT NULL');
+        $this->ensureColumnExists('device_alerts', 'ack_comment', 'TEXT DEFAULT NULL');
+        $this->ensureColumnExists('device_alerts', 'ack_by', 'VARCHAR(64) DEFAULT NULL');
+        $this->ensureColumnExists('device_alerts', 'ack_at', 'DATETIME DEFAULT NULL');
     }
 
     private function initSqliteSchema()
@@ -369,9 +372,16 @@ class Database
                 message TEXT NOT NULL,
                 email_sent INTEGER NOT NULL DEFAULT 0,
                 is_acknowledged INTEGER NOT NULL DEFAULT 0,
+                ack_comment TEXT DEFAULT NULL,
+                ack_by TEXT DEFAULT NULL,
+                ack_at TEXT DEFAULT NULL,
                 created_at TEXT NOT NULL
             )
         ");
+
+        $this->ensureColumnExists('device_alerts', 'ack_comment', 'TEXT DEFAULT NULL');
+        $this->ensureColumnExists('device_alerts', 'ack_by', 'TEXT DEFAULT NULL');
+        $this->ensureColumnExists('device_alerts', 'ack_at', 'TEXT DEFAULT NULL');
 
         $this->pdo->exec("
             CREATE TABLE IF NOT EXISTS mac_port_history (

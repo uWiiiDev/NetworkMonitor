@@ -3187,25 +3187,31 @@ function deleteScope(scopeId) {
 }
 
 var INV_COLUMNS = [
-    { key: 'visible',     label: 'Im Plan',                     defaultShow: true },
-    { key: 'status',      label: 'Status',                      defaultShow: true },
-    { key: 'ip_address',  label: 'IP-Adresse',                  defaultShow: true },
-    { key: 'name',        label: 'Hostname / Bezeichnung',      defaultShow: true },
-    { key: 'device_type', label: 'Typ',                         defaultShow: true },
-    { key: 'switch_port', label: 'Switch / Port (Steckplatz)',  defaultShow: true },
-    { key: 'mac_address', label: 'MAC-Adresse',                 defaultShow: true },
-    { key: 'vendor',      label: 'Hersteller (OUI)',            defaultShow: true },
-    { key: 'os_guess',    label: 'Betriebssystem & Dienste',    defaultShow: true },
-    { key: 'open_ports',  label: 'Offene TCP-Ports',            defaultShow: true },
-    { key: 'snmp',        label: 'SNMP Details',                defaultShow: true },
-    { key: 'scope_name',  label: 'Netzwerk-Scope',              defaultShow: true },
-    { key: 'last_seen',   label: 'Zuletzt gesehen',             defaultShow: false }
+    { key: 'visible',      label: 'Im Plan',                     defaultShow: true },
+    { key: 'status',       label: 'Status',                      defaultShow: true },
+    { key: 'ip_address',   label: 'IP-Adresse',                  defaultShow: true },
+    { key: 'name',         label: 'Hostname / Bezeichnung',      defaultShow: true },
+    { key: 'custom_group', label: 'Gerätegruppe',                defaultShow: true },
+    { key: 'device_type',  label: 'Typ',                         defaultShow: true },
+    { key: 'switch_port',  label: 'Switch / Port (Steckplatz)',  defaultShow: true },
+    { key: 'mac_address',  label: 'MAC-Adresse',                 defaultShow: true },
+    { key: 'vendor',       label: 'Hersteller (OUI)',            defaultShow: true },
+    { key: 'os_guess',     label: 'Betriebssystem & Dienste',    defaultShow: true },
+    { key: 'open_ports',   label: 'Offene TCP-Ports',            defaultShow: true },
+    { key: 'snmp',         label: 'SNMP Details',                defaultShow: true },
+    { key: 'scope_name',   label: 'Netzwerk-Scope',              defaultShow: true },
+    { key: 'last_seen',    label: 'Zuletzt gesehen',             defaultShow: false }
 ];
 
 var InvTableState = {
     sortKey: 'ip_address',
     sortDir: 'asc',
-    hiddenCols: {}
+    hiddenCols: {},
+    colFilters: {},      // { colKey: { op: 'contains'|'not_contains'|'starts'|'ends'|'equals'|'not_empty'|'empty', text: '', allowedValues: null | { val: true } } }
+    groupBy: '',         // '' | 'custom_group' | 'device_type' | 'vendor' | 'os_guess' | 'switch_name' | 'scope_name' | 'status'
+    collapsedGroups: {}, // { groupKey: true }
+    openFilterCol: null,
+    lastFilteredRows: []
 };
 
 try {
@@ -3231,13 +3237,378 @@ function ipToNumeric(ipStr) {
            (parseInt(p[3], 10) || 0);
 }
 
-function sortInventoryBy(colKey) {
-    if (InvTableState.sortKey === colKey) {
+function getInventoryCellText(dev, colKey) {
+    if (!dev) return '';
+    if (colKey === 'visible') {
+        return parseInt(dev.is_hidden || 0, 10) === 0 ? 'Sichtbar' : 'Ausgeblendet';
+    }
+    if (colKey === 'status') {
+        return String(dev.status || '').toUpperCase();
+    }
+    if (colKey === 'ip_address') {
+        return String(dev.ip_address || '');
+    }
+    if (colKey === 'name') {
+        return String(dev.custom_name || dev.hostname || '');
+    }
+    if (colKey === 'custom_group') {
+        return String(dev.custom_group || '');
+    }
+    if (colKey === 'device_type') {
+        return String(dev.device_type || '').toUpperCase();
+    }
+    if (colKey === 'switch_port') {
+        var sp = dev._spInfo || getDeviceSwitchPortInfo(dev);
+        return sp ? String(sp.searchString || '') : '';
+    }
+    if (colKey === 'os_guess') {
+        var os = String(dev.os_guess || '');
+        var sv = String(dev.service_info || '');
+        return (os + (sv ? (' ' + sv) : '')).trim();
+    }
+    if (colKey === 'snmp') {
+        return parseInt(dev.snmp_enabled || 0, 10) === 1 ? ('SNMP ' + (dev.snmp_sysname || 'Aktiv')) : '';
+    }
+    return String(dev[colKey] || '');
+}
+
+function getInventoryChecklistValue(dev, colKey) {
+    if (colKey === 'switch_port') {
+        var sp = dev._spInfo || getDeviceSwitchPortInfo(dev);
+        if (!sp || !sp.switchId) return '';
+        var outStr = (sp.outletInfo && sp.outletInfo.badgeText) ? (' [' + sp.outletInfo.badgeText + ']') : '';
+        return sp.switchName + ' • ' + (sp.portName || '-') + outStr;
+    }
+    if (colKey === 'os_guess') {
+        return String(dev.os_guess || '').trim();
+    }
+    return getInventoryCellText(dev, colKey).trim();
+}
+
+function isColumnFilterActive(colKey) {
+    var f = InvTableState.colFilters[colKey];
+    if (!f) return false;
+    if (f.op === 'empty' || f.op === 'not_empty') return true;
+    if (f.text && String(f.text).trim() !== '') return true;
+    if (f.allowedValues && typeof f.allowedValues === 'object') return true;
+    return false;
+}
+
+function deviceMatchesColumnFilter(dev, colKey, f) {
+    if (!f) return true;
+    var rawText = getInventoryCellText(dev, colKey);
+    var checkVal = getInventoryChecklistValue(dev, colKey);
+    var normVal = checkVal === '' ? '__EMPTY__' : checkVal;
+
+    if (f.allowedValues && typeof f.allowedValues === 'object') {
+        if (!f.allowedValues[normVal]) {
+            return false;
+        }
+    }
+
+    var op = f.op || 'contains';
+    var q = String(f.text || '').trim().toLowerCase();
+    var target = String(rawText || '').toLowerCase();
+
+    if (op === 'empty') {
+        return target.trim() === '' || target.trim() === '-';
+    }
+    if (op === 'not_empty') {
+        return target.trim() !== '' && target.trim() !== '-';
+    }
+    if (q === '') {
+        return true;
+    }
+    if (op === 'contains') {
+        return target.indexOf(q) !== -1;
+    }
+    if (op === 'not_contains') {
+        return target.indexOf(q) === -1;
+    }
+    if (op === 'starts') {
+        return target.indexOf(q) === 0;
+    }
+    if (op === 'ends') {
+        return target.length >= q.length && target.lastIndexOf(q) === (target.length - q.length);
+    }
+    if (op === 'equals') {
+        return target === q || String(checkVal || '').toLowerCase() === q;
+    }
+    return true;
+}
+
+function sortInventoryBy(colKey, forceDir) {
+    if (forceDir) {
+        InvTableState.sortKey = colKey;
+        InvTableState.sortDir = forceDir;
+    } else if (InvTableState.sortKey === colKey) {
         InvTableState.sortDir = (InvTableState.sortDir === 'asc') ? 'desc' : 'asc';
     } else {
         InvTableState.sortKey = colKey;
         InvTableState.sortDir = 'asc';
     }
+    renderInventoryTable();
+}
+
+function setInventoryGroupBy(groupField) {
+    InvTableState.groupBy = groupField || '';
+    InvTableState.collapsedGroups = {};
+    var sel = document.getElementById('inv-group-by');
+    if (sel && sel.value !== InvTableState.groupBy) {
+        sel.value = InvTableState.groupBy;
+    }
+    renderInventoryTable();
+}
+
+function toggleInventoryGroupCollapse(groupKey) {
+    if (InvTableState.collapsedGroups[groupKey]) {
+        delete InvTableState.collapsedGroups[groupKey];
+    } else {
+        InvTableState.collapsedGroups[groupKey] = true;
+    }
+    renderInventoryTable();
+}
+
+function quickFilterInventoryByValue(colKey, exactVal) {
+    var map = {};
+    map[exactVal === '' ? '__EMPTY__' : exactVal] = true;
+    var existing = InvTableState.colFilters[colKey];
+    if (existing && existing.allowedValues && Object.keys(existing.allowedValues).length === 1 && existing.allowedValues[exactVal === '' ? '__EMPTY__' : exactVal]) {
+        delete InvTableState.colFilters[colKey];
+    } else {
+        InvTableState.colFilters[colKey] = {
+            op: 'contains',
+            text: '',
+            allowedValues: map
+        };
+    }
+    renderInventoryTable();
+}
+
+function clearSingleColumnFilter(colKey) {
+    delete InvTableState.colFilters[colKey];
+    closeInvColumnFilterPopover();
+    renderInventoryTable();
+}
+
+function clearAllInventoryFilters() {
+    InvTableState.colFilters = {};
+    var searchEl = document.getElementById('inv-search');
+    if (searchEl) searchEl.value = '';
+    closeInvColumnFilterPopover();
+    renderInventoryTable();
+}
+
+function closeInvColumnFilterPopover() {
+    InvTableState.openFilterCol = null;
+    var pop = document.getElementById('inv-excel-filter-popover');
+    if (pop) pop.style.display = 'none';
+}
+
+function openInvColumnFilterPopover(colKey, ev) {
+    if (ev && ev.stopPropagation) ev.stopPropagation();
+    var pop = document.getElementById('inv-excel-filter-popover');
+    if (!pop) return;
+
+    if (InvTableState.openFilterCol === colKey && pop.style.display === 'block') {
+        closeInvColumnFilterPopover();
+        return;
+    }
+    InvTableState.openFilterCol = colKey;
+
+    var colMeta = null;
+    for (var c = 0; c < INV_COLUMNS.length; c++) {
+        if (INV_COLUMNS[c].key === colKey) {
+            colMeta = INV_COLUMNS[c];
+            break;
+        }
+    }
+    var colLabel = colMeta ? colMeta.label : colKey;
+    var curFilter = InvTableState.colFilters[colKey] || { op: 'contains', text: '', allowedValues: null };
+
+    // Berechne alle vorkommenden Werte & deren Summen (unter Berücksichtigung der anderen Spaltenfilter)
+    var valCounts = {};
+    var totalRowsForCol = 0;
+    for (var i = 0; i < AppState.devices.length; i++) {
+        var d = AppState.devices[i];
+        if (AppState.selectedScopeId !== 'all' && String(d.scope_id) !== String(AppState.selectedScopeId)) {
+            continue;
+        }
+        d._spInfo = getDeviceSwitchPortInfo(d);
+        var otherMatched = true;
+        var fKeys = Object.keys(InvTableState.colFilters);
+        for (var fk = 0; fk < fKeys.length; fk++) {
+            var k = fKeys[fk];
+            if (k === colKey) continue;
+            if (!deviceMatchesColumnFilter(d, k, InvTableState.colFilters[k])) {
+                otherMatched = false;
+                break;
+            }
+        }
+        if (!otherMatched) continue;
+        totalRowsForCol++;
+        var v = getInventoryChecklistValue(d, colKey);
+        var key = v === '' ? '__EMPTY__' : v;
+        valCounts[key] = (valCounts[key] || 0) + 1;
+    }
+
+    var distinctKeys = Object.keys(valCounts).sort(function (a, b) {
+        if (a === '__EMPTY__') return 1;
+        if (b === '__EMPTY__') return -1;
+        if (colKey === 'ip_address') return ipToNumeric(a) - ipToNumeric(b);
+        return a.toLowerCase().localeCompare(b.toLowerCase());
+    });
+
+    var ops = [
+        { k: 'contains',     l: 'Enthält' },
+        { k: 'not_contains', l: 'Enthält nicht' },
+        { k: 'starts',       l: 'Beginnt mit' },
+        { k: 'ends',         l: 'Endet mit' },
+        { k: 'equals',       l: 'Ist gleich (=)' },
+        { k: 'not_empty',    l: 'Ist nicht leer (zugeordnet)' },
+        { k: 'empty',        l: 'Ist leer (nicht zugeordnet)' }
+    ];
+    var opOpts = '';
+    for (var o = 0; o < ops.length; o++) {
+        opOpts += '<option value="' + ops[o].k + '" ' + (curFilter.op === ops[o].k ? 'selected' : '') + '>' + escapeHtml(ops[o].l) + '</option>';
+    }
+
+    var allChecked = (!curFilter.allowedValues);
+    var checkRowsHtml = '';
+    for (var dk = 0; dk < distinctKeys.length; dk++) {
+        var valKey = distinctKeys[dk];
+        var cnt = valCounts[valKey];
+        var isChecked = allChecked || !!curFilter.allowedValues[valKey];
+        var dispLbl = (valKey === '__EMPTY__') ? '(Leer / Ohne Angabe)' : valKey;
+        checkRowsHtml +=
+            '<label class="inv-flt-val-item" data-search="' + escapeHtml(dispLbl.toLowerCase()) + '" style="display:flex;justify-content:space-between;align-items:center;gap:6px;padding:3px 6px;border-radius:4px;cursor:pointer;font-size:11.5px;">' +
+                '<span style="display:flex;align-items:center;gap:6px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' +
+                    '<input type="checkbox" class="inv-flt-chk" value="' + escapeHtml(valKey) + '" ' + (isChecked ? 'checked' : '') + ' onchange="onInvFilterItemCheckChange()">' +
+                    '<span style="overflow:hidden;text-overflow:ellipsis;' + (valKey === '__EMPTY__' ? 'font-style:italic;color:var(--text-secondary);' : '') + '" title="' + escapeHtml(dispLbl) + '">' + escapeHtml(dispLbl) + '</span>' +
+                '</span>' +
+                '<span class="badge" style="background:rgba(59,130,246,0.16);color:#93c5fd;font-family:monospace;font-size:10px;flex-shrink:0;">' + cnt + '</span>' +
+            '</label>';
+    }
+
+    pop.innerHTML =
+        '<div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--border-color);padding-bottom:8px;margin-bottom:8px;">' +
+            '<div style="font-weight:700;color:#93c5fd;">⧩ Excel-Filter: ' + escapeHtml(colLabel) + '</div>' +
+            '<button class="btn btn-sm" style="padding:1px 6px;" onclick="closeInvColumnFilterPopover()">×</button>' +
+        '</div>' +
+        '<div style="display:flex;gap:6px;margin-bottom:10px;">' +
+            '<button class="btn btn-sm" style="flex:1;justify-content:center;" onclick="sortInventoryBy(\'' + colKey + '\', \'asc\'); closeInvColumnFilterPopover();">▲ Aufsteigend</button>' +
+            '<button class="btn btn-sm" style="flex:1;justify-content:center;" onclick="sortInventoryBy(\'' + colKey + '\', \'desc\'); closeInvColumnFilterPopover();">▼ Absteigend</button>' +
+        '</div>' +
+        '<div style="background:rgba(15,23,42,0.7);border:1px solid var(--border-color);border-radius:6px;padding:8px;margin-bottom:10px;">' +
+            '<div style="font-size:11px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;">Text- / Bedingungsfilter:</div>' +
+            '<select id="inv-flt-op" class="select-input" style="margin-bottom:6px;padding:4px 8px;font-size:12px;" onchange="onInvFilterOpChange()">' + opOpts + '</select>' +
+            '<input type="text" id="inv-flt-text" class="form-input" style="padding:5px 8px;font-size:12px;display:' + ((curFilter.op === 'empty' || curFilter.op === 'not_empty') ? 'none' : 'block') + ';" placeholder="Suchbegriff (z.B. enthält...)" value="' + escapeHtml(curFilter.text || '') + '" onkeydown="if(event.key===\'Enter\') applyInvColumnFilter(\'' + colKey + '\');">' +
+        '</div>' +
+        '<div style="background:rgba(15,23,42,0.7);border:1px solid var(--border-color);border-radius:6px;padding:8px;margin-bottom:10px;">' +
+            '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">' +
+                '<span style="font-size:11px;font-weight:600;color:var(--text-secondary);">Werte &amp; Summen (' + distinctKeys.length + ' Gruppen):</span>' +
+                '<span style="font-size:10.5px;color:#6ee7b7;">∑ ' + totalRowsForCol + '</span>' +
+            '</div>' +
+            '<input type="text" id="inv-flt-list-search" class="form-input" style="padding:4px 8px;font-size:11.5px;margin-bottom:6px;" placeholder="Werte in Liste suchen..." oninput="filterInvPopoverValueList(this.value)">' +
+            '<label style="display:flex;align-items:center;gap:6px;padding:3px 6px;border-bottom:1px solid var(--border-color);margin-bottom:4px;font-weight:700;cursor:pointer;color:#60a5fa;">' +
+                '<input type="checkbox" id="inv-flt-chk-all" ' + (allChecked ? 'checked' : '') + ' onchange="toggleAllInvPopoverValues(this.checked)">' +
+                '<span>(Alle auswählen)</span>' +
+            '</label>' +
+            '<div id="inv-flt-val-list" style="max-height:165px;overflow-y:auto;display:flex;flex-direction:column;gap:1px;">' +
+                checkRowsHtml +
+            '</div>' +
+        '</div>' +
+        '<div style="display:flex;justify-content:space-between;gap:8px;">' +
+            '<button class="btn btn-sm" onclick="clearSingleColumnFilter(\'' + colKey + '\')">✕ Filter löschen</button>' +
+            '<button class="btn btn-sm btn-primary" onclick="applyInvColumnFilter(\'' + colKey + '\')">✓ Filter anwenden</button>' +
+        '</div>';
+
+    pop.style.display = 'block';
+    var rect = (ev && ev.currentTarget) ? ev.currentTarget.getBoundingClientRect() : { left: 200, bottom: 140 };
+    var leftPos = Math.min(window.innerWidth - 325, Math.max(12, rect.left - 120));
+    var topPos = Math.min(window.innerHeight - 440, Math.max(60, rect.bottom + 6));
+    pop.style.left = leftPos + 'px';
+    pop.style.top = topPos + 'px';
+
+    var txtInp = document.getElementById('inv-flt-text');
+    if (txtInp && txtInp.style.display !== 'none') {
+        txtInp.focus();
+    }
+}
+
+function onInvFilterOpChange() {
+    var opEl = document.getElementById('inv-flt-op');
+    var txtEl = document.getElementById('inv-flt-text');
+    if (!opEl || !txtEl) return;
+    if (opEl.value === 'empty' || opEl.value === 'not_empty') {
+        txtEl.style.display = 'none';
+        txtEl.value = '';
+    } else {
+        txtEl.style.display = 'block';
+        txtEl.focus();
+    }
+}
+
+function toggleAllInvPopoverValues(checked) {
+    var boxes = document.querySelectorAll('#inv-flt-val-list .inv-flt-val-item');
+    for (var i = 0; i < boxes.length; i++) {
+        if (boxes[i].style.display === 'none') continue;
+        var chk = boxes[i].querySelector('.inv-flt-chk');
+        if (chk) chk.checked = checked;
+    }
+}
+
+function onInvFilterItemCheckChange() {
+    var allBoxes = document.querySelectorAll('#inv-flt-val-list .inv-flt-chk');
+    var allOn = true;
+    for (var i = 0; i < allBoxes.length; i++) {
+        if (!allBoxes[i].checked) {
+            allOn = false;
+            break;
+        }
+    }
+    var allChk = document.getElementById('inv-flt-chk-all');
+    if (allChk) allChk.checked = allOn;
+}
+
+function filterInvPopoverValueList(q) {
+    var search = String(q || '').toLowerCase().trim();
+    var items = document.querySelectorAll('#inv-flt-val-list .inv-flt-val-item');
+    for (var i = 0; i < items.length; i++) {
+        var hay = items[i].getAttribute('data-search') || '';
+        items[i].style.display = (search === '' || hay.indexOf(search) !== -1) ? 'flex' : 'none';
+    }
+}
+
+function applyInvColumnFilter(colKey) {
+    var opEl = document.getElementById('inv-flt-op');
+    var txtEl = document.getElementById('inv-flt-text');
+    var allBoxes = document.querySelectorAll('#inv-flt-val-list .inv-flt-chk');
+
+    var op = opEl ? opEl.value : 'contains';
+    var txt = txtEl ? txtEl.value.trim() : '';
+
+    var checkedCount = 0;
+    var allowedMap = {};
+    for (var i = 0; i < allBoxes.length; i++) {
+        if (allBoxes[i].checked) {
+            checkedCount++;
+            allowedMap[allBoxes[i].value] = true;
+        }
+    }
+
+    var isAllValuesSelected = (checkedCount === allBoxes.length);
+    if (op !== 'empty' && op !== 'not_empty' && txt === '' && isAllValuesSelected) {
+        delete InvTableState.colFilters[colKey];
+    } else {
+        InvTableState.colFilters[colKey] = {
+            op: op,
+            text: txt,
+            allowedValues: isAllValuesSelected ? null : allowedMap
+        };
+    }
+
+    closeInvColumnFilterPopover();
     renderInventoryTable();
 }
 
@@ -3261,9 +3632,118 @@ function resetInventoryColumns() {
     renderInventoryTable();
 }
 
+function getDeviceGroupInfo(dev, groupByField) {
+    if (groupByField === 'custom_group') {
+        var g = String(dev.custom_group || '').trim();
+        return { key: g || '(Keine eigene Gerätegruppe)', label: g ? ('📁 Gruppe: ' + g) : '📁 Ohne eigene Gerätegruppe', filterCol: 'custom_group', rawVal: g };
+    }
+    if (groupByField === 'device_type') {
+        var t = String(dev.device_type || 'workstation').toUpperCase();
+        return { key: t, label: '🖥️ Gerätetyp: ' + t, filterCol: 'device_type', rawVal: t };
+    }
+    if (groupByField === 'vendor') {
+        var v = String(dev.vendor || '').trim();
+        return { key: v || '(Hersteller unbekannt)', label: '🏭 Hersteller: ' + (v || 'Unbekannt'), filterCol: 'vendor', rawVal: v };
+    }
+    if (groupByField === 'os_guess') {
+        var o = String(dev.os_guess || '').trim();
+        return { key: o || '(OS unbekannt)', label: '💿 Betriebssystem: ' + (o || 'Unbekannt'), filterCol: 'os_guess', rawVal: o };
+    }
+    if (groupByField === 'switch_name') {
+        var sp = dev._spInfo || getDeviceSwitchPortInfo(dev);
+        var sw = (sp && sp.switchName) ? sp.switchName : '(Kein Switch zugeordnet)';
+        return { key: sw, label: '🎛 Switch / Verteiler: ' + sw, filterCol: 'switch_port', rawVal: '' };
+    }
+    if (groupByField === 'scope_name') {
+        var sc = String(dev.scope_name || '').trim() || '(Kein Scope)';
+        return { key: sc, label: '🌐 Netzwerk-Scope: ' + sc, filterCol: 'scope_name', rawVal: sc };
+    }
+    if (groupByField === 'status') {
+        var st = String(dev.status || 'online').toUpperCase();
+        return { key: st, label: (st === 'ONLINE' ? '🟢 Status: ONLINE' : '🔴 Status: OFFLINE'), filterCol: 'status', rawVal: st };
+    }
+    return { key: 'Alle', label: 'Alle Geräte', filterCol: '', rawVal: '' };
+}
+
+function renderSingleInventoryRowHtml(dev, activeCols) {
+    var isVisible = parseInt(dev.is_hidden || 0, 10) === 0;
+    var visChk = '<input type="checkbox" ' + (isVisible ? 'checked' : '') + (userCanEdit() ? '' : ' disabled') +
+                 ' onchange="toggleSingleDeviceHidden(' + dev.id + ', this.checked ? 0 : 1)" title="Im Netzwerkplan anzeigen">';
+    var grpBadge = dev.custom_group
+        ? '<span class="badge" style="background:rgba(245,158,11,0.2);border:1px solid rgba(245,158,11,0.4);color:#fcd34d;cursor:pointer;" onclick="event.stopPropagation(); quickFilterInventoryByValue(\'custom_group\', \'' + escapeHtml(dev.custom_group) + '\');" title="Klicken, um nach Gruppe ' + escapeHtml(dev.custom_group) + ' zu filtern">📁 ' + escapeHtml(dev.custom_group) + '</span>'
+        : '<span style="color:var(--text-secondary);">-</span>';
+    var coreTag = (parseInt(dev.is_core || 0, 10) === 1)
+        ? ' <span class="badge" style="background:rgba(168,85,247,0.25);border:1px solid #a855f7;color:#e9d5ff;" title="Geschützter Core-Switch (Nur für Netzwerkexperten &amp; Admins sichtbar)">🔒 CORE</span>'
+        : '';
+    var alertTag = (dev.alert_mode && dev.alert_mode !== 'none')
+        ? (' <span class="badge" style="background:rgba(239,68,68,0.18);color:#fca5a5;" title="Alarm-Überwachung aktiv (' + escapeHtml(dev.alert_mode) + ')">🔔</span>')
+        : '';
+    var snmpBadge = parseInt(dev.snmp_enabled, 10) === 1
+        ? '<button class="btn btn-sm" style="background:rgba(16,185,129,0.16);border-color:#10b981;color:#34d399;padding:2px 8px;font-size:11px;" onclick="event.stopPropagation(); openSnmpModal(' + dev.id + ');">🔍 SNMP (' + escapeHtml(dev.snmp_sysname || 'Details') + ')</button>'
+        : '-';
+
+    var spCellHtml = '-';
+    if (dev._spInfo && dev._spInfo.switchId) {
+        var spObj = dev._spInfo;
+        var vlanPart = spObj.vlan ? (' <span style="color:#fcd34d;">(V' + spObj.vlan + ')</span>') : '';
+        var outletPart = (spObj.outletInfo && spObj.outletInfo.badgeText)
+            ? (' <span class="badge" style="background:rgba(14,165,233,0.2);border:1px solid rgba(56,189,248,0.45);color:#7dd3fc;font-size:10.5px;margin-left:4px;" title="' + escapeHtml(spObj.outletInfo.fullText) + '">🔌 ' + escapeHtml(spObj.outletInfo.badgeText) + (spObj.outletInfo.room ? (' (' + escapeHtml(spObj.outletInfo.room) + ')') : '') + '</span>')
+            : '';
+        spCellHtml = '<div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;">' +
+            '<button class="btn btn-sm" style="background:rgba(59,130,246,0.15);border-color:rgba(59,130,246,0.45);color:#93c5fd;padding:2px 8px;font-size:11px;font-family:monospace;" ' +
+            'onclick="event.stopPropagation(); openSwitchGraphicModal(' + spObj.switchId + ', false, \'' + escapeHtml(spObj.portName || '') + '\');" ' +
+            'title="Klicken, um Switch ' + escapeHtml(spObj.switchName) + ' an Port ' + escapeHtml(spObj.portName || '-') + ' zu öffnen">' +
+            '🎛 ' + escapeHtml(spObj.switchName) + ' • <b>' + escapeHtml(spObj.portName || '-') + '</b>' + vlanPart +
+            '</button>' +
+            outletPart +
+        '</div>';
+    }
+
+    var osAndBanner = '<div style="font-weight:600;color:#a7f3d0;">' + escapeHtml(dev.os_guess || '-') + '</div>' +
+        (dev.service_info ? ('<div style="font-size:11px;color:var(--text-secondary);margin-top:2px;">' + escapeHtml(dev.service_info) + '</div>') : '');
+
+    var rowHtml = '<tr style="' + (isVisible ? '' : 'opacity:0.45;') + '" onclick="selectDevice(' + dev.id + ')">';
+    for (var colIdx = 0; colIdx < activeCols.length; colIdx++) {
+        var ck = activeCols[colIdx].key;
+        if (ck === 'visible') {
+            rowHtml += '<td style="text-align:center;" onclick="event.stopPropagation();">' + visChk + '</td>';
+        } else if (ck === 'status') {
+            rowHtml += '<td><span class="badge badge-' + dev.status + '">' + escapeHtml(dev.status) + '</span>' + alertTag + '</td>';
+        } else if (ck === 'ip_address') {
+            rowHtml += '<td style="font-family:monospace;font-weight:600;color:#93c5fd;">' + escapeHtml(dev.ip_address) + '</td>';
+        } else if (ck === 'name') {
+            rowHtml += '<td>' + escapeHtml(dev.custom_name || dev.hostname || '-') + coreTag + '</td>';
+        } else if (ck === 'custom_group') {
+            rowHtml += '<td>' + grpBadge + '</td>';
+        } else if (ck === 'device_type') {
+            rowHtml += '<td>' + escapeHtml((dev.device_type || '').toUpperCase()) + '</td>';
+        } else if (ck === 'switch_port') {
+            rowHtml += '<td>' + spCellHtml + '</td>';
+        } else if (ck === 'os_guess') {
+            rowHtml += '<td>' + osAndBanner + '</td>';
+        } else if (ck === 'mac_address') {
+            rowHtml += '<td style="font-family:monospace;">' + escapeHtml(dev.mac_address || '-') + '</td>';
+        } else if (ck === 'vendor') {
+            rowHtml += '<td>' + escapeHtml(dev.vendor || '-') + '</td>';
+        } else if (ck === 'open_ports') {
+            rowHtml += '<td>' + escapeHtml(dev.open_ports || '-') + '</td>';
+        } else if (ck === 'snmp') {
+            rowHtml += '<td>' + snmpBadge + '</td>';
+        } else if (ck === 'scope_name') {
+            rowHtml += '<td>' + escapeHtml(dev.scope_name || '-') + '</td>';
+        } else if (ck === 'last_seen') {
+            rowHtml += '<td style="font-size:11.5px;color:var(--text-secondary);">' + escapeHtml(dev.last_seen || '-') + '</td>';
+        }
+    }
+    rowHtml += '</tr>';
+    return rowHtml;
+}
+
 function renderInventoryTable() {
     var thead = document.getElementById('inventory-thead');
     var tbody = document.getElementById('inventory-tbody');
+    var tfoot = document.getElementById('inventory-tfoot');
+    var summaryBar = document.getElementById('inv-filter-summary-bar');
     var colTogglesBox = document.getElementById('inv-col-toggles');
     var searchEl = document.getElementById('inv-search');
     var search = searchEl ? (searchEl.value || '').toLowerCase() : '';
@@ -3282,7 +3762,7 @@ function renderInventoryTable() {
         colTogglesBox.innerHTML = togHtml;
     }
 
-    // 2. Sortierbare Tabellen-Kopfzeile (<thead>) rendern
+    // 2. Sortier- & Filterbare Tabellen-Kopfzeile (<thead>) im Excel-Stil rendern
     var activeCols = [];
     var thHtml = '<tr>';
     for (var h = 0; h < INV_COLUMNS.length; h++) {
@@ -3295,21 +3775,36 @@ function renderInventoryTable() {
         } else {
             arrow = ' <span style="opacity:0.3;font-size:10px;">⇅</span>';
         }
-        thHtml += '<th style="cursor:pointer;user-select:none;white-space:nowrap;" onclick="sortInventoryBy(\'' + hc.key + '\')" title="Klicken zum Sortieren nach ' + escapeHtml(hc.label) + '">' +
-            escapeHtml(hc.label) + arrow +
+        var hasColFlt = isColumnFilterActive(hc.key);
+        var fltBtnStyle = hasColFlt
+            ? 'background:rgba(245,158,11,0.28);border:1px solid #f59e0b;color:#fde68a;font-weight:700;'
+            : 'background:rgba(255,255,255,0.05);border:1px solid transparent;color:var(--text-secondary);';
+
+        thHtml += '<th style="user-select:none;white-space:nowrap;">' +
+            '<div style="display:flex;align-items:center;justify-content:space-between;gap:6px;">' +
+                '<span style="cursor:pointer;" onclick="sortInventoryBy(\'' + hc.key + '\')" title="Klicken zum Sortieren nach ' + escapeHtml(hc.label) + '">' +
+                    escapeHtml(hc.label) + arrow +
+                '</span>' +
+                '<button type="button" style="cursor:pointer;border-radius:4px;padding:1px 5px;font-size:10.5px;line-height:1.2;' + fltBtnStyle + '" ' +
+                    'onclick="openInvColumnFilterPopover(\'' + hc.key + '\', event)" title="Excel-Spaltenfilter für ' + escapeHtml(hc.label) + ' öffnen">⧩</button>' +
+            '</div>' +
         '</th>';
     }
     thHtml += '</tr>';
     if (thead) thead.innerHTML = thHtml;
 
-    // 3. Geräte filtern & nach gewählter Spalte sortieren
+    // 3. Geräte filtern (Scope + Schnellsuche + Excel-Spaltenfilter) & sortieren
     var searchMacHex = normalizeMacHex(search);
+    var totalInScope = 0;
     var rowsData = [];
+    var activeFilterKeys = Object.keys(InvTableState.colFilters);
+
     for (var i = 0; i < AppState.devices.length; i++) {
         var d = AppState.devices[i];
         if (AppState.selectedScopeId !== 'all' && String(d.scope_id) !== String(AppState.selectedScopeId)) {
             continue;
         }
+        totalInScope++;
         var spInfo = getDeviceSwitchPortInfo(d);
         d._spInfo = spInfo;
         if (search !== '') {
@@ -3334,6 +3829,17 @@ function renderInventoryTable() {
             }
             if (!matched) continue;
         }
+
+        var colMatched = true;
+        for (var fk = 0; fk < activeFilterKeys.length; fk++) {
+            var fCol = activeFilterKeys[fk];
+            if (!deviceMatchesColumnFilter(d, fCol, InvTableState.colFilters[fCol])) {
+                colMatched = false;
+                break;
+            }
+        }
+        if (!colMatched) continue;
+
         rowsData.push(d);
     }
 
@@ -3349,102 +3855,174 @@ function renderInventoryTable() {
         if (sk === 'snmp') {
             return ((parseInt(b.snmp_enabled || 0, 10)) - (parseInt(a.snmp_enabled || 0, 10))) * dir;
         }
-        var va = '';
-        var vb = '';
-        if (sk === 'name') {
-            va = (a.custom_name || a.hostname || '').toLowerCase();
-            vb = (b.custom_name || b.hostname || '').toLowerCase();
-        } else if (sk === 'switch_port') {
-            va = (a._spInfo ? a._spInfo.searchString : '').toLowerCase();
-            vb = (b._spInfo ? b._spInfo.searchString : '').toLowerCase();
-        } else if (sk === 'os_guess') {
-            va = ((a.os_guess || '') + ' ' + (a.service_info || '')).toLowerCase();
-            vb = ((b.os_guess || '') + ' ' + (b.service_info || '')).toLowerCase();
-        } else {
-            va = String(a[sk] || '').toLowerCase();
-            vb = String(b[sk] || '').toLowerCase();
-        }
+        var va = getInventoryCellText(a, sk).toLowerCase();
+        var vb = getInventoryCellText(b, sk).toLowerCase();
         if (va < vb) return -1 * dir;
         if (va > vb) return 1 * dir;
         return (ipToNumeric(a.ip_address) - ipToNumeric(b.ip_address));
     });
 
-    // 4. Tabellenzeilen rendern
-    var html = '';
-    for (var r = 0; r < rowsData.length; r++) {
-        var dev = rowsData[r];
-        var isVisible = parseInt(dev.is_hidden || 0, 10) === 0;
-        var visChk = '<input type="checkbox" ' + (isVisible ? 'checked' : '') + (userCanEdit() ? '' : ' disabled') +
-                     ' onchange="toggleSingleDeviceHidden(' + dev.id + ', this.checked ? 0 : 1)" title="Im Netzwerkplan anzeigen">';
-        var grpInfo = dev.custom_group ? (' <span class="badge" style="background:rgba(245,158,11,0.2);color:#fcd34d;">' + escapeHtml(dev.custom_group) + '</span>') : '';
-        var coreTag = (parseInt(dev.is_core || 0, 10) === 1)
-            ? ' <span class="badge" style="background:rgba(168,85,247,0.25);border:1px solid #a855f7;color:#e9d5ff;" title="Geschützter Core-Switch (Nur für Netzwerkexperten &amp; Admins sichtbar)">🔒 CORE</span>'
-            : '';
-        var alertTag = (dev.alert_mode && dev.alert_mode !== 'none')
-            ? (' <span class="badge" style="background:rgba(239,68,68,0.18);color:#fca5a5;" title="Alarm-Überwachung aktiv (' + escapeHtml(dev.alert_mode) + ')">🔔</span>')
-            : '';
-        var snmpBadge = parseInt(dev.snmp_enabled, 10) === 1
-            ? '<button class="btn btn-sm" style="background:rgba(16,185,129,0.16);border-color:#10b981;color:#34d399;padding:2px 8px;font-size:11px;" onclick="event.stopPropagation(); openSnmpModal(' + dev.id + ');">🔍 SNMP (' + escapeHtml(dev.snmp_sysname || 'Details') + ')</button>'
-            : '-';
+    InvTableState.lastFilteredRows = rowsData;
 
-        var spCellHtml = '-';
-        if (dev._spInfo && dev._spInfo.switchId) {
-            var spObj = dev._spInfo;
-            var vlanPart = spObj.vlan ? (' <span style="color:#fcd34d;">(V' + spObj.vlan + ')</span>') : '';
-            var outletPart = (spObj.outletInfo && spObj.outletInfo.badgeText)
-                ? (' <span class="badge" style="background:rgba(14,165,233,0.2);border:1px solid rgba(56,189,248,0.45);color:#7dd3fc;font-size:10.5px;margin-left:4px;" title="' + escapeHtml(spObj.outletInfo.fullText) + '">🔌 ' + escapeHtml(spObj.outletInfo.badgeText) + (spObj.outletInfo.room ? (' (' + escapeHtml(spObj.outletInfo.room) + ')') : '') + '</span>')
-                : '';
-            spCellHtml = '<div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;">' +
-                '<button class="btn btn-sm" style="background:rgba(59,130,246,0.15);border-color:rgba(59,130,246,0.45);color:#93c5fd;padding:2px 8px;font-size:11px;font-family:monospace;" ' +
-                'onclick="event.stopPropagation(); openSwitchGraphicModal(' + spObj.switchId + ', false, \'' + escapeHtml(spObj.portName || '') + '\');" ' +
-                'title="Klicken, um Switch ' + escapeHtml(spObj.switchName) + ' an Port ' + escapeHtml(spObj.portName || '-') + ' zu öffnen">' +
-                '🎛 ' + escapeHtml(spObj.switchName) + ' • <b>' + escapeHtml(spObj.portName || '-') + '</b>' + vlanPart +
-                '</button>' +
-                outletPart +
-            '</div>';
+    // 4. Summen & Gruppen-Auswertung berechnen
+    var onlineTotal = 0;
+    var offlineTotal = 0;
+    var snmpTotal = 0;
+    var chipDimension = InvTableState.groupBy || 'custom_group';
+    var groupSummaries = {};
+    var hasAnyCustomGroup = false;
+
+    for (var sIdx = 0; sIdx < rowsData.length; sIdx++) {
+        var sd = rowsData[sIdx];
+        if (sd.status === 'online') onlineTotal++; else offlineTotal++;
+        if (parseInt(sd.snmp_enabled || 0, 10) === 1) snmpTotal++;
+        if (sd.custom_group && String(sd.custom_group).trim() !== '') {
+            hasAnyCustomGroup = true;
+        }
+    }
+
+    // Falls keine eigenen Gerätegruppen vergeben sind und keine Gruppierung gewählt wurde, zeige in den Summen-Chips standardmäßig die Summen pro Gerätetyp
+    if (!InvTableState.groupBy && !hasAnyCustomGroup) {
+        chipDimension = 'device_type';
+    }
+
+    for (var gIdx = 0; gIdx < rowsData.length; gIdx++) {
+        var gd = rowsData[gIdx];
+        var gInfo = getDeviceGroupInfo(gd, chipDimension);
+        if (!groupSummaries[gInfo.key]) {
+            groupSummaries[gInfo.key] = {
+                key: gInfo.key,
+                label: gInfo.label,
+                filterCol: gInfo.filterCol,
+                rawVal: gInfo.rawVal,
+                items: [],
+                online: 0,
+                offline: 0,
+                snmp: 0
+            };
+        }
+        groupSummaries[gInfo.key].items.push(gd);
+        if (gd.status === 'online') groupSummaries[gInfo.key].online++; else groupSummaries[gInfo.key].offline++;
+        if (parseInt(gd.snmp_enabled || 0, 10) === 1) groupSummaries[gInfo.key].snmp++;
+    }
+
+    // 5. Filter- & Gruppen-Summen-Leiste (#inv-filter-summary-bar) rendern
+    if (summaryBar) {
+        var activeFltBadges = '';
+        for (var af = 0; af < activeFilterKeys.length; af++) {
+            var afk = activeFilterKeys[af];
+            if (!isColumnFilterActive(afk)) continue;
+            var afObj = InvTableState.colFilters[afk];
+            var colTitle = afk;
+            for (var cm = 0; cm < INV_COLUMNS.length; cm++) {
+                if (INV_COLUMNS[cm].key === afk) { colTitle = INV_COLUMNS[cm].label; break; }
+            }
+            var desc = '';
+            if (afObj.op === 'empty') desc = 'ist leer';
+            else if (afObj.op === 'not_empty') desc = 'nicht leer';
+            else if (afObj.text) desc = afObj.op + ' "' + afObj.text + '"';
+            if (afObj.allowedValues) {
+                var selKeys = Object.keys(afObj.allowedValues);
+                desc += (desc ? ' + ' : '') + selKeys.length + ' Wert(e)';
+            }
+            activeFltBadges += '<span class="badge" style="background:rgba(245,158,11,0.2);border:1px solid #f59e0b;color:#fde68a;display:inline-flex;align-items:center;gap:6px;cursor:pointer;" onclick="clearSingleColumnFilter(\'' + afk + '\')" title="Klicken zum Entfernen dieses Filters">' +
+                '⧩ ' + escapeHtml(colTitle) + ': ' + escapeHtml(desc) + ' <b>✕</b>' +
+            '</span>';
         }
 
-        var osAndBanner = '<div style="font-weight:600;color:#a7f3d0;">' + escapeHtml(dev.os_guess || '-') + '</div>' +
-            (dev.service_info ? ('<div style="font-size:11px;color:var(--text-secondary);margin-top:2px;">' + escapeHtml(dev.service_info) + '</div>') : '');
+        var groupKeysSorted = Object.keys(groupSummaries).sort(function (a, b) {
+            return groupSummaries[b].items.length - groupSummaries[a].items.length;
+        });
+        var groupChipsHtml = '';
+        for (var gc = 0; gc < groupKeysSorted.length; gc++) {
+            var gItem = groupSummaries[groupKeysSorted[gc]];
+            var chipClick = gItem.filterCol
+                ? 'onclick="quickFilterInventoryByValue(\'' + gItem.filterCol + '\', \'' + escapeHtml(gItem.rawVal) + '\')" style="cursor:pointer;background:rgba(59,130,246,0.14);border:1px solid rgba(59,130,246,0.38);color:#bfdbfe;padding:2px 8px;border-radius:999px;font-size:11px;display:inline-flex;align-items:center;gap:5px;" title="Klicken, um auf ' + escapeHtml(gItem.key) + ' zu filtern"'
+                : 'style="background:rgba(59,130,246,0.14);border:1px solid rgba(59,130,246,0.38);color:#bfdbfe;padding:2px 8px;border-radius:999px;font-size:11px;display:inline-flex;align-items:center;gap:5px;"';
+            groupChipsHtml += '<span ' + chipClick + '>' +
+                '<span>' + escapeHtml(gItem.key) + ':</span>' +
+                '<b style="color:#34d399;font-family:monospace;">' + gItem.items.length + '</b>' +
+                (gItem.offline > 0 ? ('<span style="color:#fca5a5;font-size:10px;">(' + gItem.offline + ' Off)</span>') : '') +
+            '</span>';
+        }
 
-        html += '<tr style="' + (isVisible ? '' : 'opacity:0.45;') + '" onclick="selectDevice(' + dev.id + ')">';
-        for (var colIdx = 0; colIdx < activeCols.length; colIdx++) {
-            var ck = activeCols[colIdx].key;
-            if (ck === 'visible') {
-                html += '<td style="text-align:center;" onclick="event.stopPropagation();">' + visChk + '</td>';
-            } else if (ck === 'status') {
-                html += '<td><span class="badge badge-' + dev.status + '">' + escapeHtml(dev.status) + '</span>' + alertTag + '</td>';
-            } else if (ck === 'ip_address') {
-                html += '<td style="font-family:monospace;font-weight:600;color:#93c5fd;">' + escapeHtml(dev.ip_address) + '</td>';
-            } else if (ck === 'name') {
-                html += '<td>' + escapeHtml(dev.custom_name || dev.hostname || '-') + grpInfo + coreTag + '</td>';
-            } else if (ck === 'device_type') {
-                html += '<td>' + escapeHtml((dev.device_type || '').toUpperCase()) + '</td>';
-            } else if (ck === 'switch_port') {
-                html += '<td>' + spCellHtml + '</td>';
-            } else if (ck === 'os_guess') {
-                html += '<td>' + osAndBanner + '</td>';
-            } else if (ck === 'mac_address') {
-                html += '<td style="font-family:monospace;">' + escapeHtml(dev.mac_address || '-') + '</td>';
-            } else if (ck === 'vendor') {
-                html += '<td>' + escapeHtml(dev.vendor || '-') + '</td>';
-            } else if (ck === 'open_ports') {
-                html += '<td>' + escapeHtml(dev.open_ports || '-') + '</td>';
-            } else if (ck === 'snmp') {
-                html += '<td>' + snmpBadge + '</td>';
-            } else if (ck === 'scope_name') {
-                html += '<td>' + escapeHtml(dev.scope_name || '-') + '</td>';
-            } else if (ck === 'last_seen') {
-                html += '<td style="font-size:11.5px;color:var(--text-secondary);">' + escapeHtml(dev.last_seen || '-') + '</td>';
+        var hasAnyFilter = (search !== '' || activeFltBadges !== '');
+        summaryBar.innerHTML =
+            '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">' +
+                '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">' +
+                    '<span style="font-weight:700;color:#f8fafc;">∑ Gefiltert: <span style="color:#60a5fa;">' + rowsData.length + '</span> von ' + totalInScope + ' Geräten</span>' +
+                    '<span class="badge badge-online">' + onlineTotal + ' Online</span>' +
+                    (offlineTotal > 0 ? ('<span class="badge badge-offline">' + offlineTotal + ' Offline</span>') : '') +
+                    '<span class="badge badge-snmp">' + snmpTotal + ' SNMP</span>' +
+                    activeFltBadges +
+                '</div>' +
+                (hasAnyFilter ? '<button class="btn btn-sm" style="padding:2px 8px;font-size:11px;border-color:#ef4444;color:#fca5a5;" onclick="clearAllInventoryFilters()">✕ Alle Filter zurücksetzen</button>' : '<span style="font-size:11px;color:var(--text-secondary);">💡 Tipp: Klicke auf <b>⧩</b> im Spaltenkopf für Excel-Filter („Enthält", Werteliste &amp; Summen)</span>') +
+            '</div>' +
+            (groupChipsHtml ? ('<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;"><span style="font-size:11px;color:var(--text-secondary);font-weight:600;">Gruppen-Summen (' + groupKeysSorted.length + '):</span>' + groupChipsHtml + '</div>') : '');
+    }
+
+    // 6. Tabellenzeilen (flach oder gruppiert mit Zwischensummen) rendern
+    var html = '';
+    var colSpanCount = Math.max(1, activeCols.length);
+
+    if (InvTableState.groupBy && rowsData.length > 0) {
+        var grpOrder = Object.keys(groupSummaries).sort(function (a, b) {
+            return groupSummaries[b].items.length - groupSummaries[a].items.length;
+        });
+        for (var gi = 0; gi < grpOrder.length; gi++) {
+            var grpObj = groupSummaries[grpOrder[gi]];
+            var isCollapsed = !!InvTableState.collapsedGroups[grpObj.key];
+            var safeGKey = grpObj.key.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+            html +=
+                '<tr style="background:rgba(30,41,59,0.92);border-top:2px solid #334155;cursor:pointer;" onclick="toggleInventoryGroupCollapse(\'' + safeGKey + '\')">' +
+                    '<td colspan="' + colSpanCount + '" style="padding:8px 12px;">' +
+                        '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">' +
+                            '<div style="display:flex;align-items:center;gap:8px;font-weight:700;color:#f8fafc;font-size:13px;">' +
+                                '<span style="color:#60a5fa;width:14px;display:inline-block;">' + (isCollapsed ? '▶' : '▾') + '</span>' +
+                                '<span>' + escapeHtml(grpObj.label) + '</span>' +
+                            '</div>' +
+                            '<div style="display:flex;align-items:center;gap:8px;font-size:12px;">' +
+                                '<span class="badge" style="background:rgba(59,130,246,0.22);border:1px solid #3b82f6;color:#93c5fd;font-family:monospace;">∑ Summe: ' + grpObj.items.length + (grpObj.items.length === 1 ? ' Gerät' : ' Geräte') + '</span>' +
+                                '<span class="badge badge-online">' + grpObj.online + ' Online</span>' +
+                                (grpObj.offline > 0 ? ('<span class="badge badge-offline">' + grpObj.offline + ' Offline</span>') : '') +
+                                (grpObj.snmp > 0 ? ('<span class="badge badge-snmp">' + grpObj.snmp + ' SNMP</span>') : '') +
+                            '</div>' +
+                        '</div>' +
+                    '</td>' +
+                '</tr>';
+
+            if (!isCollapsed) {
+                for (var itemIdx = 0; itemIdx < grpObj.items.length; itemIdx++) {
+                    html += renderSingleInventoryRowHtml(grpObj.items[itemIdx], activeCols);
+                }
             }
         }
-        html += '</tr>';
+    } else {
+        for (var r = 0; r < rowsData.length; r++) {
+            html += renderSingleInventoryRowHtml(rowsData[r], activeCols);
+        }
     }
 
     if (html === '') {
-        html = '<tr><td colspan="' + Math.max(1, activeCols.length) + '" style="text-align:center;color:var(--text-secondary);padding:24px;">Keine passenden Geräte für diese Auswahl gefunden.</td></tr>';
+        html = '<tr><td colspan="' + colSpanCount + '" style="text-align:center;color:var(--text-secondary);padding:24px;">Keine passenden Geräte für die aktiven Filter gefunden.</td></tr>';
     }
     tbody.innerHTML = html;
+
+    if (tfoot) {
+        if (rowsData.length > 0) {
+            tfoot.innerHTML =
+                '<tr style="background:rgba(15,23,42,0.95);border-top:2px solid #3b82f6;font-weight:700;">' +
+                    '<td colspan="' + colSpanCount + '" style="padding:10px 14px;color:#e2e8f0;font-size:12.5px;">' +
+                        '∑ Gesamtsumme (aktuelle Filterauswahl): <span style="color:#60a5fa;">' + rowsData.length + ' Geräte</span> ' +
+                        '&nbsp;•&nbsp; <span style="color:#34d399;">' + onlineTotal + ' Online</span> ' +
+                        '&nbsp;•&nbsp; <span style="color:#fca5a5;">' + offlineTotal + ' Offline</span> ' +
+                        '&nbsp;•&nbsp; <span style="color:#93c5fd;">' + snmpTotal + ' SNMP-Switches/Hosts</span>' +
+                    '</td>' +
+                '</tr>';
+        } else {
+            tfoot.innerHTML = '';
+        }
+    }
 }
 
 function normalizeSwitchVlansMap(rawVlans) {
@@ -5394,15 +5972,21 @@ function applySwitchPortConfig(portKey) {
 }
 
 function exportInventoryCsv() {
-    var rows = [['Status', 'IP', 'Name', 'Gruppe', 'Typ', 'Betriebssystem', 'Dienste_Banner_TTL', 'MAC', 'Hersteller', 'Ports', 'SNMP_Name', 'Scope']];
-    for (var i = 0; i < AppState.devices.length; i++) {
-        var d = AppState.devices[i];
+    var list = (InvTableState.lastFilteredRows && InvTableState.lastFilteredRows.length > 0) ? InvTableState.lastFilteredRows : AppState.devices;
+    var rows = [['Status', 'IP', 'Name', 'Gruppe', 'Typ', 'Switch_Port_Dose', 'Betriebssystem', 'Dienste_Banner_TTL', 'MAC', 'Hersteller', 'Ports', 'SNMP_Name', 'Scope']];
+    for (var i = 0; i < list.length; i++) {
+        var d = list[i];
+        var sp = d._spInfo || getDeviceSwitchPortInfo(d);
+        var spTxt = (sp && sp.switchId)
+            ? (sp.switchName + ' Port ' + (sp.portName || '-') + (sp.outletInfo && sp.outletInfo.fullText ? (' [' + sp.outletInfo.fullText + ']') : ''))
+            : '';
         rows.push([
             d.status,
             d.ip_address,
             d.custom_name || d.hostname || '',
             d.custom_group || '',
             d.device_type,
+            spTxt,
             d.os_guess || '',
             d.service_info || '',
             d.mac_address || '',
@@ -6402,9 +6986,10 @@ function renderAlertsModal() {
     if (alerts.length === 0) {
         html += '<div style="padding:24px;text-align:center;color:var(--text-secondary);background:rgba(15,23,42,0.4);border-radius:8px;border:1px solid var(--border-color);">Keine Alarme oder Netzwerk-Anomalien protokolliert – alle überwachten Systeme und Switch-Ports verhalten sich unauffällig.</div>';
     } else {
-        html += '<table class="data-table"><thead><tr><th>Zeitpunkt</th><th>Kategorie / Typ</th><th>Gerät / Switch</th><th>IP-Adresse</th><th>Details &amp; Steckplatz</th></tr></thead><tbody>';
+        html += '<table class="data-table"><thead><tr><th>Zeitpunkt</th><th>Kategorie / Typ</th><th>Gerät / Switch</th><th>IP-Adresse</th><th>Details &amp; Steckplatz</th><th>Quittierung &amp; Kommentar</th></tr></thead><tbody>';
         for (var a = 0; a < alerts.length; a++) {
             var al = alerts[a];
+            var alId = parseInt(al.id, 10);
             var aType = al.alert_type || al.event_type || 'offline_alarm';
             var isUnack = parseInt(al.is_acknowledged || 0, 10) === 0;
             var evBadge = '<span class="badge badge-offline">🔴 OFFLINE ALARM</span>';
@@ -6430,18 +7015,85 @@ function renderAlertsModal() {
                 ? 'onclick="closeAlertsModal(); selectDevice(' + parseInt(al.device_id, 10) + ');" style="cursor:pointer;color:#60a5fa;text-decoration:underline;" title="Gerät im Netzwerkplan öffnen"'
                 : '';
 
-            html += '<tr style="' + (isUnack ? 'background:rgba(239,68,68,0.08);font-weight:600;' : 'opacity:0.78;') + '">' +
+            var ackCellHtml = '';
+            if (!isUnack) {
+                var ackMeta = 'Quittiert' + (al.ack_by ? (' von <b>' + escapeHtml(al.ack_by) + '</b>') : '') + (al.ack_at ? (' (' + escapeHtml(String(al.ack_at).substring(0, 16)) + ')') : '');
+                ackCellHtml =
+                    '<div style="display:flex;flex-direction:column;gap:4px;min-width:210px;">' +
+                        '<div style="display:flex;align-items:center;justify-content:space-between;gap:6px;">' +
+                            '<span style="font-size:11px;color:#6ee7b7;">✅ ' + ackMeta + '</span>' +
+                            (userCanEdit() ? '<button class="btn btn-sm" style="padding:1px 6px;font-size:10.5px;" onclick="toggleAlertCommentBox(' + alId + ')" title="Quittierungs-Kommentar bearbeiten">💬✎</button>' : '') +
+                        '</div>' +
+                        (al.ack_comment
+                            ? '<div style="background:rgba(16,185,129,0.1);border:1px solid rgba(16,185,129,0.3);border-radius:5px;padding:4px 8px;font-size:11.5px;color:#e2e8f0;">💬 ' + escapeHtml(al.ack_comment) + '</div>'
+                            : '') +
+                        (userCanEdit()
+                            ? '<div id="alert-ack-box-' + alId + '" style="display:none;gap:4px;margin-top:2px;">' +
+                                  '<input type="text" id="alert-ack-inp-' + alId + '" class="form-input" style="padding:4px 7px;font-size:11.5px;" placeholder="Kommentar zur Quittierung..." value="' + escapeHtml(al.ack_comment || '') + '" onkeydown="if(event.key===\'Enter\') ackSingleAlert(' + alId + ');">' +
+                                  '<button class="btn btn-sm btn-primary" style="padding:3px 8px;font-size:11px;" onclick="ackSingleAlert(' + alId + ')">💾</button>' +
+                              '</div>'
+                            : '') +
+                    '</div>';
+            } else {
+                if (userCanEdit()) {
+                    ackCellHtml =
+                        '<div style="display:flex;gap:4px;align-items:center;min-width:220px;">' +
+                            '<input type="text" id="alert-ack-inp-' + alId + '" class="form-input" style="padding:4px 7px;font-size:11.5px;flex:1;" placeholder="Kommentar (optional)..." onkeydown="if(event.key===\'Enter\') ackSingleAlert(' + alId + ');">' +
+                            '<button class="btn btn-sm btn-success" style="padding:4px 9px;font-size:11px;white-space:nowrap;" onclick="ackSingleAlert(' + alId + ')" title="Alarm mit Kommentar quittieren">✓ Quittieren</button>' +
+                        '</div>';
+                } else {
+                    ackCellHtml = '<span class="badge badge-offline" style="font-size:10.5px;">Offen (Unquittiert)</span>';
+                }
+            }
+
+            html += '<tr style="' + (isUnack ? 'background:rgba(239,68,68,0.08);font-weight:600;' : 'opacity:0.84;') + '">' +
                 '<td style="white-space:nowrap;font-size:12px;">' + escapeHtml(al.created_at || '-') + (isUnack ? ' <span class="badge badge-offline" style="font-size:9px;">NEU</span>' : '') + '</td>' +
                 '<td style="white-space:nowrap;">' + evBadge + '</td>' +
                 '<td><b ' + devClickAttr + '>' + escapeHtml(al.device_name || '-') + '</b></td>' +
                 '<td style="font-family:monospace;color:#93c5fd;">' + escapeHtml(al.ip_address || '-') + '</td>' +
                 '<td style="font-size:12px;">' + escapeHtml(al.message || '') + '</td>' +
+                '<td style="font-weight:400;">' + ackCellHtml + '</td>' +
             '</tr>';
         }
         html += '</tbody></table>';
     }
 
     body.innerHTML = html;
+}
+
+function toggleAlertCommentBox(alertId) {
+    var box = document.getElementById('alert-ack-box-' + alertId);
+    var inp = document.getElementById('alert-ack-inp-' + alertId);
+    if (!box) return;
+    box.style.display = (box.style.display === 'none') ? 'flex' : 'none';
+    if (box.style.display === 'flex' && inp) {
+        inp.focus();
+    }
+}
+
+function ackSingleAlert(alertId) {
+    if (!userCanEdit()) {
+        showToast('Keine Berechtigung: Nur Operatoren, Netzwerkexperten und Administratoren dürfen Alarme quittieren.');
+        return;
+    }
+    var inp = document.getElementById('alert-ack-inp-' + alertId);
+    var comment = inp ? inp.value.trim() : '';
+    fetch('api.php?action=ack_alerts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: alertId, comment: comment })
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (res) {
+        if (res.ok) {
+            showToast('✅ Alarm quittiert' + (comment ? (' („' + comment + '“)') : '') + '.');
+            loadTopologyData(function () {
+                renderAlertsModal();
+            });
+        } else {
+            showToast('Fehler: ' + (res.error || 'Unbekannt'));
+        }
+    });
 }
 
 function saveAdminAnomalyConfig() {
@@ -6469,18 +7121,28 @@ function saveAdminAnomalyConfig() {
 }
 
 function ackAllAlerts() {
+    if (!userCanEdit()) {
+        showToast('Keine Berechtigung: Nur Operatoren, Netzwerkexperten und Administratoren dürfen Alarme quittieren.');
+        return;
+    }
+    var comment = prompt('Optionaler Quittierungs-Kommentar für alle offenen Alarme (z.B. „Geprüft / Wartung"): ', '');
+    if (comment === null) {
+        return; // Abbrechen geklickt
+    }
     fetch('api.php?action=ack_alerts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({})
+        body: JSON.stringify({ comment: comment.trim() })
     })
     .then(function (r) { return r.json(); })
     .then(function (res) {
         if (res.ok) {
-            showToast('Alle Alarme als gelesen markiert.');
+            showToast('✅ Alle offenen Alarme wurden quittiert.');
             loadTopologyData(function () {
                 renderAlertsModal();
             });
+        } else {
+            showToast('Fehler: ' + (res.error || 'Unbekannt'));
         }
     });
 }
@@ -6839,6 +7501,7 @@ document.addEventListener('DOMContentLoaded', function () {
     initFloatingInspectorDrag();
     document.addEventListener('click', function () {
         closeAllDropdowns();
+        closeInvColumnFilterPopover();
     });
     loadTopologyData(function () {
         if (AppState.devices.length > 0) {
