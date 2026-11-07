@@ -465,7 +465,7 @@ $isAdmin = ($userRole === 'admin');
                     </div>
 
                     <!-- 🛡️ Automatischer Anomalie- & Sicherheits-Wächter (Layer 2 / Layer 3 Watchdogs) -->
-                    <div style="background:var(--bg-panel);border:1px solid rgba(245,158,11,0.45);border-radius:10px;padding:18px;display:flex;flex-direction:column;gap:14px;">
+                    <div id="admin-anomaly-card" style="background:var(--bg-panel);border:1px solid rgba(245,158,11,0.45);border-radius:10px;padding:18px;display:flex;flex-direction:column;gap:14px;">
                         <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
                             <div>
                                 <h3 style="font-size:15px;color:#fcd34d;">🛡️ Automatischer Anomalie- &amp; Sicherheits-Wächter (Layer 2 / Layer 3 Watchdogs)</h3>

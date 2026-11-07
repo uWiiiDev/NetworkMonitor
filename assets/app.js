@@ -5519,6 +5519,24 @@ function closeAlertsModal() {
     document.getElementById('alerts-modal').classList.remove('open');
 }
 
+function jumpToAdminAnomalySettings() {
+    closeAlertsModal();
+    var admBtn = document.getElementById('nav-tab-admin');
+    if (admBtn) {
+        switchTab('admin', admBtn);
+    }
+    setTimeout(function () {
+        var card = document.getElementById('admin-anomaly-card');
+        if (card) {
+            card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            card.style.boxShadow = '0 0 0 3px #f59e0b';
+            setTimeout(function () { card.style.boxShadow = ''; }, 1800);
+        }
+        var inp = document.getElementById('adm-anom-maxmacs');
+        if (inp) inp.focus();
+    }, 80);
+}
+
 function renderAlertsModal() {
     var body = document.getElementById('alerts-modal-body');
     if (!body) return;
@@ -5541,7 +5559,7 @@ function renderAlertsModal() {
         '<div style="background:rgba(15,23,42,0.85);border:1px solid rgba(245,158,11,0.4);border-radius:8px;padding:12px;margin-bottom:10px;">' +
             '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;margin-bottom:8px;">' +
                 '<div style="font-size:12px;font-weight:700;color:#fcd34d;text-transform:uppercase;">🛡️ Automatischer Anomalie- &amp; Sicherheits-Wächter (Layer 2 / Layer 3)</div>' +
-                (userIsAdmin() ? '<button class="btn btn-sm" style="padding:2px 8px;font-size:11px;border-color:rgba(245,158,11,0.5);color:#fcd34d;" onclick="closeAlertsModal(); switchView(\'admin\');">⚙️ Schwellenwerte anpassen</button>' : '') +
+                (userIsAdmin() ? '<button class="btn btn-sm" style="padding:2px 8px;font-size:11px;border-color:rgba(245,158,11,0.5);color:#fcd34d;" onclick="jumpToAdminAnomalySettings()">⚙️ Schwellenwerte anpassen</button>' : '') +
             '</div>' +
             '<div style="display:flex;gap:8px;flex-wrap:wrap;font-size:11.5px;">' +
                 '<span class="badge" style="padding:4px 8px;background:' + (arpOn ? 'rgba(16,185,129,0.18);border:1px solid #10b981;color:#34d399;' : 'rgba(148,163,184,0.15);color:#94a3b8;') + '">⚡ ARP-Spoofing / IP-Konflikt: ' + (arpOn ? 'AKTIV' : 'AUS') + '</span>' +
