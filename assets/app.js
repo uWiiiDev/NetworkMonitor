@@ -2233,9 +2233,11 @@ function selectDevice(deviceId) {
     var panel = document.getElementById('inspector-content');
     var titleEl = document.getElementById('inspector-title');
     var expBtn = document.getElementById('btn-export-device-details');
+    var copyAllBtn = document.getElementById('btn-copy-device-details');
     if (!dev) {
         if (titleEl) titleEl.textContent = 'Geräte-Details';
         if (expBtn) expBtn.style.display = 'none';
+        if (copyAllBtn) copyAllBtn.style.display = 'none';
         panel.innerHTML = '<p style="color:var(--text-secondary);font-size:13px;">Klicke auf ein Gerät, um Details, offene Ports, SNMP-Switch-Daten, Gruppen und Port-Zuordnungen anzuzeigen.</p>';
         return;
     }
@@ -2246,6 +2248,9 @@ function selectDevice(deviceId) {
     }
     if (expBtn) {
         expBtn.style.display = 'inline-flex';
+    }
+    if (copyAllBtn) {
+        copyAllBtn.style.display = 'inline-flex';
     }
 
     var currentParentId = 0;
@@ -2305,9 +2310,9 @@ function selectDevice(deviceId) {
                 '<button class="btn btn-sm btn-primary" onclick="openSnmpModal(' + dev.id + ')">🔍 Alle SNMP-Daten öffnen</button>' +
             '</div>' +
             '<div class="kv-grid" style="margin-top:2px;">' +
-                '<div class="kv-label">sysName</div><div class="kv-val">' + escapeHtml(dev.snmp_sysname || '-') + '</div>' +
-                (snmpDetails.deviceModel ? ('<div class="kv-label">Modell</div><div class="kv-val">' + escapeHtml(snmpDetails.deviceModel) + '</div>') : '') +
-                (snmpDetails.serialNumber ? ('<div class="kv-label">Seriennummer</div><div class="kv-val" style="font-family:monospace;">' + escapeHtml(snmpDetails.serialNumber) + '</div>') : '') +
+                '<div class="kv-label">sysName</div><div class="kv-val">' + renderCopyableValue(dev.snmp_sysname, 'SNMP sysName', '') + '</div>' +
+                (snmpDetails.deviceModel ? ('<div class="kv-label">Modell</div><div class="kv-val">' + renderCopyableValue(snmpDetails.deviceModel, 'Gerätemodell', '') + '</div>') : '') +
+                (snmpDetails.serialNumber ? ('<div class="kv-label">Seriennummer</div><div class="kv-val">' + renderCopyableValue(snmpDetails.serialNumber, 'Seriennummer', 'font-family:monospace;color:#fcd34d;') + '</div>') : '') +
                 (snmpDetails.sysUpTime ? ('<div class="kv-label">SNMP Uptime</div><div class="kv-val" style="color:#34d399;">' + escapeHtml(snmpDetails.sysUpTime) + '</div>') : '') +
                 (dev.snmp_location ? ('<div class="kv-label">Standort</div><div class="kv-val">' + escapeHtml(dev.snmp_location) + '</div>') : '') +
                 '<div class="kv-label">Interfaces</div><div class="kv-val">' + ifCount + ' Ports / ' + macCount + ' gelernte MACs</div>' +
@@ -2374,12 +2379,14 @@ function selectDevice(deviceId) {
     var spInfo = getDeviceSwitchPortInfo(dev);
     var switchPortInspectorHtml = '<span style="color:var(--text-secondary);">Kein Switch-Port zugeordnet</span>';
     if (spInfo && spInfo.switchId) {
+        var spCopyText = spInfo.switchName + ' (' + spInfo.switchIp + ') - Port ' + (spInfo.portName || '-') + (spInfo.vlan ? (' [VLAN ' + spInfo.vlan + ']') : '');
         switchPortInspectorHtml =
             '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">' +
                 '<span style="font-weight:700;color:#f8fafc;">' + escapeHtml(spInfo.switchName) + '</span>' +
                 '<span class="badge" style="background:rgba(16,185,129,0.2);border:1px solid #10b981;color:#34d399;font-family:monospace;">Port ' + escapeHtml(spInfo.portName || '-') + '</span>' +
                 (spInfo.vlan ? '<span class="badge" style="background:rgba(245,158,11,0.22);border:1px solid #f59e0b;color:#fcd34d;font-family:monospace;">VLAN ' + spInfo.vlan + '</span>' : '') +
                 '<button class="btn btn-sm" style="padding:2px 7px;font-size:11px;border-color:#10b981;color:#6ee7b7;" onclick="openSwitchGraphicModal(' + spInfo.switchId + ', false, \'' + escapeHtml(spInfo.portName || '') + '\')">🎛 Port öffnen</button>' +
+                '<button type="button" class="btn btn-sm" style="padding:1px 6px;font-size:10.5px;border-color:rgba(148,163,184,0.35);color:#cbd5e1;" onclick="copyToClipboard(\'' + escapeHtml(spCopyText) + '\', \'Switch-Port\')" title="Switch &amp; Port kopieren">📋</button>' +
             '</div>';
     }
 
@@ -2462,13 +2469,13 @@ function selectDevice(deviceId) {
             '<div class="kv-label">Status</div><div class="kv-val"><span class="badge badge-' + dev.status + '">' + dev.status.toUpperCase() + '</span> (' + (dev.latency_ms || '1.0') + ' ms)</div>' +
             '<div class="kv-label">Steckplatz (Port)</div><div class="kv-val">' + switchPortInspectorHtml + '</div>' +
             '<div class="kv-label">Alarm-Modus</div><div class="kv-val">' + alertBadgeHtml + '</div>' +
-            '<div class="kv-label">IP-Adresse</div><div class="kv-val">' + escapeHtml(dev.ip_address) + '</div>' +
-            '<div class="kv-label">MAC-Adresse</div><div class="kv-val" style="font-family:monospace;">' + escapeHtml(dev.mac_address || 'Nicht im lokalen ARP') + '</div>' +
-            '<div class="kv-label">Hersteller</div><div class="kv-val">' + escapeHtml(dev.vendor || 'Unbekannt') + '</div>' +
-            '<div class="kv-label">Hostname</div><div class="kv-val">' + escapeHtml(dev.hostname || '-') + '</div>' +
-            '<div class="kv-label">Betriebssystem</div><div class="kv-val" style="color:#a7f3d0;font-weight:600;">' + escapeHtml(dev.os_guess || '-') + '</div>' +
-            '<div class="kv-label">Dienste / Banner</div><div class="kv-val" style="font-size:11.5px;color:#93c5fd;">' + escapeHtml(dev.service_info || '-') + '</div>' +
-            '<div class="kv-label">Offene Ports</div><div class="kv-val">' + escapeHtml(dev.open_ports || 'Keine Standard-TCP-Ports offen') + '</div>' +
+            '<div class="kv-label">IP-Adresse</div><div class="kv-val">' + renderCopyableValue(dev.ip_address, 'IP-Adresse', 'font-family:monospace;font-weight:700;color:#93c5fd;') + '</div>' +
+            '<div class="kv-label">MAC-Adresse</div><div class="kv-val">' + (dev.mac_address ? renderCopyableValue(dev.mac_address, 'MAC-Adresse', 'font-family:monospace;font-weight:600;') : '<span style="color:var(--text-secondary);">Nicht im lokalen ARP</span>') + '</div>' +
+            '<div class="kv-label">Hersteller</div><div class="kv-val">' + renderCopyableValue(dev.vendor || 'Unbekannt', 'Hersteller', '') + '</div>' +
+            '<div class="kv-label">Hostname</div><div class="kv-val">' + renderCopyableValue(dev.hostname, 'Hostname', '') + '</div>' +
+            '<div class="kv-label">Betriebssystem</div><div class="kv-val">' + renderCopyableValue(dev.os_guess, 'Betriebssystem', 'color:#a7f3d0;font-weight:600;') + '</div>' +
+            '<div class="kv-label">Dienste / Banner</div><div class="kv-val">' + renderCopyableValue(dev.service_info, 'Dienste / Banner', 'font-size:11.5px;color:#93c5fd;') + '</div>' +
+            '<div class="kv-label">Offene Ports</div><div class="kv-val">' + renderCopyableValue(dev.open_ports, 'Offene Ports', '') + '</div>' +
             '<div class="kv-label">Scope</div><div class="kv-val">' + escapeHtml(dev.scope_name || '-') + '</div>' +
         '</div>' +
         snmpHtml +
@@ -4638,6 +4645,17 @@ function renderSystemInfo() {
     document.getElementById('sys-snmp').textContent = sys.snmp_mode || '-';
     document.getElementById('sys-cron-cmd').textContent = sys.cron_cmd || '';
 
+    var cronBadge = document.getElementById('sys-cron-status-badge');
+    if (cronBadge) {
+        if (parseInt(sys.cron_active || 0, 10) === 1 && parseInt(sys.cron_interval || 0, 10) > 0) {
+            cronBadge.className = 'badge badge-online';
+            cronBadge.textContent = '🟢 Cronjob aktiv (alle ' + sys.cron_interval + ' Min.)';
+        } else {
+            cronBadge.className = 'badge badge-offline';
+            cronBadge.textContent = '⚪ Cronjob deaktiviert (nur manuell)';
+        }
+    }
+
     var durInfoEl = document.getElementById('last-scan-duration-info');
     if (durInfoEl) {
         if (AppState.logs && AppState.logs.length > 0) {
@@ -4710,6 +4728,17 @@ function renderAdminSection() {
         document.getElementById('adm-sc-pingbatch').value = sc.ping_batch_size || 128;
         document.getElementById('adm-sc-portbatch').value = sc.port_host_batch_size || 32;
         document.getElementById('adm-sc-snmpbatch').value = sc.snmp_batch_size || 100;
+    }
+
+    if (document.getElementById('adm-sc-retention-days')) {
+        document.getElementById('adm-sc-retention-days').value = (sc.retention_days !== undefined) ? sc.retention_days : 14;
+    }
+    if (document.getElementById('adm-sc-stale-days')) {
+        document.getElementById('adm-sc-stale-days').value = (sc.stale_offline_days !== undefined) ? sc.stale_offline_days : 30;
+    }
+    if (document.getElementById('adm-cron-interval')) {
+        var cVal = (parseInt(sc.cron_active || 0, 10) === 1 && sc.cron_interval_minutes) ? String(sc.cron_interval_minutes) : '0';
+        document.getElementById('adm-cron-interval').value = cVal;
     }
 
     var smtp = adm.smtp_config || {};
@@ -4906,6 +4935,8 @@ function testMysqlConnection() {
 }
 
 function saveAdminDbAndScannerConfig() {
+    var retEl = document.getElementById('adm-sc-retention-days');
+    var staleEl = document.getElementById('adm-sc-stale-days');
     var payload = {
         driver: document.getElementById('adm-db-driver').value,
         host: document.getElementById('adm-db-host').value,
@@ -4917,7 +4948,9 @@ function saveAdminDbAndScannerConfig() {
         default_snmp_community: document.getElementById('adm-sc-snmpcomm').value,
         ping_batch_size: document.getElementById('adm-sc-pingbatch').value,
         port_host_batch_size: document.getElementById('adm-sc-portbatch').value,
-        snmp_batch_size: document.getElementById('adm-sc-snmpbatch').value
+        snmp_batch_size: document.getElementById('adm-sc-snmpbatch').value,
+        retention_days: retEl ? retEl.value : 14,
+        stale_offline_days: staleEl ? staleEl.value : 30
     };
 
     fetch('api.php?action=save_db_config', {
@@ -4934,6 +4967,153 @@ function saveAdminDbAndScannerConfig() {
             showToast('Fehler: ' + res.error);
         }
     });
+}
+
+function saveAdminCronAndRetention() {
+    var cronIntEl = document.getElementById('adm-cron-interval');
+    var retEl = document.getElementById('adm-sc-retention-days');
+    var staleEl = document.getElementById('adm-sc-stale-days');
+    var payload = {
+        cron_interval_minutes: cronIntEl ? parseInt(cronIntEl.value, 10) : 15,
+        retention_days: retEl ? parseInt(retEl.value, 10) : 14,
+        stale_offline_days: staleEl ? parseInt(staleEl.value, 10) : 30
+    };
+
+    fetch('api.php?action=admin_save_cron_retention', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (res) {
+        if (!res.ok) {
+            showToast('Fehler: ' + (res.error || 'Unbekannt'));
+            return;
+        }
+        var msg = (payload.cron_interval_minutes > 0)
+            ? ('✅ Cronjob (alle ' + payload.cron_interval_minutes + ' Min.) & Aufbewahrungsfrist (' + payload.retention_days + ' Tage) gespeichert!')
+            : ('✅ Cronjob deaktiviert & Aufbewahrungsfrist (' + payload.retention_days + ' Tage) gespeichert!');
+        showToast(msg);
+        loadTopologyData();
+    });
+}
+
+function runManualRetentionCleanup() {
+    var retEl = document.getElementById('adm-sc-retention-days');
+    var staleEl = document.getElementById('adm-sc-stale-days');
+    var retDays = retEl ? parseInt(retEl.value, 10) : 14;
+    var staleDays = staleEl ? parseInt(staleEl.value, 10) : 30;
+
+    fetch('api.php?action=admin_run_retention_cleanup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            retention_days: retDays,
+            stale_offline_days: staleDays
+        })
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (res) {
+        if (!res.ok) {
+            showToast('Fehler: ' + (res.error || 'Unbekannt'));
+            return;
+        }
+        var c = res.cleanup || {};
+        showToast('🧹 Bereinigung abgeschlossen: ' + (c.deleted_logs || 0) + ' alte Scan-Logs, ' + (c.deleted_alerts || 0) + ' Alarme & ' + (c.deleted_devices || 0) + ' veraltete Offline-Clients entfernt.');
+        loadTopologyData();
+    });
+}
+
+function copyToClipboard(text, label) {
+    var str = (text === null || text === undefined) ? '' : String(text).trim();
+    if (!str || str === '-') {
+        showToast('Kein Wert zum Kopieren vorhanden.');
+        return;
+    }
+    var lbl = label || 'Wert';
+    var preview = str.length > 42 ? (str.substring(0, 42) + '…') : str;
+
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function' && window.isSecureContext) {
+        navigator.clipboard.writeText(str).then(function () {
+            showToast('📋 ' + lbl + ' kopiert: ' + preview);
+        }).catch(function () {
+            fallbackCopyText(str, lbl, preview);
+        });
+    } else {
+        fallbackCopyText(str, lbl, preview);
+    }
+}
+
+function fallbackCopyText(str, lbl, preview) {
+    try {
+        var ta = document.createElement('textarea');
+        ta.value = str;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.top = '-9999px';
+        ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        showToast('📋 ' + lbl + ' kopiert: ' + preview);
+    } catch (e) {
+        showToast('Kopieren fehlgeschlagen.');
+    }
+}
+
+function renderCopyableValue(val, label, extraStyle) {
+    var str = (val === null || val === undefined) ? '' : String(val).trim();
+    if (!str || str === '-' || str === 'Keine Standard-TCP-Ports offen') {
+        return '<span style="' + (extraStyle || 'color:var(--text-secondary);') + '">' + escapeHtml(str || '-') + '</span>';
+    }
+    var safeJsVal = str.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\r?\n/g, ' ');
+    var safeJsLbl = (label || 'Wert').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    return '<div style="display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;max-width:100%;">' +
+        '<span style="word-break:break-word;' + (extraStyle || '') + '">' + escapeHtml(str) + '</span>' +
+        '<button type="button" class="btn btn-sm" style="padding:1px 5px;font-size:10px;line-height:1.2;border-color:rgba(148,163,184,0.3);background:rgba(255,255,255,0.04);color:#cbd5e1;flex-shrink:0;" ' +
+            'onclick="event.stopPropagation(); copyToClipboard(\'' + safeJsVal + '\', \'' + safeJsLbl + '\');" ' +
+            'title="' + escapeHtml(label || 'Wert') + ' in Zwischenablage kopieren">📋</button>' +
+    '</div>';
+}
+
+function copySelectedDeviceDetails() {
+    if (!AppState.selectedDeviceId) {
+        showToast('Kein Gerät ausgewählt.');
+        return;
+    }
+    var dev = null;
+    for (var i = 0; i < AppState.devices.length; i++) {
+        if (parseInt(AppState.devices[i].id, 10) === parseInt(AppState.selectedDeviceId, 10)) {
+            dev = AppState.devices[i];
+            break;
+        }
+    }
+    if (!dev) return;
+
+    var displayName = dev.custom_name || dev.hostname || dev.snmp_sysname || dev.ip_address;
+    var sp = getDeviceSwitchPortInfo(dev);
+    var spStr = (sp && sp.switchId)
+        ? (sp.switchName + ' (' + sp.switchIp + ') • Port ' + (sp.portName || '-') + (sp.vlan ? (' [VLAN ' + sp.vlan + ']') : ''))
+        : 'Nicht zugeordnet';
+
+    var summaryLines = [
+        'Gerät:          ' + displayName,
+        'IP-Adresse:     ' + (dev.ip_address || '-'),
+        'MAC-Adresse:    ' + (dev.mac_address || '-'),
+        'Hersteller:     ' + (dev.vendor || '-'),
+        'Hostname:       ' + (dev.hostname || '-'),
+        'Switch / Port:  ' + spStr,
+        'Status:         ' + String(dev.status || '-').toUpperCase() + ' (' + (dev.latency_ms || '1.0') + ' ms)',
+        'Betriebssystem: ' + (dev.os_guess || '-'),
+        'Offene Ports:   ' + (dev.open_ports || '-'),
+        'Scope:          ' + (dev.scope_name || '-')
+    ];
+    if (dev.notes) {
+        summaryLines.push('Notizen:        ' + dev.notes);
+    }
+    copyToClipboard(summaryLines.join('\n'), 'Alle Gerätedaten (' + displayName + ')');
 }
 
 function saveAdminSmtpConfig() {

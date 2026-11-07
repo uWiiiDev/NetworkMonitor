@@ -118,9 +118,30 @@ try {
             $nmapPath = trim((string)@shell_exec('which nmap 2>/dev/null'));
             $snmpExt = extension_loaded('snmp');
 
+            $fullConfAll = $db->getConfig();
+            $cronIntMin = isset($fullConfAll['scanner']['cron_interval_minutes']) ? (int)$fullConfAll['scanner']['cron_interval_minutes'] : 15;
+            if ($cronIntMin <= 0) {
+                $cronIntMin = 15;
+            }
+            $crontabRaw = (string)@shell_exec('crontab -l 2>/dev/null');
+            $cronActive = false;
+            $detectedCronMin = $cronIntMin;
+            if ($crontabRaw !== '' && strpos($crontabRaw, 'cli_scan.php') !== false) {
+                $cronActive = true;
+                if (preg_match('/^\s*\*\/([0-9]+)\s+\*\s+\*\s+\*\s+\*.*cli_scan\.php/m', $crontabRaw, $cm)) {
+                    $detectedCronMin = (int)$cm[1];
+                } elseif (preg_match('/^\s*0\s+\*\s+\*\s+\*\s+\*.*cli_scan\.php/m', $crontabRaw)) {
+                    $detectedCronMin = 60;
+                }
+            }
+            $cronScheduleExpr = ($detectedCronMin === 60) ? '0 * * * *' : ('*/' . $detectedCronMin . ' * * * *');
+            $cliScanReal = realpath(__DIR__ . '/cli_scan.php');
+            $cronLogPath = __DIR__ . '/data/cron_scan.log';
+            $cronCmdLine = $cronScheduleExpr . ' /usr/bin/php ' . $cliScanReal . ' --all >> ' . $cronLogPath . ' 2>&1 # NetworkMonitor-AutoScan';
+
             $adminData = null;
             if ($currentUser['role'] === 'admin') {
-                $fullConf = $db->getConfig();
+                $fullConf = $fullConfAll;
                 $smtpConf = isset($fullConf['smtp']) ? $fullConf['smtp'] : array();
                 $usersList = $pdo->query("SELECT id, username, full_name, role, is_active, last_login, created_at FROM users ORDER BY id ASC")->fetchAll();
                 $adminData = array(
@@ -139,6 +160,10 @@ try {
                         'port_host_batch_size'   => $fullConf['scanner']['port_host_batch_size'],
                         'snmp_batch_size'        => $fullConf['scanner']['snmp_batch_size'],
                         'default_snmp_community' => $fullConf['scanner']['default_snmp_community'],
+                        'retention_days'         => isset($fullConf['scanner']['retention_days']) ? (int)$fullConf['scanner']['retention_days'] : 14,
+                        'stale_offline_days'     => isset($fullConf['scanner']['stale_offline_days']) ? (int)$fullConf['scanner']['stale_offline_days'] : 30,
+                        'cron_interval_minutes'  => $detectedCronMin,
+                        'cron_active'            => $cronActive ? 1 : 0,
                     ),
                     'smtp_config' => array(
                         'enabled'    => !empty($smtpConf['enabled']) ? 1 : 0,
@@ -165,13 +190,15 @@ try {
                 'unack_alerts' => $unackCount,
                 'admin'        => $adminData,
                 'system'       => array(
-                    'php_version' => PHP_VERSION,
-                    'db_driver'   => strtoupper($db->getActiveDriver()),
-                    'nmap_found'  => ($nmapPath !== ''),
-                    'nmap_path'   => $nmapPath !== '' ? $nmapPath : 'Nicht installiert (nutzt schnellen PHP Parallel-Ping & ARP)',
-                    'snmp_mode'   => $snmpExt ? 'PHP-SNMP Extension + Native UDP SNMPv2c' : 'Integrierter Pure-PHP UDP SNMPv2c Client (aktiv)',
-                    'server_time' => date('Y-m-d H:i:s'),
-                    'cron_cmd'    => '*/30 * * * * /usr/bin/php ' . realpath(__DIR__ . '/cli_scan.php') . ' --all >> /var/log/network_monitor.log 2>&1',
+                    'php_version'   => PHP_VERSION,
+                    'db_driver'     => strtoupper($db->getActiveDriver()),
+                    'nmap_found'    => ($nmapPath !== ''),
+                    'nmap_path'     => $nmapPath !== '' ? $nmapPath : 'Nicht installiert (nutzt schnellen PHP Parallel-Ping & ARP)',
+                    'snmp_mode'     => $snmpExt ? 'PHP-SNMP Extension + Native UDP SNMPv2c' : 'Integrierter Pure-PHP UDP SNMPv2c Client (aktiv)',
+                    'server_time'   => date('Y-m-d H:i:s'),
+                    'cron_active'   => $cronActive ? 1 : 0,
+                    'cron_interval' => $detectedCronMin,
+                    'cron_cmd'      => $cronCmdLine,
                 ),
             ));
             break;
@@ -681,9 +708,93 @@ try {
             if (isset($input['default_snmp_community'])) {
                 $scannerSettings['default_snmp_community'] = trim($input['default_snmp_community']);
             }
+            if (isset($input['retention_days'])) {
+                $scannerSettings['retention_days'] = max(0, (int)$input['retention_days']);
+            }
+            if (isset($input['stale_offline_days'])) {
+                $scannerSettings['stale_offline_days'] = max(0, (int)$input['stale_offline_days']);
+            }
+            if (isset($input['cron_interval_minutes'])) {
+                $scannerSettings['cron_interval_minutes'] = max(0, (int)$input['cron_interval_minutes']);
+            }
 
             Database::saveCustomConfig($dbSettings, $scannerSettings);
             echo json_encode(array('ok' => true));
+            break;
+
+        case 'admin_save_cron_retention':
+            Auth::requireRole(array('admin'));
+            $cronMin = isset($input['cron_interval_minutes']) ? max(0, (int)$input['cron_interval_minutes']) : 15;
+            $retDays = isset($input['retention_days']) ? max(0, (int)$input['retention_days']) : 14;
+            $staleDays = isset($input['stale_offline_days']) ? max(0, (int)$input['stale_offline_days']) : 30;
+
+            Database::saveCustomConfig(array(), array(
+                'cron_interval_minutes' => $cronMin > 0 ? $cronMin : 15,
+                'retention_days'        => $retDays,
+                'stale_offline_days'    => $staleDays,
+            ));
+
+            // Aktualisiere System-Crontab des Webserver-/CLI-Benutzers
+            $phpBin = trim((string)@shell_exec('which php 2>/dev/null'));
+            if ($phpBin === '') {
+                $phpBin = '/usr/bin/php';
+            }
+            $cliScanReal = realpath(__DIR__ . '/cli_scan.php');
+            $cronLogPath = __DIR__ . '/data/cron_scan.log';
+
+            $existingCrontab = (string)@shell_exec('crontab -l 2>/dev/null');
+            $lines = preg_split('/\r?\n/', $existingCrontab);
+            $filteredLines = array();
+            foreach ($lines as $ln) {
+                $trimLn = trim($ln);
+                if ($trimLn === '' || strpos($trimLn, 'NetworkMonitor-AutoScan') !== false || strpos($trimLn, 'cli_scan.php') !== false) {
+                    continue;
+                }
+                $filteredLines[] = $ln;
+            }
+
+            $cronInstalled = false;
+            $newCmdLine = '';
+            if ($cronMin > 0) {
+                $expr = ($cronMin === 60) ? '0 * * * *' : ('*/' . $cronMin . ' * * * *');
+                $newCmdLine = $expr . ' ' . $phpBin . ' ' . $cliScanReal . ' --all >> ' . $cronLogPath . ' 2>&1 # NetworkMonitor-AutoScan';
+                $filteredLines[] = $newCmdLine;
+            }
+
+            $tmpCronFile = sys_get_temp_dir() . '/nm_crontab_' . getmypid() . '.txt';
+            $newCrontabContent = empty($filteredLines) ? "\n" : (implode("\n", $filteredLines) . "\n");
+            if (@file_put_contents($tmpCronFile, $newCrontabContent) !== false) {
+                if (empty($filteredLines)) {
+                    @shell_exec('crontab -r 2>/dev/null');
+                    $cronInstalled = false;
+                } else {
+                    @shell_exec('crontab ' . escapeshellarg($tmpCronFile) . ' 2>/dev/null');
+                    $verifyCron = (string)@shell_exec('crontab -l 2>/dev/null');
+                    $cronInstalled = ($cronMin > 0 && strpos($verifyCron, 'cli_scan.php') !== false);
+                }
+                @unlink($tmpCronFile);
+            }
+
+            // Führe direkt auch die Aufbewahrungs-Bereinigung mit den neuen Werten aus
+            $scanner = new NetworkScanner();
+            $cleanupStats = $scanner->cleanupOldScans($retDays, $staleDays);
+
+            echo json_encode(array(
+                'ok'             => true,
+                'cron_installed' => $cronInstalled ? 1 : 0,
+                'cron_interval'  => $cronMin,
+                'cron_cmd'       => $newCmdLine,
+                'cleanup'        => $cleanupStats,
+            ));
+            break;
+
+        case 'admin_run_retention_cleanup':
+            Auth::requireRole(array('admin'));
+            $retDays = isset($input['retention_days']) ? max(0, (int)$input['retention_days']) : null;
+            $staleDays = isset($input['stale_offline_days']) ? max(0, (int)$input['stale_offline_days']) : null;
+            $scanner = new NetworkScanner();
+            $stats = $scanner->cleanupOldScans($retDays, $staleDays);
+            echo json_encode(array('ok' => true, 'cleanup' => $stats));
             break;
 
         case 'save_user':

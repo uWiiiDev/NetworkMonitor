@@ -353,6 +353,9 @@ class NetworkScanner
                 ':lid' => $logId,
             ));
 
+            // 9. Automatische Datenbank-Bereinigung (Retention): Alte Scan-Protokolle, Alarme & verwaiste Offline-Geräte löschen
+            $this->cleanupOldScans();
+
             return array(
                 'scope_id'       => (int)$scope['id'],
                 'scope_name'     => $scope['name'],
@@ -382,6 +385,84 @@ class NetworkScanner
             $results[] = $this->scanScope($row['id'], $triggerType);
         }
         return $results;
+    }
+
+    /**
+     * Bereinigt automatisch alte Scan-Protokolle (scan_logs), alte Alarme (device_alerts)
+     * sowie optional langzeit-inaktive Offline-Geräte, damit die Datenbank bei kurzen Cron-Intervallen
+     * (z.B. alle 15 Minuten) niemals vollläuft.
+     */
+    public function cleanupOldScans($retentionDays = null, $staleOfflineDays = null)
+    {
+        if ($retentionDays === null) {
+            $retentionDays = isset($this->config['retention_days']) ? (int)$this->config['retention_days'] : 14;
+        } else {
+            $retentionDays = (int)$retentionDays;
+        }
+
+        if ($staleOfflineDays === null) {
+            $staleOfflineDays = isset($this->config['stale_offline_days']) ? (int)$this->config['stale_offline_days'] : 30;
+        } else {
+            $staleOfflineDays = (int)$staleOfflineDays;
+        }
+
+        $deletedLogs = 0;
+        $deletedAlerts = 0;
+        $deletedDevices = 0;
+
+        try {
+            if ($retentionDays > 0) {
+                $cutoffLogs = date('Y-m-d H:i:s', time() - ($retentionDays * 86400));
+                $stmtLogs = $this->pdo->prepare("DELETE FROM scan_logs WHERE started_at < :cutoff");
+                $stmtLogs->execute(array(':cutoff' => $cutoffLogs));
+                $deletedLogs = (int)$stmtLogs->rowCount();
+
+                $stmtAlerts = $this->pdo->prepare("DELETE FROM device_alerts WHERE created_at < :cutoff");
+                $stmtAlerts->execute(array(':cutoff' => $cutoffLogs));
+                $deletedAlerts = (int)$stmtAlerts->rowCount();
+            }
+
+            if ($staleOfflineDays > 0) {
+                $cutoffDevs = date('Y-m-d H:i:s', time() - ($staleOfflineDays * 86400));
+                // Lösche nur temporäre Offline-Clients ohne manuellen Namen, ohne Notizen, ohne Core-Schutz und ohne aktive Alarmüberwachung
+                $stmtDevs = $this->pdo->prepare("
+                    DELETE FROM devices
+                    WHERE status = 'offline'
+                      AND is_core = 0
+                      AND device_type NOT IN ('router', 'switch')
+                      AND (custom_name IS NULL OR custom_name = '')
+                      AND (notes IS NULL OR notes = '')
+                      AND (alert_mode IS NULL OR alert_mode = 'none')
+                      AND last_seen IS NOT NULL
+                      AND last_seen < :cutoff
+                ");
+                $stmtDevs->execute(array(':cutoff' => $cutoffDevs));
+                $deletedDevices = (int)$stmtDevs->rowCount();
+
+                if ($deletedDevices > 0) {
+                    $this->pdo->exec("DELETE FROM links WHERE source_device_id NOT IN (SELECT id FROM devices) OR target_device_id NOT IN (SELECT id FROM devices)");
+                }
+            }
+
+            // Rotiere / kürze auch die lokale Cron-Logdatei (data/cron_scan.log), falls > 512 KB
+            $cronLogFile = dirname(__DIR__) . '/data/cron_scan.log';
+            if (is_file($cronLogFile) && @filesize($cronLogFile) > 524288) {
+                $tail = @file_get_contents($cronLogFile, false, null, max(0, @filesize($cronLogFile) - 131072));
+                if ($tail !== false) {
+                    @file_put_contents($cronLogFile, $tail);
+                }
+            }
+        } catch (Exception $e) {
+            // Bereinigungsfehler sollen den Scan nicht abbrechen
+        }
+
+        return array(
+            'retention_days'     => $retentionDays,
+            'stale_offline_days' => $staleOfflineDays,
+            'deleted_logs'       => $deletedLogs,
+            'deleted_alerts'     => $deletedAlerts,
+            'deleted_devices'    => $deletedDevices,
+        );
     }
 
     /**

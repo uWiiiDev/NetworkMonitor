@@ -498,12 +498,48 @@ $isAdmin = ($userRole === 'admin');
                             </div>
                         </div>
 
-                        <div style="background:var(--bg-panel);border:1px solid var(--border-color);border-radius:10px;padding:18px;display:flex;flex-direction:column;gap:10px;">
-                            <h3 style="font-size:15px;">5. Automatischer Hintergrund-Scan per Cronjob</h3>
-                            <p style="font-size:12.5px;color:var(--text-secondary);">
-                                Neben dem manuellen Scan per Klick im Webinterface kann der Scan jederzeit über die Kommandozeile oder als Cronjob ausgeführt werden (z.B. alle 30 Minuten):
+                        <div style="background:var(--bg-panel);border:1px solid var(--border-color);border-radius:10px;padding:18px;display:flex;flex-direction:column;gap:12px;">
+                            <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+                                <h3 style="font-size:15px;">5. Automatischer Hintergrund-Cronjob &amp; Aufbewahrungsfrist (Retention)</h3>
+                                <span id="sys-cron-status-badge" class="badge badge-online">🟢 Cronjob aktiv (alle 15 Min.)</span>
+                            </div>
+                            <p style="font-size:12.5px;color:var(--text-secondary);margin:0;">
+                                Konfiguriere hier das Scan-Intervall des Hintergrund-Cronjobs sowie die automatische Löschung alter Scan-Protokolle, Alarme und veralteter Offline-Geräte, damit die Datenbank niemals vollläuft:
                             </p>
-                            <div class="code-block" id="sys-cron-cmd"></div>
+                            <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(175px, 1fr));gap:10px;">
+                                <div class="form-group">
+                                    <label>⏰ Cronjob Scan-Intervall</label>
+                                    <select id="adm-cron-interval" class="select-input">
+                                        <option value="5">Alle 5 Minuten</option>
+                                        <option value="10">Alle 10 Minuten</option>
+                                        <option value="15" selected>Alle 15 Minuten (Empfohlen)</option>
+                                        <option value="30">Alle 30 Minuten</option>
+                                        <option value="60">Stündlich (Alle 60 Min.)</option>
+                                        <option value="0">Deaktiviert (Nur manueller Scan)</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label>🧹 Scans &amp; Alarme löschen älter als (Tage)</label>
+                                    <input type="number" id="adm-sc-retention-days" class="form-input" min="0" max="3650" value="14" title="0 = Nie automatisch löschen">
+                                </div>
+                                <div class="form-group">
+                                    <label>👻 Offline-Clients löschen älter als (Tage)</label>
+                                    <input type="number" id="adm-sc-stale-days" class="form-input" min="0" max="3650" value="30" title="Löscht unbenannte Offline-Clients, die länger als X Tage nicht mehr gesehen wurden (0 = Nie)">
+                                </div>
+                            </div>
+                            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                                <button class="btn btn-primary btn-sm" style="flex:1;justify-content:center;" onclick="saveAdminCronAndRetention()">
+                                    💾 Cronjob &amp; Aufbewahrungsfrist speichern
+                                </button>
+                                <button class="btn btn-sm" style="border-color:#f59e0b;color:#fcd34d;" onclick="runManualRetentionCleanup()">
+                                    🧹 Alte Scans jetzt bereinigen
+                                </button>
+                            </div>
+                            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:2px;">
+                                <span style="font-size:11.5px;color:var(--text-secondary);">Aktiver Linux-Crontab-Befehl:</span>
+                                <button class="btn btn-sm" style="padding:2px 8px;font-size:11px;" onclick="copyToClipboard(document.getElementById('sys-cron-cmd').textContent, 'Cronjob-Befehl')">📋 Befehl kopieren</button>
+                            </div>
+                            <div class="code-block" id="sys-cron-cmd" style="font-size:11.5px;word-break:break-all;"></div>
                         </div>
                     </div>
 
@@ -569,8 +605,11 @@ $isAdmin = ($userRole === 'admin');
         <!-- Schwebendes Fenster: Geräte-Details & Switch-Port (Frei verschiebbar, minimierbar & mit Direkt-Export) -->
         <aside id="sidebar-right" class="sidebar-right collapsed">
             <div id="inspector-drag-handle" class="panel-header floating-inspector-header" title="Gedrückt halten zum Verschieben des Fensters">
-                <span id="inspector-title" class="panel-title" style="color:#f8fafc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:220px;">Geräte-Details</span>
+                <span id="inspector-title" class="panel-title" style="color:#f8fafc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:200px;">Geräte-Details</span>
                 <div style="display:flex;align-items:center;gap:5px;flex-shrink:0;" onmousedown="event.stopPropagation();" ontouchstart="event.stopPropagation();">
+                    <button id="btn-copy-device-details" class="btn btn-sm" onclick="copySelectedDeviceDetails()" title="Alle Gerätedaten in die Zwischenablage kopieren" style="display:none;padding:4px 8px;border-color:rgba(16,185,129,0.45);color:#6ee7b7;font-size:11.5px;">
+                        📋
+                    </button>
                     <button id="btn-export-device-details" class="btn btn-sm" onclick="exportSelectedDeviceDetails()" title="Gerätedetails herunterladen (.txt Datenblatt)" style="display:none;padding:4px 8px;border-color:rgba(96,165,250,0.45);color:#93c5fd;">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;">
                             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>

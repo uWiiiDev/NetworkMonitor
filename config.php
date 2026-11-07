@@ -56,6 +56,13 @@ return array(
         // Standard SNMP-Community für Managed Switches
         'default_snmp_community' => 'public',
         'snmp_timeout_ms'        => 800,
+        // Automatische Datenbank-Bereinigung (Retention), damit die DB nicht vollläuft:
+        // Scan-Protokolle (scan_logs) und Alarme (device_alerts) älter als X Tage automatisch löschen (0 = nie löschen)
+        'retention_days'         => 14,
+        // Offline-Geräte (ohne eigenen Namen/Notiz), die seit mehr als X Tagen nicht mehr gesehen wurden, löschen (0 = nie löschen)
+        'stale_offline_days'     => 30,
+        // Standard-Intervall für den automatischen Hintergrund-Cronjob in Minuten (z.B. 15)
+        'cron_interval_minutes'  => 15,
     ),
 
     // SMTP-Einstellungen für E-Mail-Alarm-Benachrichtigungen (im Adminbereich konfigurierbar)
