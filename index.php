@@ -558,11 +558,21 @@ $isAdmin = ($userRole === 'admin');
 
         </main>
 
-        <!-- Right Sidebar: Device Inspector (Ein-/Ausklappbar) -->
+        <!-- Schwebendes Fenster: Geräte-Details & Switch-Port (Frei verschiebbar, minimierbar & mit Direkt-Export) -->
         <aside id="sidebar-right" class="sidebar-right collapsed">
-            <div class="panel-header">
-                <span class="panel-title">Geräte-Details &amp; Switch-Port</span>
-                <button class="btn btn-sm" onclick="toggleRightSidebar()" title="Seitenleiste schließen">×</button>
+            <div id="inspector-drag-handle" class="panel-header floating-inspector-header" title="Gedrückt halten zum Verschieben des Fensters">
+                <span id="inspector-title" class="panel-title" style="color:#f8fafc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:220px;">Geräte-Details</span>
+                <div style="display:flex;align-items:center;gap:5px;flex-shrink:0;" onmousedown="event.stopPropagation();" ontouchstart="event.stopPropagation();">
+                    <button id="btn-export-device-details" class="btn btn-sm" onclick="exportSelectedDeviceDetails()" title="Gerätedetails herunterladen (.txt Datenblatt)" style="display:none;padding:4px 8px;border-color:rgba(96,165,250,0.45);color:#93c5fd;">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                            <polyline points="7 10 12 15 17 10"/>
+                            <line x1="12" y1="15" x2="12" y2="3"/>
+                        </svg>
+                    </button>
+                    <button id="btn-min-inspector" class="btn btn-sm" onclick="toggleMinimizeInspector()" title="Fenster einklappen / ausklappen" style="padding:4px 8px;">—</button>
+                    <button class="btn btn-sm" onclick="toggleRightSidebar(false)" title="Schließen" style="padding:4px 8px;">×</button>
+                </div>
             </div>
             <div id="inspector-content" class="inspector-body">
                 <p style="color:var(--text-secondary);font-size:13px;">

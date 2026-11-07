@@ -186,7 +186,8 @@ function loadTopologyData(callback) {
             if (userIsAdmin() && AppState.admin) {
                 renderAdminSection();
             }
-            if (AppState.selectedDeviceId) {
+            var sbRight = document.getElementById('sidebar-right');
+            if (AppState.selectedDeviceId && sbRight && !sbRight.classList.contains('collapsed')) {
                 selectDevice(AppState.selectedDeviceId);
             }
             if (typeof callback === 'function') {
@@ -231,11 +232,87 @@ function toggleRightSidebar(forceOpen) {
     if (!sb) return;
     if (forceOpen === true) {
         sb.classList.remove('collapsed');
+        sb.classList.remove('minimized');
+        var minBtn = document.getElementById('btn-min-inspector');
+        if (minBtn) minBtn.textContent = '—';
     } else if (forceOpen === false) {
         sb.classList.add('collapsed');
+        AppState.selectedDeviceId = null;
+        AppState.selectedClusterId = null;
     } else {
         sb.classList.toggle('collapsed');
     }
+}
+
+function toggleMinimizeInspector() {
+    var sb = document.getElementById('sidebar-right');
+    var minBtn = document.getElementById('btn-min-inspector');
+    if (!sb) return;
+    var isMin = sb.classList.toggle('minimized');
+    if (minBtn) {
+        minBtn.textContent = isMin ? '▢' : '—';
+        minBtn.title = isMin ? 'Fenster wieder aufklappen' : 'Fenster auf Titelleiste minimieren';
+    }
+}
+
+function initFloatingInspectorDrag() {
+    var win = document.getElementById('sidebar-right');
+    var handle = document.getElementById('inspector-drag-handle');
+    if (!win || !handle) return;
+
+    var isDragging = false;
+    var startX = 0;
+    var startY = 0;
+    var origLeft = 0;
+    var origTop = 0;
+
+    function onStart(clientX, clientY) {
+        isDragging = true;
+        var rect = win.getBoundingClientRect();
+        startX = clientX;
+        startY = clientY;
+        origLeft = rect.left;
+        origTop = rect.top;
+        win.style.right = 'auto';
+        win.style.left = origLeft + 'px';
+        win.style.top = origTop + 'px';
+    }
+
+    function onMove(clientX, clientY) {
+        if (!isDragging) return;
+        var dx = clientX - startX;
+        var dy = clientY - startY;
+        var newLeft = Math.max(8, Math.min(window.innerWidth - 120, origLeft + dx));
+        var newTop = Math.max(58, Math.min(window.innerHeight - 60, origTop + dy));
+        win.style.left = newLeft + 'px';
+        win.style.top = newTop + 'px';
+    }
+
+    function onEnd() {
+        isDragging = false;
+    }
+
+    handle.addEventListener('mousedown', function (e) {
+        if (e.button !== 0) return;
+        onStart(e.clientX, e.clientY);
+        e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+        onMove(e.clientX, e.clientY);
+    });
+    document.addEventListener('mouseup', onEnd);
+
+    handle.addEventListener('touchstart', function (e) {
+        if (e.touches && e.touches.length === 1) {
+            onStart(e.touches[0].clientX, e.touches[0].clientY);
+        }
+    }, { passive: true });
+    document.addEventListener('touchmove', function (e) {
+        if (isDragging && e.touches && e.touches.length === 1) {
+            onMove(e.touches[0].clientX, e.touches[0].clientY);
+        }
+    }, { passive: true });
+    document.addEventListener('touchend', onEnd);
 }
 
 function renderScopesList() {
@@ -1187,6 +1264,9 @@ function renderNetworkGraph() {
             } else {
                 selectDevice(clickedId);
             }
+        } else if ((!params.edges || params.edges.length === 0)) {
+            // Klick auf freie Fläche im Netzwerkplan blendet das schwebende Detailfenster automatisch aus
+            toggleRightSidebar(false);
         }
     });
 
@@ -1209,7 +1289,13 @@ function renderNetworkGraph() {
 function selectCluster(clusterId) {
     var cInfo = AppState.clusterMap[clusterId];
     if (!cInfo) return;
+    AppState.selectedDeviceId = null;
+    AppState.selectedClusterId = clusterId;
     toggleRightSidebar(true);
+    var titleEl = document.getElementById('inspector-title');
+    var expBtn = document.getElementById('btn-export-device-details');
+    if (titleEl) titleEl.textContent = '📦 Cluster (' + cInfo.devices.length + ' Clients)';
+    if (expBtn) expBtn.style.display = 'inline-flex';
     var panel = document.getElementById('inspector-content');
     var pName = cInfo.parentDev ? (cInfo.parentDev.custom_name || cInfo.parentDev.hostname || cInfo.parentDev.ip_address) : 'Switch / Gateway';
 
@@ -1787,6 +1873,7 @@ function exportNetworkPng4K() {
 
 function selectDevice(deviceId) {
     AppState.selectedDeviceId = deviceId;
+    AppState.selectedClusterId = null;
     toggleRightSidebar(true);
     var dev = null;
     for (var i = 0; i < AppState.devices.length; i++) {
@@ -1796,9 +1883,21 @@ function selectDevice(deviceId) {
         }
     }
     var panel = document.getElementById('inspector-content');
+    var titleEl = document.getElementById('inspector-title');
+    var expBtn = document.getElementById('btn-export-device-details');
     if (!dev) {
+        if (titleEl) titleEl.textContent = 'Geräte-Details';
+        if (expBtn) expBtn.style.display = 'none';
         panel.innerHTML = '<p style="color:var(--text-secondary);font-size:13px;">Klicke auf ein Gerät, um Details, offene Ports, SNMP-Switch-Daten, Gruppen und Port-Zuordnungen anzuzeigen.</p>';
         return;
+    }
+    var headerName = dev.custom_name || dev.hostname || dev.snmp_sysname || dev.ip_address;
+    if (titleEl) {
+        titleEl.textContent = headerName + ' (' + dev.ip_address + ')';
+        titleEl.title = headerName + ' (' + dev.ip_address + ') – Gedrückt halten zum Verschieben';
+    }
+    if (expBtn) {
+        expBtn.style.display = 'inline-flex';
     }
 
     var currentParentId = 0;
@@ -4140,7 +4239,165 @@ function escapeHtml(str) {
         .replace(/"/g, '&quot;');
 }
 
+/**
+ * Exportiert sämtliche Gerätedetails (bzw. Cluster-Details) des aktuell ausgewählten Knotens
+ * per 1-Klick auf das Download-Symbol im schwebenden Detailfenster als übersichtliches Datenblatt (.txt)
+ */
+function exportSelectedDeviceDetails() {
+    var nowStr = new Date().toLocaleString('de-DE');
+    var lines = [];
+
+    // Fall A: Ein Client-Cluster ist ausgewählt
+    if (AppState.selectedClusterId && AppState.clusterMap[AppState.selectedClusterId]) {
+        var cInfo = AppState.clusterMap[AppState.selectedClusterId];
+        var pName = cInfo.parentDev ? (cInfo.parentDev.custom_name || cInfo.parentDev.hostname || cInfo.parentDev.ip_address) : 'Switch / Gateway';
+        lines.push('====================================================================');
+        lines.push('NETWORKMONITOR – CLIENT-CLUSTER DATENBLATT');
+        lines.push('Exportiert am: ' + nowStr);
+        lines.push('====================================================================');
+        lines.push('Übergeordneter Verteiler: ' + pName + (cInfo.parentDev ? (' (' + cInfo.parentDev.ip_address + ')') : ''));
+        lines.push('Gebündelte Endgeräte:     ' + cInfo.devices.length + ' (' + cInfo.onlineCount + ' Online, ' + cInfo.offlineCount + ' Offline)');
+        lines.push('');
+        lines.push('--- ENTHALTENE GERÄTE ----------------------------------------------');
+        for (var ci = 0; ci < cInfo.devices.length; ci++) {
+            var cd = cInfo.devices[ci];
+            var cdName = cd.custom_name || cd.hostname || cd.ip_address;
+            lines.push((ci + 1) + '. ' + cdName + ' | IP: ' + cd.ip_address + ' | MAC: ' + (cd.mac_address || '-') + ' | Status: ' + String(cd.status || '').toUpperCase() + ' | Hersteller: ' + (cd.vendor || '-') + ' | OS: ' + (cd.os_guess || '-'));
+        }
+        var cBlob = new Blob([lines.join('\r\n')], { type: 'text/plain;charset=utf-8' });
+        var cLink = document.createElement('a');
+        cLink.href = URL.createObjectURL(cBlob);
+        cLink.download = 'cluster_details_' + pName.replace(/[^a-zA-Z0-9_-]/g, '_') + '.txt';
+        cLink.click();
+        showToast('Cluster-Details heruntergeladen.');
+        return;
+    }
+
+    // Fall B: Ein einzelnes Gerät ist ausgewählt
+    if (!AppState.selectedDeviceId) {
+        showToast('Kein Gerät für den Export ausgewählt.');
+        return;
+    }
+
+    var dev = null;
+    var devById = {};
+    for (var i = 0; i < AppState.devices.length; i++) {
+        var d = AppState.devices[i];
+        devById[d.id] = d;
+        if (parseInt(d.id, 10) === parseInt(AppState.selectedDeviceId, 10)) {
+            dev = d;
+        }
+    }
+    if (!dev) return;
+
+    var displayName = dev.custom_name || dev.hostname || dev.snmp_sysname || dev.ip_address;
+
+    lines.push('====================================================================');
+    lines.push('NETWORKMONITOR – GERÄTE-DATENBLATT');
+    lines.push('Exportiert am: ' + nowStr);
+    lines.push('====================================================================');
+    lines.push('');
+    lines.push('[1. ALLGEMEINE GERÄTE-INFORMATIONEN]');
+    lines.push('Anzeigename:          ' + displayName);
+    lines.push('Hostname (DNS/NBNS):  ' + (dev.hostname || '-'));
+    lines.push('IP-Adresse:           ' + (dev.ip_address || '-'));
+    lines.push('MAC-Adresse:          ' + (dev.mac_address || 'Nicht im lokalen ARP'));
+    lines.push('Hersteller (OUI):     ' + (dev.vendor || 'Unbekannt'));
+    lines.push('Gerätetyp:            ' + String(dev.device_type || '-').toUpperCase());
+    lines.push('Eigene Gerätegruppe:  ' + (dev.custom_group || '-'));
+    lines.push('Status:               ' + String(dev.status || '-').toUpperCase() + ' (' + (dev.latency_ms || '1.0') + ' ms)');
+    lines.push('Alarm-Überwachung:    ' + (dev.alert_mode || 'none'));
+    lines.push('Netzwerk-Scope:       ' + (dev.scope_name || '-'));
+    lines.push('Standort / Notizen:   ' + (dev.notes || '-'));
+    lines.push('Erstmals gesehen:     ' + (dev.first_seen || '-'));
+    lines.push('Zuletzt gesehen:      ' + (dev.last_seen || '-'));
+    lines.push('');
+    lines.push('[2. BETRIEBSSYSTEM, DIENSTE & OFFENE PORTS]');
+    lines.push('Betriebssystem (OS):  ' + (dev.os_guess || '-'));
+    lines.push('Dienste / Banner:     ' + (dev.service_info || '-'));
+    lines.push('Offene TCP-Ports:     ' + (dev.open_ports || 'Keine Standard-TCP-Ports offen'));
+    lines.push('');
+    lines.push('[3. TOPOLOGIE-ANBINDUNG & SWITCH-PORTS]');
+
+    var upstreamLines = [];
+    var downstreamLines = [];
+    for (var l = 0; l < AppState.links.length; l++) {
+        var lnk = AppState.links[l];
+        if (parseInt(lnk.target_device_id, 10) === parseInt(dev.id, 10) && devById[lnk.source_device_id]) {
+            var pDev = devById[lnk.source_device_id];
+            var pNameStr = pDev.custom_name || pDev.hostname || pDev.ip_address;
+            upstreamLines.push('Übergeordneter Verteiler: ' + pNameStr + ' (' + pDev.ip_address + ') an Port: ' + (lnk.source_port || 'Automatisch') + (lnk.target_port && lnk.target_port !== 'eth0' ? (' ⇄ Lokaler Port: ' + lnk.target_port) : '') + ' [' + (lnk.link_type || 'subnet') + ']');
+        } else if (parseInt(lnk.source_device_id, 10) === parseInt(dev.id, 10) && devById[lnk.target_device_id]) {
+            var cDev = devById[lnk.target_device_id];
+            var cNameStr = cDev.custom_name || cDev.hostname || cDev.ip_address;
+            downstreamLines.push('  • ' + (lnk.source_port ? ('[' + lnk.source_port + '] ') : '') + cNameStr + ' (' + cDev.ip_address + ' | MAC: ' + (cDev.mac_address || '-') + ' | Typ: ' + String(cDev.device_type || '').toUpperCase() + ')');
+        }
+    }
+
+    if (upstreamLines.length > 0) {
+        for (var u = 0; u < upstreamLines.length; u++) lines.push(upstreamLines[u]);
+    } else {
+        lines.push('Übergeordneter Verteiler: Root / Gateway-Ebene (kein Upstream-Verteiler)');
+    }
+
+    if (downstreamLines.length > 0) {
+        lines.push('Direkt angeschlossene Geräte (' + downstreamLines.length + '):');
+        for (var dn = 0; dn < downstreamLines.length; dn++) lines.push(downstreamLines[dn]);
+    }
+
+    if (parseInt(dev.snmp_enabled, 10) === 1 && dev.snmp_ports_json) {
+        try {
+            var snmp = JSON.parse(dev.snmp_ports_json) || {};
+            lines.push('');
+            lines.push('[4. SNMP v2c HARDWARE- & PORT-DETAILS]');
+            lines.push('SNMP sysName:         ' + (snmp.sysName || dev.snmp_sysname || '-'));
+            lines.push('Gerätemodell:         ' + (snmp.deviceModel || '-'));
+            lines.push('Seriennummer:         ' + (snmp.serialNumber || '-'));
+            lines.push('SNMP Uptime:          ' + (snmp.sysUpTime || '-'));
+            lines.push('SNMP Standort:        ' + (snmp.sysLocation || dev.snmp_location || '-'));
+            lines.push('SNMP sysDescr:        ' + (snmp.sysDescr || dev.snmp_sysdescr || '-'));
+
+            if (snmp.printer) {
+                lines.push('');
+                lines.push('--- DRUCKER-STATUS (PRINTER-MIB) ---');
+                lines.push('Gedruckte Seiten:     ' + (snmp.printer.page_count !== null ? snmp.printer.page_count : '-'));
+                lines.push('Display-Meldung:      ' + (snmp.printer.console_display || '-'));
+                if (snmp.printer.supplies && snmp.printer.supplies.length > 0) {
+                    for (var sp = 0; sp < snmp.printer.supplies.length; sp++) {
+                        var s = snmp.printer.supplies[sp];
+                        lines.push('  • ' + s.name + ': ' + s.percent + '% (' + s.level + '/' + s.max + ')');
+                    }
+                }
+            }
+
+            if (snmp.interfaces && snmp.interfaces.length > 0) {
+                lines.push('');
+                lines.push('--- INTERFACES / SWITCH-PORTS (' + snmp.interfaces.length + ') ---');
+                for (var idx = 0; idx < snmp.interfaces.length; idx++) {
+                    var inf = snmp.interfaces[idx];
+                    lines.push('  • #' + inf.ifIndex + ' ' + (inf.name || '-') + ' | Status: ' + String(inf.status || '').toUpperCase() + ' | Speed: ' + (inf.speed || '-') + ' | RX: ' + (inf.rx_mb || 0) + ' MB | TX: ' + (inf.tx_mb || 0) + ' MB | Fehler: ' + (inf.in_errors || 0) + (inf.alias ? (' | Alias: ' + inf.alias) : ''));
+                }
+            }
+        } catch (e) {}
+    }
+
+    lines.push('');
+    lines.push('====================================================================');
+
+    var safeIp = String(dev.ip_address || 'geraet').replace(/[^0-9a-zA-Z._-]/g, '_');
+    var safeName = String(displayName || '').replace(/[^0-9a-zA-Z_-]/g, '_').substring(0, 28);
+    var fileName = 'geraetedetails_' + safeIp + (safeName && safeName !== safeIp ? ('_' + safeName) : '') + '.txt';
+
+    var blob = new Blob([lines.join('\r\n')], { type: 'text/plain;charset=utf-8' });
+    var link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = fileName;
+    link.click();
+    showToast('Gerätedetails als "' + fileName + '" heruntergeladen!');
+}
+
 document.addEventListener('DOMContentLoaded', function () {
+    initFloatingInspectorDrag();
     document.addEventListener('click', function () {
         closeAllDropdowns();
     });
