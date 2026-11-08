@@ -1207,6 +1207,9 @@ try {
                 // data/-Verzeichnis aus dem Update-Archiv vor dem Kopieren entfernen, damit Datenbank & Symlink unberührt bleiben!
                 @shell_exec('rm -rf ' . escapeshellarg($tmpExtract . '/data'));
                 @shell_exec('cp -rf ' . escapeshellarg($tmpExtract) . '/* ' . escapeshellarg($rootDir) . '/ 2>&1');
+                if (is_file($tmpExtract . '/.htaccess')) {
+                    @copy($tmpExtract . '/.htaccess', $rootDir . '/.htaccess');
+                }
                 @shell_exec('rm -rf ' . escapeshellarg($tmpTar) . ' ' . escapeshellarg($tmpExtract));
                 $outputLines[] = 'Update-Archiv von GitHub (main) erfolgreich heruntergeladen und entpackt.';
             }
@@ -1215,20 +1218,31 @@ try {
                 @file_put_contents($customConfPath, $backupCustomConf);
             }
 
-            // Falls als systemd-Dienst (.deb Paket) installiert: PHP_CLI_SERVER_WORKERS=6 nachrüsten,
-            // damit parallele API-Anfragen (z.B. Alarme quittieren während eines Scans) nicht blockieren.
+            // Falls als systemd-Dienst (.deb Paket) installiert: PHP_CLI_SERVER_WORKERS=6 und Sicherheits-Router (router.php) nachrüsten
             $systemdUnit = '/lib/systemd/system/network-monitor.service';
             if (is_file($systemdUnit) && is_writable($systemdUnit)) {
                 $unitContent = (string)@file_get_contents($systemdUnit);
+                $unitChanged = false;
                 if ($unitContent !== '' && strpos($unitContent, 'PHP_CLI_SERVER_WORKERS') === false) {
                     $unitContent = str_replace(
                         "Type=simple\n",
                         "Type=simple\nEnvironment=\"PHP_CLI_SERVER_WORKERS=6\"\n",
                         $unitContent
                     );
+                    $unitChanged = true;
+                }
+                if ($unitContent !== '' && strpos($unitContent, 'router.php') === false && is_file('/opt/network-monitor/router.php')) {
+                    $unitContent = preg_replace(
+                        '#^ExecStart=.*$#m',
+                        'ExecStart=/bin/sh -c \'exec /usr/bin/php -d expose_php=0 -d variables_order=EGPCS -d session.use_strict_mode=1 -d session.cookie_httponly=1 -d session.cookie_samesite=Lax -S ${BIND_ADDR:-0.0.0.0}:${PORT:-8085} -t /opt/network-monitor /opt/network-monitor/router.php\'',
+                        $unitContent
+                    );
+                    $unitChanged = true;
+                }
+                if ($unitChanged) {
                     @file_put_contents($systemdUnit, $unitContent);
                     @shell_exec('systemctl daemon-reload >/dev/null 2>&1');
-                    $outputLines[] = 'Systemd-Unit network-monitor.service auf Multi-Worker (PHP_CLI_SERVER_WORKERS=6) aktualisiert.';
+                    $outputLines[] = 'Systemd-Unit network-monitor.service (Multi-Worker + Security-Router) aktualisiert.';
                 }
             }
 

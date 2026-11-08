@@ -28,15 +28,38 @@ class Auth
             return;
         }
         if (!headers_sent()) {
+            if (function_exists('header_remove')) {
+                @header_remove('X-Powered-By');
+            }
             @header('X-Frame-Options: SAMEORIGIN');
             @header('X-Content-Type-Options: nosniff');
             @header('Referrer-Policy: same-origin');
+            @header('Permissions-Policy: camera=(), microphone=(), geolocation=()');
+            @header("Content-Security-Policy: frame-ancestors 'self'");
             @ini_set('session.use_only_cookies', '1');
+            @ini_set('session.use_strict_mode', '1');
             @ini_set('session.cookie_httponly', '1');
+            @ini_set('session.cookie_samesite', 'Lax');
         }
         if (session_status() === PHP_SESSION_NONE) {
             @session_start();
         }
+    }
+
+    /**
+     * Ermittelt die Client-IP-Adresse für das IP-basierte Brute-Force-Rate-Limiting.
+     */
+    private static function getClientIp()
+    {
+        return isset($_SERVER['REMOTE_ADDR']) ? trim((string)$_SERVER['REMOTE_ADDR']) : '0.0.0.0';
+    }
+
+    /**
+     * Gibt den Dateipfad für den IP-basierten Rate-Limit-Zähler zurück.
+     */
+    private static function getIpRateLimitFile()
+    {
+        return sys_get_temp_dir() . '/nm_rl_' . md5(self::getClientIp()) . '.json';
     }
 
     /**
@@ -52,8 +75,8 @@ class Auth
     }
 
     /**
-     * Prüft das Brute-Force-Rate-Limit für Login- und 2FA-Versuche.
-     * Wirft eine RuntimeException, falls die Sitzung wegen zu vieler Fehlversuche temporär gesperrt ist.
+     * Prüft das Brute-Force-Rate-Limit für Login- und 2FA-Versuche (sowohl Session- als auch IP-basiert).
+     * Wirft eine RuntimeException, falls die Sitzung oder IP wegen zu vieler Fehlversuche temporär gesperrt ist.
      */
     public static function checkRateLimit()
     {
@@ -63,10 +86,18 @@ class Auth
             $waitSec = (int)$_SESSION['nm_lockout_until'] - $now;
             throw new RuntimeException('Zu viele Fehlversuche! Bitte warte ' . $waitSec . ' Sekunden vor dem nächsten Versuch.');
         }
+        $rlFile = self::getIpRateLimitFile();
+        if (is_file($rlFile)) {
+            $rlData = @json_decode((string)@file_get_contents($rlFile), true);
+            if (is_array($rlData) && !empty($rlData['lockout_until']) && (int)$rlData['lockout_until'] > $now) {
+                $waitSec = (int)$rlData['lockout_until'] - $now;
+                throw new RuntimeException('Zu viele Fehlversuche von dieser IP-Adresse! Bitte warte ' . $waitSec . ' Sekunden.');
+            }
+        }
     }
 
     /**
-     * Registriert einen fehlgeschlagenen Anmelde- oder 2FA-Versuch.
+     * Registriert einen fehlgeschlagenen Anmelde- oder 2FA-Versuch (Session + IP + Syslog für Fail2ban).
      * Ab 6 Fehlversuchen innerhalb von 5 Minuten wird eine Sperre von 60 Sekunden aktiviert.
      */
     public static function recordFailedAttempt()
@@ -83,6 +114,31 @@ class Auth
         if ($_SESSION['nm_fail_count'] >= 6) {
             $_SESSION['nm_lockout_until'] = $now + 60;
         }
+
+        // IP-basierter Zähler (schützt auch gegen Angreifer ohne Session-Cookies)
+        $rlFile = self::getIpRateLimitFile();
+        $rlData = array('window' => $now, 'count' => 0, 'lockout_until' => 0);
+        if (is_file($rlFile)) {
+            $loaded = @json_decode((string)@file_get_contents($rlFile), true);
+            if (is_array($loaded)) {
+                $rlData = array_merge($rlData, $loaded);
+            }
+        }
+        if ($now - (int)$rlData['window'] > 300) {
+            $rlData['window'] = $now;
+            $rlData['count'] = 1;
+            $rlData['lockout_until'] = 0;
+        } else {
+            $rlData['count'] = (int)$rlData['count'] + 1;
+        }
+        if ($rlData['count'] >= 6) {
+            $rlData['lockout_until'] = $now + 90;
+        }
+        @file_put_contents($rlFile, json_encode($rlData));
+
+        if (function_exists('syslog')) {
+            @syslog(LOG_AUTH | LOG_WARNING, 'NetworkMonitor: Failed authentication attempt from ' . self::getClientIp());
+        }
     }
 
     /**
@@ -92,6 +148,10 @@ class Auth
     {
         self::startSession();
         unset($_SESSION['nm_fail_window'], $_SESSION['nm_fail_count'], $_SESSION['nm_lockout_until']);
+        $rlFile = self::getIpRateLimitFile();
+        if (is_file($rlFile)) {
+            @unlink($rlFile);
+        }
     }
 
     /**

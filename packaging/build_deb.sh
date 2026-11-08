@@ -39,6 +39,8 @@ cp "${PROJECT_ROOT}/database.sql"      "${BUILD_ROOT}/opt/network-monitor/"
 cp "${PROJECT_ROOT}/VERSION"           "${BUILD_ROOT}/opt/network-monitor/"
 cp "${PROJECT_ROOT}/README.md"         "${BUILD_ROOT}/opt/network-monitor/"
 cp "${PROJECT_ROOT}/INSTALL_HILFE.md"  "${BUILD_ROOT}/opt/network-monitor/"
+cp "${PROJECT_ROOT}/router.php"        "${BUILD_ROOT}/opt/network-monitor/"
+cp "${PROJECT_ROOT}/.htaccess"         "${BUILD_ROOT}/opt/network-monitor/"
 cp "${PROJECT_ROOT}"/includes/*.php    "${BUILD_ROOT}/opt/network-monitor/includes/"
 cp "${PROJECT_ROOT}"/assets/*          "${BUILD_ROOT}/opt/network-monitor/assets/"
 chmod 0755 "${BUILD_ROOT}/opt/network-monitor/cli_scan.php"
@@ -68,11 +70,17 @@ Type=simple
 Environment="PHP_CLI_SERVER_WORKERS=6"
 EnvironmentFile=-/etc/default/network-monitor
 WorkingDirectory=/opt/network-monitor
-ExecStart=/bin/sh -c 'exec /usr/bin/php -d variables_order=EGPCS -S ${BIND_ADDR:-0.0.0.0}:${PORT:-8085} -t /opt/network-monitor'
+ExecStart=/bin/sh -c 'exec /usr/bin/php -d expose_php=0 -d variables_order=EGPCS -d session.use_strict_mode=1 -d session.cookie_httponly=1 -d session.cookie_samesite=Lax -S ${BIND_ADDR:-0.0.0.0}:${PORT:-8085} -t /opt/network-monitor /opt/network-monitor/router.php'
 Restart=always
 RestartSec=3
 User=root
 Group=root
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictSUIDSGID=true
+UMask=0027
 
 [Install]
 WantedBy=multi-user.target
@@ -91,6 +99,12 @@ WorkingDirectory=/opt/network-monitor
 ExecStart=/usr/bin/php /opt/network-monitor/cli_scan.php --all
 User=root
 Group=root
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictSUIDSGID=true
+UMask=0027
 EOF
 chmod 0644 "${BUILD_ROOT}/lib/systemd/system/network-monitor-scan.service"
 
