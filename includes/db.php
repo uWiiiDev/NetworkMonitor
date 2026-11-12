@@ -89,7 +89,7 @@ class Database
 
         // Schema-Initialisierung nur einmalig pro Datenbank-Version ausführen,
         // um unnötige DDL-Schema-Locks bei parallelen Lese-/Schreibzugriffen zu vermeiden!
-        $targetSchemaVer = 1128;
+        $targetSchemaVer = 1129;
         $verStmt = $this->pdo->query('PRAGMA user_version');
         $curSchemaVer = $verStmt ? (int)$verStmt->fetchColumn() : 0;
         if ($verStmt) {

@@ -273,23 +273,29 @@ class OuiLookup
         if ($hasSnmpBridgeTable) {
             return 'switch';
         }
-        // Lokales DNS-Suffix (.fritz.box / .local) beim Hostnamen-Vergleich ignorieren
-        $hostShort = preg_replace('/\.(fritz\.box|local|lan)$/i', '', (string)$hostname);
+        // Lokales DNS-Suffix (.fritz.box / .local / .net) beim Hostnamen-Vergleich ignorieren
+        $hostShort = preg_replace('/\.(fritz\.box|local|lan|polizei-bw\.net)$/i', '', (string)$hostname);
+        $hostLower = strtolower($hostShort);
         $descrLower = strtolower((string)$snmpSysDescr . ' ' . (string)$vendor . ' ' . $hostShort . ' ' . (string)$serviceInfo);
+
+        // VRRP / HSRP Virtual Router MAC-Hersteller ("Icann, Iana Department") als Router klassifizieren
+        if (strpos($descrLower, 'icann, iana') !== false || strpos($descrLower, 'fortigate') !== false || strpos($descrLower, 'pfsense') !== false || strpos($descrLower, 'opnsense') !== false || preg_match('/^[a-z0-9]+rn[0-9]{4}$/i', $hostShort)) {
+            return 'router';
+        }
 
         if (
             strpos($descrLower, 'switch') !== false ||
+            strpos($descrLower, 'enterasys') !== false ||
+            strpos($descrLower, 'extreme networks') !== false ||
             strpos($descrLower, 'procurve') !== false ||
             strpos($descrLower, 'catalyst') !== false ||
             strpos($descrLower, 'aruba') !== false ||
             strpos($descrLower, 'prosafe') !== false ||
+            preg_match('/^sw[-_0-9]/i', $hostShort) ||
             preg_match('/\b(gs[0-9]{3}|fs[0-9]{3}|xs[0-9]{3}|jgs[0-9]{3}|sg[0-9]{3}|cbs[0-9]{3})\b/i', $descrLower) ||
             (strpos($descrLower, 'netgear') !== false && strpos($descrLower, 'repeater') === false && strpos($descrLower, 'orbi') === false && strpos($descrLower, '802.11') === false && strpos($descrLower, 'wlan') === false)
         ) {
             return 'switch';
-        }
-        if (strpos($descrLower, 'fortigate') !== false || strpos($descrLower, 'pfsense') !== false || strpos($descrLower, 'opnsense') !== false) {
-            return 'router';
         }
         // Weitere FRITZ!Boxen im selben Netz (z.B. FritzBoxEG / FritzBoxOG) als Mesh-AP / Router erkennen
         if (strpos($descrLower, 'fritz!box') !== false || strpos($descrLower, 'fritzbox') !== false) {
@@ -298,13 +304,31 @@ class OuiLookup
         if (strpos($descrLower, 'unifi ap') !== false || strpos($descrLower, 'access point') !== false || strpos($descrLower, 'repeater') !== false) {
             return 'ap';
         }
-        if (isset($openPorts[9100]) || isset($openPorts[515]) || isset($openPorts[631]) || strpos($descrLower, 'jetdirect') !== false || strpos($descrLower, 'drucker') !== false || strpos($descrLower, 'printer') !== false || strpos($descrLower, 'brother') !== false || strpos($descrLower, 'epson') !== false || strpos($descrLower, 'laserjet') !== false || strpos($descrLower, 'officejet') !== false) {
+        if (isset($openPorts[9100]) || isset($openPorts[515]) || isset($openPorts[631]) || strpos($descrLower, 'jetdirect') !== false || strpos($descrLower, 'drucker') !== false || strpos($descrLower, 'printer') !== false || strpos($descrLower, 'brother') !== false || strpos($descrLower, 'epson') !== false || strpos($descrLower, 'laserjet') !== false || strpos($descrLower, 'officejet') !== false || strpos($descrLower, 'kyocera') !== false || strpos($descrLower, 'lexmark') !== false || strpos($descrLower, 'zebra') !== false || preg_match('/^[a-z0-9]+dn[0-9]{4}$/i', $hostShort)) {
             return 'printer';
         }
-        if (strpos($descrLower, 'synology') !== false || strpos($descrLower, 'qnap') !== false || strpos($descrLower, 'vmware') !== false || strpos($descrLower, 'proxmox') !== false) {
+
+        // Eindeutige Client-Hostnamen (z.B. CN/CD für Client-Notebook / Client-Desktop, PC-, NB-, Desktop-, Laptop-)
+        // immer als Workstation einstufen – auch wenn Port 3389 (RDP) offen ist oder der Client in einer VMware-VDI läuft!
+        if (preg_match('/^([a-z]{3,8}[0-9]{2}c[nd][0-9]{3,5}|pc[-_]|nb[-_]|ws[-_]|desktop[-_]|laptop[-_]|ipad|iphone|android)/i', $hostShort)) {
+            return 'workstation';
+        }
+
+        // Eindeutige NAS- & Server-Kennungen
+        if (
+            strpos($descrLower, 'synology') !== false ||
+            strpos($descrLower, 'diskstation') !== false ||
+            strpos($descrLower, 'qnap') !== false ||
+            strpos($descrLower, 'proxmox') !== false ||
+            preg_match('/^([a-z]{3,8}[0-9]{2}s[dhas][0-9]{3,5}|srv[-_]|server[-_]|nas[-_]|dc[0-9])/i', $hostShort)
+        ) {
             return 'server';
         }
-        if (isset($openPorts[22]) || isset($openPorts[3306]) || isset($openPorts[3389])) {
+
+        // Typische Server-Dienste (Datenbank 3306, DNS 53, SSH 22 oder VMware Server ohne Client-Namen).
+        // Hinweis: Port 3389 (RDP) allein macht einen Windows-Rechner in Unternehmensnetzen NICHT zum Server,
+        // da Remote Desktop auf fast allen Windows 10/11 Domänen-Clients per GPO aktiviert ist!
+        if (isset($openPorts[22]) || isset($openPorts[3306]) || isset($openPorts[53]) || strpos($descrLower, 'vmware') !== false) {
             return 'server';
         }
         return 'workstation';
