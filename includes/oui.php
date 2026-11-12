@@ -304,7 +304,29 @@ class OuiLookup
         if (strpos($descrLower, 'unifi ap') !== false || strpos($descrLower, 'access point') !== false || strpos($descrLower, 'repeater') !== false) {
             return 'ap';
         }
-        if (isset($openPorts[9100]) || isset($openPorts[515]) || isset($openPorts[631]) || strpos($descrLower, 'jetdirect') !== false || strpos($descrLower, 'drucker') !== false || strpos($descrLower, 'printer') !== false || strpos($descrLower, 'brother') !== false || strpos($descrLower, 'epson') !== false || strpos($descrLower, 'laserjet') !== false || strpos($descrLower, 'officejet') !== false || strpos($descrLower, 'kyocera') !== false || strpos($descrLower, 'lexmark') !== false || strpos($descrLower, 'zebra') !== false || preg_match('/^[a-z0-9]+dn[0-9]{4}$/i', $hostShort)) {
+        // Raspberry Pi (z.B. Smartboard/Display-Steuerung) hat oft standardmäßig CUPS (Port 631) aktiv, ist aber kein Drucker!
+        if (strpos($descrLower, 'raspberry pi') !== false) {
+            return 'workstation';
+        }
+        $isKnownPrinterVendorOrName = (
+            strpos($descrLower, 'jetdirect') !== false ||
+            strpos($descrLower, 'drucker') !== false ||
+            strpos($descrLower, 'printer') !== false ||
+            strpos($descrLower, 'brother') !== false ||
+            strpos($descrLower, 'epson') !== false ||
+            strpos($descrLower, 'laserjet') !== false ||
+            strpos($descrLower, 'officejet') !== false ||
+            strpos($descrLower, 'kyocera') !== false ||
+            strpos($descrLower, 'lexmark') !== false ||
+            strpos($descrLower, 'zebra') !== false ||
+            strpos($descrLower, 'printronix') !== false ||
+            strpos($descrLower, 'canon') !== false ||
+            strpos($descrLower, 'ricoh') !== false ||
+            strpos($descrLower, 'konica') !== false ||
+            preg_match('/^[a-z0-9]+dn[0-9]{4}$/i', $hostShort)
+        );
+        // Port 631 (IPP/CUPS) läuft oft auch auf Linux/macOS-Clients; ohne Port 9100/515 oder Drucker-Hersteller nicht als Drucker werten
+        if (isset($openPorts[9100]) || isset($openPorts[515]) || $isKnownPrinterVendorOrName || (isset($openPorts[631]) && !isset($openPorts[22]))) {
             return 'printer';
         }
 

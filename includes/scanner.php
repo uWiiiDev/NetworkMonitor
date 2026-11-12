@@ -1959,19 +1959,25 @@ class NetworkScanner
             return $map;
         }
 
-        // Ermittle lokalen DNS-Server aus /etc/resolv.conf (oder nutze .1 Gateway des ersten Hosts)
-        $dnsServer = '127.0.0.53';
-        if (is_readable('/etc/resolv.conf')) {
-            $resolv = @file_get_contents('/etc/resolv.conf');
-            if ($resolv && preg_match('/^\s*nameserver\s+([0-9.]+)/m', $resolv, $m)) {
-                $dnsServer = $m[1];
+        // Ermittle alle konfigurierten DNS-Server aus /etc/resolv.conf bzw. /run/systemd/resolve/resolv.conf
+        $dnsServers = array();
+        foreach (array('/etc/resolv.conf', '/run/systemd/resolve/resolv.conf') as $resFile) {
+            if (is_readable($resFile)) {
+                $resolv = @file_get_contents($resFile);
+                if ($resolv && preg_match_all('/^\s*nameserver\s+([0-9.]+)/m', $resolv, $m)) {
+                    foreach ($m[1] as $nsIp) {
+                        if ($nsIp !== '127.0.0.53' && $nsIp !== '127.0.0.1' && !in_array($nsIp, $dnsServers, true)) {
+                            $dnsServers[] = $nsIp;
+                        }
+                    }
+                }
             }
         }
-        // Falls systemd-resolved (127.0.0.53), prüfe ob ein echter Router-DNS erreichbar ist
         $firstOctets = explode('.', $ipList[0]);
-        $routerDns = (count($firstOctets) === 4) ? ($firstOctets[0] . '.' . $firstOctets[1] . '.' . $firstOctets[2] . '.1') : $dnsServer;
+        $fallbackRouterDns = (count($firstOctets) === 4) ? ($firstOctets[0] . '.' . $firstOctets[1] . '.' . $firstOctets[2] . '.1') : '127.0.0.53';
+        $routerDns = !empty($dnsServers) ? $dnsServers[0] : $fallbackRouterDns;
 
-        $chunks = array_chunk($ipList, 64);
+        $chunks = array_chunk($ipList, 32);
         $timeoutSec = $timeoutMs / 1000.0;
 
         foreach ($chunks as $chunk) {
