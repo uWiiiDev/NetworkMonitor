@@ -227,7 +227,8 @@ class NetworkScanner
             );
 
             // 5. Multi-Host-Batch: HTTP/HTTPS (<title> + Server-Header) & SSH-Banner Grabbing für offene Ports
-            $batchBanners = $this->probeServiceBannersBatch($batchOpenPorts, 500);
+            // (1000ms Timeout, damit auch langsamere Embedded-Switch-SSH-Daemons wie Enterasys/Extreme zuverlässig antworten)
+            $batchBanners = $this->probeServiceBannersBatch($batchOpenPorts, 1000);
 
             // 6. Multi-Host-Batch: SNMP UDP-Vorfilter für je 100 Hosts gleichzeitig
             // Nur Geräte, die auf dieses schnelle UDP-Paket antworten, werden im Detail per SNMP abgefragt!
@@ -247,7 +248,7 @@ class NetworkScanner
                 $mac = (!$isProxyArp && !empty($hostMeta['mac'])) ? OuiLookup::normalizeMac($hostMeta['mac']) : null;
                 $vendor = $isProxyArp
                     ? ('VPN-Fernzugang / Proxy-ARP (via ' . $gatewayIp . ')')
-                    : ($mac ? OuiLookup::lookupVendor($mac) : null);
+                    : ($mac ? OuiLookup::lookupVendor($mac) : (!empty($prevDevicesByIp[$ip]['vendor']) ? $prevDevicesByIp[$ip]['vendor'] : null));
                 $ttl = isset($hostMeta['ttl']) ? $hostMeta['ttl'] : null;
 
                 $hostname = !empty($hostMeta['hostname'])
@@ -358,6 +359,15 @@ class NetworkScanner
                 }
                 if (!empty($bannerInfo['ssh_banner'])) {
                     $infoParts[] = 'SSH: ' . $bannerInfo['ssh_banner'];
+                    if ($vendor === null) {
+                        if (stripos($bannerInfo['ssh_banner'], 'SSH Secure Shell') !== false) {
+                            $vendor = 'Extreme Networks / Enterasys';
+                        } elseif (stripos($bannerInfo['ssh_banner'], '.RL') !== false) {
+                            $vendor = 'Extreme / Radlan Managed Switch';
+                        } elseif (stripos($bannerInfo['ssh_banner'], 'Cisco-') !== false) {
+                            $vendor = 'Cisco Systems, Inc';
+                        }
+                    }
                 }
                 if (!empty($nbInfo['workgroup'])) {
                     $infoParts[] = 'Workgroup: ' . $nbInfo['workgroup'];
@@ -370,8 +380,23 @@ class NetworkScanner
                 $autoType = $isProxyArp
                     ? 'workstation'
                     : OuiLookup::classifyDevice($ip, $gatewayIp, $vendor, $hostname, $openPorts, $snmpSysDescr, $hasBridgeTable, $serviceInfo);
+
+                // In dedizierten Switch-Management-Netzen (z.B. 80.2.201.0/24 oder Scopes mit "Switch" im Namen)
+                // Geräte, die ausschließlich Management-Ports (22/23/80/443) offen haben und keinen Server-Stack (SMB/Apache/Debian) zeigen, als Switch einstufen
+                $scopeMetaLower = strtolower((isset($scope['name']) ? $scope['name'] : '') . ' ' . (isset($scope['description']) ? $scope['description'] : ''));
+                $isSwitchMgmtScope = (strpos($scopeMetaLower, 'switch') !== false || strpos($ip, '80.2.201.') === 0);
+                if ($autoType === 'server' && $isSwitchMgmtScope && !isset($openPorts[445]) && !isset($openPorts[139]) && !isset($openPorts[3389]) && !isset($openPorts[3306])) {
+                    $srvLower = strtolower((string)$serviceInfo . ' ' . (string)$hostname);
+                    if (strpos($srvLower, 'debian') === false && strpos($srvLower, 'ubuntu') === false && strpos($srvLower, 'apache') === false && strpos($srvLower, 'syslog') === false) {
+                        $autoType = 'switch';
+                    }
+                }
+
                 if ($autoType === 'switch') {
                     $switchesFound++;
+                    if (empty($hostname)) {
+                        $hostname = 'sw-' . str_replace('.', '-', $ip);
+                    }
                 }
 
                 $osGuess = $this->guessOs($openPorts, $vendor, $snmpSysDescr, $autoType, $ttl, $hostname, $serviceInfo);
@@ -2536,6 +2561,12 @@ class NetworkScanner
                     $banners[$ip]['http_title'] = substr($title, 0, 65);
                 }
             }
+            if (empty($banners[$ip]['http_title']) && preg_match('/^WWW-Authenticate:\s*Basic\s+realm="([^"]+)"/mi', $buf, $rm)) {
+                $realm = trim($rm[1]);
+                if ($realm !== '') {
+                    $banners[$ip]['http_title'] = substr($realm, 0, 65);
+                }
+            }
         }
     }
 
@@ -2547,7 +2578,7 @@ class NetworkScanner
     private function guessOs($openPorts, $vendor, $snmpSysDescr, $deviceType, $ttl = null, $hostname = null, $serviceInfo = null)
     {
         // Lokales DNS-Suffix (.fritz.box / .local / .lan) vor dem Keyword-Matching entfernen!
-        $hostShort = preg_replace('/\.(fritz\.box|local|lan)$/i', '', (string)$hostname);
+        $hostShort = preg_replace('/\.(fritz\.box|local|lan|polizei-bw\.net)$/i', '', (string)$hostname);
 
         $combined = strtolower(
             (string)$snmpSysDescr . ' ' .
@@ -2563,7 +2594,13 @@ class NetworkScanner
         if (strpos($combined, 'cisco sg') !== false || strpos($combined, 'cisco sf') !== false || strpos($combined, 'small business') !== false || strpos($combined, 'goahead-webs') !== false && strpos($combined, 'cisco') !== false) {
             return 'Cisco Small Business Switch OS';
         }
-        if (strpos($combined, 'procurve') !== false || strpos($combined, 'arubaos') !== false) {
+        if (strpos($combined, 'ssh secure shell') !== false || strpos($combined, 'enterasys') !== false || strpos($combined, 'extreme networks') !== false || strpos($combined, 'exos') !== false) {
+            return 'Extreme / Enterasys Switch OS';
+        }
+        if (strpos($combined, '.rl') !== false || strpos($combined, 'radlan') !== false) {
+            return 'Managed Switch OS (Radlan / Extreme)';
+        }
+        if (strpos($combined, 'procurve') !== false || strpos($combined, 'arubaos') !== false || strpos($combined, 'comware') !== false) {
             return 'HP ArubaOS / ProCurve';
         }
         if (strpos($combined, 'netgear') !== false && $deviceType === 'switch') {
@@ -2670,7 +2707,15 @@ class NetworkScanner
             return 'Microsoft Windows 10 / 11';
         }
 
-        // 8. Linux / Unix (Port 22 SSH, Linux-Banner oder PC/Notebook mit TTL 64)
+        // 8. Managed Switches & Router (vor generischem Port-22/Linux-Check, da viele Switches SSH offen haben)
+        if ($deviceType === 'switch') {
+            return 'Managed Switch OS';
+        }
+        if ($deviceType === 'router') {
+            return 'Router / Firewall OS';
+        }
+
+        // 9. Linux / Unix (Port 22 SSH, Linux-Banner oder PC/Notebook mit TTL 64)
         if (strpos($combined, 'linux') !== false || isset($openPorts[22])) {
             return 'Linux / Unix';
         }

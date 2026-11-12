@@ -291,6 +291,14 @@ class OuiLookup
             strpos($descrLower, 'catalyst') !== false ||
             strpos($descrLower, 'aruba') !== false ||
             strpos($descrLower, 'prosafe') !== false ||
+            strpos($descrLower, 'ssh secure shell') !== false ||
+            strpos($descrLower, '.rl') !== false ||
+            strpos($descrLower, 'radlan') !== false ||
+            strpos($descrLower, 'web management') !== false ||
+            strpos($descrLower, 'cisco-') !== false ||
+            strpos($descrLower, 'mocana') !== false ||
+            strpos($descrLower, 'comware') !== false ||
+            strpos($descrLower, 'exos') !== false ||
             preg_match('/^sw[-_0-9]/i', $hostShort) ||
             preg_match('/\b(gs[0-9]{3}|fs[0-9]{3}|xs[0-9]{3}|jgs[0-9]{3}|sg[0-9]{3}|cbs[0-9]{3})\b/i', $descrLower) ||
             (strpos($descrLower, 'netgear') !== false && strpos($descrLower, 'repeater') === false && strpos($descrLower, 'orbi') === false && strpos($descrLower, '802.11') === false && strpos($descrLower, 'wlan') === false)
