@@ -362,6 +362,15 @@ $gitShort = Database::getGitCommitShort();
                                 <option value="status">Nach Status (Online / Offline)</option>
                             </select>
                         </div>
+                        <div style="display:flex;align-items:center;gap:6px;">
+                            <span style="font-size:12px;color:var(--text-secondary);white-space:nowrap;">📄 Zeige:</span>
+                            <select id="inv-page-size" class="select-input" style="padding:4px 8px;font-size:12px;width:auto;" onchange="setInventoryPageSize(this.value)" title="Anzahl der angezeigten Geräte pro Seite">
+                                <option value="20">20 pro Seite</option>
+                                <option value="50" selected>50 pro Seite</option>
+                                <option value="100">100 pro Seite</option>
+                                <option value="0">Alle anzeigen</option>
+                            </select>
+                        </div>
                         <div class="dropdown">
                             <button class="btn btn-sm" onclick="toggleDropdown('dd-inv-cols', event)">
                                 ☷ Spalten ▾

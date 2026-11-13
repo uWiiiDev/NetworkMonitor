@@ -1224,7 +1224,7 @@ function renderScopesList() {
  */
 function filterByScope(scopeId) {
     AppState.selectedScopeId = scopeId;
-    InvTableState.renderLimit = 150;
+    InvTableState.currentPage = 1;
     renderScopesList();
     renderGroupFilterBar();
     var invPane = document.getElementById('view-inventory');
@@ -1255,7 +1255,7 @@ function onMapSearchInput() {
 function onInvSearchInput() {
     if (_invSearchTimer) clearTimeout(_invSearchTimer);
     _invSearchTimer = setTimeout(function () {
-        InvTableState.renderLimit = 150;
+        InvTableState.currentPage = 1;
         renderInventoryTable();
     }, 140);
 }
@@ -3599,20 +3599,127 @@ var InvTableState = {
     collapsedGroups: {}, // { groupKey: true }
     openFilterCol: null,
     lastFilteredRows: [],
-    renderLimit: 150,    // Progressive Zeilen-Darstellung für sofortigen Seitenaufbau bei 1.000+ Geräten
+    pageSize: 50,        // Anzahl Geräte pro Seite: 20, 50, 100 oder 0 (Alle)
+    currentPage: 1,      // Aktuelle Seite (1-basiert)
     needsRender: false
 };
 
+try {
+    var savedPageSize = localStorage.getItem('nm_inv_page_size');
+    if (savedPageSize !== null && savedPageSize !== undefined && savedPageSize !== '') {
+        var parsedPs = parseInt(savedPageSize, 10);
+        if (parsedPs === 0 || parsedPs === 20 || parsedPs === 50 || parsedPs === 100) {
+            InvTableState.pageSize = parsedPs;
+        }
+    }
+} catch (e) {}
+
 /**
- * Lädt weitere Zeilen in der Inventartabelle nach (oder zeigt mit count=0 alle Zeilen an).
+ * Ändert die Anzahl der angezeigten Geräte pro Seite (20, 50, 100 oder 0 = Alle) und speichert die Einstellung.
  */
-function loadMoreInventoryRows(count) {
-    if (!count || count <= 0) {
-        InvTableState.renderLimit = 999999;
-    } else {
-        InvTableState.renderLimit = (InvTableState.renderLimit || 150) + count;
+function setInventoryPageSize(sizeVal) {
+    var ps = parseInt(sizeVal, 10);
+    if (isNaN(ps) || ps < 0) ps = 50;
+    InvTableState.pageSize = ps;
+    InvTableState.currentPage = 1;
+    try {
+        localStorage.setItem('nm_inv_page_size', String(ps));
+    } catch (e) {}
+    var sel = document.getElementById('inv-page-size');
+    if (sel && sel.value !== String(ps)) {
+        sel.value = String(ps);
     }
     renderInventoryTable();
+}
+
+/**
+ * Blättert in der Inventartabelle auf eine bestimmte Seite (1 .. totalPages) und scrollt an den Tabellenanfang.
+ */
+function goToInventoryPage(pageNum) {
+    var p = parseInt(pageNum, 10);
+    if (isNaN(p) || p < 1) p = 1;
+    InvTableState.currentPage = p;
+    renderInventoryTable();
+    var scrollBox = document.querySelector('#view-inventory .content-scroll');
+    if (scrollBox) {
+        scrollBox.scrollTop = 0;
+    }
+}
+
+/**
+ * Erzeugt die HTML-Blätterleiste (Pagination + Schnellauswahl 20 / 50 / 100 / Alle) für Kopf- und Fußbereich der Inventartabelle.
+ */
+function buildInventoryPaginationHtml(currentPage, totalPages, startRow, endRow, totalRows) {
+    var ps = InvTableState.pageSize;
+    var sizeOptions = [
+        { val: 20,  lbl: '20' },
+        { val: 50,  lbl: '50' },
+        { val: 100, lbl: '100' },
+        { val: 0,   lbl: 'Alle' }
+    ];
+    var sizePills = '<div style="display:inline-flex;align-items:center;gap:3px;background:rgba(15,23,42,0.8);border:1px solid var(--border-color);border-radius:6px;padding:2px 4px;">' +
+        '<span style="font-size:11px;color:var(--text-secondary);padding:0 4px;">Zeige:</span>';
+    for (var s = 0; s < sizeOptions.length; s++) {
+        var so = sizeOptions[s];
+        var isActSize = (ps === so.val);
+        var pillStyle = isActSize
+            ? 'background:#3b82f6;color:#ffffff;font-weight:700;border:none;'
+            : 'background:transparent;color:var(--text-secondary);border:none;';
+        sizePills += '<button type="button" class="btn btn-sm" style="padding:1px 7px;font-size:11px;border-radius:4px;' + pillStyle + '" onclick="setInventoryPageSize(' + so.val + ')" title="' + (so.val === 0 ? 'Alle Geräte auf einer Seite zeigen' : (so.val + ' Geräte pro Seite zeigen')) + '">' + so.lbl + '</button>';
+    }
+    sizePills += '</div>';
+
+    if (totalRows === 0) {
+        return '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">' + sizePills + '</div>';
+    }
+
+    var rangeText = (ps === 0 || totalPages <= 1)
+        ? ('Zeige <b>1–' + totalRows + '</b> von <b>' + totalRows + '</b>')
+        : ('Zeige <b>' + startRow + '–' + endRow + '</b> von <b>' + totalRows + '</b> (Seite ' + currentPage + '/' + totalPages + ')');
+
+    var navBtns = '';
+    if (ps > 0 && totalPages > 1) {
+        var prevDisabled = (currentPage <= 1);
+        var nextDisabled = (currentPage >= totalPages);
+        navBtns += '<div style="display:inline-flex;align-items:center;gap:4px;flex-wrap:wrap;">';
+        navBtns += '<button type="button" class="btn btn-sm" style="padding:2px 7px;font-size:11px;' + (prevDisabled ? 'opacity:0.4;pointer-events:none;' : '') + '" onclick="goToInventoryPage(1)" title="Erste Seite">⏮</button>';
+        navBtns += '<button type="button" class="btn btn-sm" style="padding:2px 8px;font-size:11px;' + (prevDisabled ? 'opacity:0.4;pointer-events:none;' : '') + '" onclick="goToInventoryPage(' + (currentPage - 1) + ')" title="Vorherige Seite">◀ Zurück</button>';
+
+        // Seiten-Nummern mit Auslassungspunkten berechnen
+        var pagesToShow = [];
+        pagesToShow.push(1);
+        for (var p = Math.max(2, currentPage - 2); p <= Math.min(totalPages - 1, currentPage + 2); p++) {
+            pagesToShow.push(p);
+        }
+        if (totalPages > 1) {
+            pagesToShow.push(totalPages);
+        }
+
+        var lastP = 0;
+        for (var pi = 0; pi < pagesToShow.length; pi++) {
+            var pg = pagesToShow[pi];
+            if (pg === lastP) continue;
+            if (pg - lastP > 1) {
+                navBtns += '<span style="color:var(--text-secondary);padding:0 3px;font-size:11px;">…</span>';
+            }
+            var isCur = (pg === currentPage);
+            var pgStyle = isCur
+                ? 'background:#3b82f6;border-color:#60a5fa;color:#ffffff;font-weight:700;'
+                : 'background:rgba(30,41,59,0.85);color:#cbd5e1;';
+            navBtns += '<button type="button" class="btn btn-sm" style="padding:2px 8px;font-size:11px;min-width:26px;justify-content:center;font-family:monospace;' + pgStyle + '" onclick="goToInventoryPage(' + pg + ')">' + pg + '</button>';
+            lastP = pg;
+        }
+
+        navBtns += '<button type="button" class="btn btn-sm" style="padding:2px 8px;font-size:11px;' + (nextDisabled ? 'opacity:0.4;pointer-events:none;' : '') + '" onclick="goToInventoryPage(' + (currentPage + 1) + ')" title="Nächste Seite">Weiter ▶</button>';
+        navBtns += '<button type="button" class="btn btn-sm" style="padding:2px 7px;font-size:11px;' + (nextDisabled ? 'opacity:0.4;pointer-events:none;' : '') + '" onclick="goToInventoryPage(' + totalPages + ')" title="Letzte Seite">⏭</button>';
+        navBtns += '</div>';
+    }
+
+    return '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">' +
+        '<span style="font-size:11.5px;color:#cbd5e1;">' + rangeText + '</span>' +
+        navBtns +
+        sizePills +
+    '</div>';
 }
 
 try {
@@ -3775,6 +3882,7 @@ function sortInventoryBy(colKey, forceDir) {
 function setInventoryGroupBy(groupField) {
     InvTableState.groupBy = groupField || '';
     InvTableState.collapsedGroups = {};
+    InvTableState.currentPage = 1;
     var sel = document.getElementById('inv-group-by');
     if (sel && sel.value !== InvTableState.groupBy) {
         sel.value = InvTableState.groupBy;
@@ -3810,6 +3918,7 @@ function quickFilterInventoryByValue(colKey, exactVal) {
             allowedValues: map
         };
     }
+    InvTableState.currentPage = 1;
     renderInventoryTable();
 }
 
@@ -3818,6 +3927,8 @@ function quickFilterInventoryByValue(colKey, exactVal) {
  */
 function clearSingleColumnFilter(colKey) {
     delete InvTableState.colFilters[colKey];
+    InvTableState.currentPage = 1;
+    InvTableState.currentPage = 1;
     closeInvColumnFilterPopover();
     renderInventoryTable();
 }
@@ -3827,8 +3938,10 @@ function clearSingleColumnFilter(colKey) {
  */
 function clearAllInventoryFilters() {
     InvTableState.colFilters = {};
+    InvTableState.currentPage = 1;
     var searchEl = document.getElementById('inv-search');
     if (searchEl) searchEl.value = '';
+    InvTableState.currentPage = 1;
     closeInvColumnFilterPopover();
     renderInventoryTable();
 }
@@ -4063,6 +4176,7 @@ function applyInvColumnFilter(colKey) {
         };
     }
 
+    InvTableState.currentPage = 1;
     closeInvColumnFilterPopover();
     renderInventoryTable();
 }
@@ -4376,7 +4490,42 @@ function renderInventoryTable() {
         if (parseInt(gd.snmp_enabled || 0, 10) === 1) groupSummaries[gInfo.key].snmp++;
     }
 
-    // 5. Filter- & Gruppen-Summen-Leiste (#inv-filter-summary-bar) rendern
+    // 5. Seitenberechnung (Pagination: 20, 50, 100 oder Alle)
+    InvTableState.needsRender = false;
+    var ps = parseInt(InvTableState.pageSize, 10);
+    if (isNaN(ps) || ps < 0) ps = 50;
+    var pageSizeSelectEl = document.getElementById('inv-page-size');
+    if (pageSizeSelectEl && pageSizeSelectEl.value !== String(ps)) {
+        pageSizeSelectEl.value = String(ps);
+    }
+
+    var grpOrder = [];
+    var totalPaginatedItems = rowsData.length;
+    if (InvTableState.groupBy && rowsData.length > 0) {
+        grpOrder = Object.keys(groupSummaries).sort(function (a, b) {
+            return groupSummaries[b].items.length - groupSummaries[a].items.length;
+        });
+        var uncollapsedCnt = 0;
+        for (var gci = 0; gci < grpOrder.length; gci++) {
+            var gObjCnt = groupSummaries[grpOrder[gci]];
+            if (!InvTableState.collapsedGroups[gObjCnt.key]) {
+                uncollapsedCnt += gObjCnt.items.length;
+            }
+        }
+        totalPaginatedItems = uncollapsedCnt;
+    }
+
+    var totalPages = (ps > 0 && totalPaginatedItems > 0) ? Math.max(1, Math.ceil(totalPaginatedItems / ps)) : 1;
+    if (InvTableState.currentPage > totalPages) InvTableState.currentPage = totalPages;
+    if (InvTableState.currentPage < 1) InvTableState.currentPage = 1;
+
+    var startIndex = (ps > 0) ? ((InvTableState.currentPage - 1) * ps) : 0;
+    var endIndex = (ps > 0) ? Math.min(totalPaginatedItems, startIndex + ps) : totalPaginatedItems;
+    var dispStart = totalPaginatedItems > 0 ? (startIndex + 1) : 0;
+    var dispEnd = endIndex;
+    var paginationBarHtml = buildInventoryPaginationHtml(InvTableState.currentPage, totalPages, dispStart, dispEnd, totalPaginatedItems);
+
+    // 6. Filter-, Gruppen-Summen- & Blätter-Leiste (#inv-filter-summary-bar) rendern
     if (summaryBar) {
         var activeFltBadges = '';
         for (var af = 0; af < activeFilterKeys.length; af++) {
@@ -4425,26 +4574,33 @@ function renderInventoryTable() {
                     (offlineTotal > 0 ? ('<span class="badge badge-offline">' + offlineTotal + ' Offline</span>') : '') +
                     '<span class="badge badge-snmp">' + snmpTotal + ' SNMP</span>' +
                     activeFltBadges +
+                    (hasAnyFilter ? '<button class="btn btn-sm" style="padding:2px 8px;font-size:11px;border-color:#ef4444;color:#fca5a5;" onclick="clearAllInventoryFilters()">✕ Alle Filter zurücksetzen</button>' : '') +
                 '</div>' +
-                (hasAnyFilter ? '<button class="btn btn-sm" style="padding:2px 8px;font-size:11px;border-color:#ef4444;color:#fca5a5;" onclick="clearAllInventoryFilters()">✕ Alle Filter zurücksetzen</button>' : '<span style="font-size:11px;color:var(--text-secondary);">💡 Tipp: Klicke auf <b>⧩</b> im Spaltenkopf für Excel-Filter („Enthält", Werteliste &amp; Summen)</span>') +
+                paginationBarHtml +
             '</div>' +
             (groupChipsHtml ? ('<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;"><span style="font-size:11px;color:var(--text-secondary);font-weight:600;">Gruppen-Summen (' + groupKeysSorted.length + '):</span>' + groupChipsHtml + '</div>') : '');
     }
 
-    // 6. Tabellenzeilen (flach oder gruppiert mit Zwischensummen) progressiv rendern
-    InvTableState.needsRender = false;
+    // 7. Tabellenzeilen der aktuellen Seite (flach oder gruppiert) rendern
     var html = '';
     var colSpanCount = Math.max(1, activeCols.length);
-    var maxRowsToRender = InvTableState.renderLimit || 150;
-    var renderedRowCount = 0;
 
     if (InvTableState.groupBy && rowsData.length > 0) {
-        var grpOrder = Object.keys(groupSummaries).sort(function (a, b) {
-            return groupSummaries[b].items.length - groupSummaries[a].items.length;
-        });
+        var globalItemCursor = 0;
         for (var gi = 0; gi < grpOrder.length; gi++) {
             var grpObj = groupSummaries[grpOrder[gi]];
             var isCollapsed = !!InvTableState.collapsedGroups[grpObj.key];
+            var grpStartIdx = globalItemCursor;
+            var grpEndIdx = isCollapsed ? grpStartIdx : (grpStartIdx + grpObj.items.length);
+            if (!isCollapsed) {
+                globalItemCursor = grpEndIdx;
+            }
+
+            // Wenn seitenweise geblättert wird, nur Gruppen rendern, die auf der aktuellen Seite liegen (oder eingeklappt sind)
+            if (ps > 0 && !isCollapsed && (grpEndIdx <= startIndex || grpStartIdx >= endIndex)) {
+                continue;
+            }
+
             var safeGKey = grpObj.key.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
             html +=
                 '<tr style="background:rgba(30,41,59,0.92);border-top:2px solid #334155;cursor:pointer;" onclick="toggleInventoryGroupCollapse(\'' + safeGKey + '\')">' +
@@ -4465,33 +4621,17 @@ function renderInventoryTable() {
                 '</tr>';
 
             if (!isCollapsed) {
-                for (var itemIdx = 0; itemIdx < grpObj.items.length; itemIdx++) {
-                    if (renderedRowCount >= maxRowsToRender) break;
+                var itemFrom = (ps > 0) ? Math.max(0, startIndex - grpStartIdx) : 0;
+                var itemTo = (ps > 0) ? Math.min(grpObj.items.length, endIndex - grpStartIdx) : grpObj.items.length;
+                for (var itemIdx = itemFrom; itemIdx < itemTo; itemIdx++) {
                     html += renderSingleInventoryRowHtml(grpObj.items[itemIdx], activeCols);
-                    renderedRowCount++;
                 }
             }
         }
     } else {
-        var flatLimit = Math.min(rowsData.length, maxRowsToRender);
-        for (var r = 0; r < flatLimit; r++) {
+        for (var r = startIndex; r < endIndex; r++) {
             html += renderSingleInventoryRowHtml(rowsData[r], activeCols);
-            renderedRowCount++;
         }
-    }
-
-    if (rowsData.length > renderedRowCount) {
-        var remainingRows = rowsData.length - renderedRowCount;
-        html +=
-            '<tr style="background:rgba(30,41,59,0.75);border-top:1px dashed #3b82f6;">' +
-                '<td colspan="' + colSpanCount + '" style="text-align:center;padding:12px;">' +
-                    '<div style="display:inline-flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:center;">' +
-                        '<span style="color:#cbd5e1;font-size:12.5px;">⚡ Schnelle Ansicht: Zeige <b>' + renderedRowCount + '</b> von <b>' + rowsData.length + '</b> Geräten (' + remainingRows + ' weitere ausgeblendet)</span>' +
-                        '<button type="button" class="btn btn-sm btn-primary" onclick="loadMoreInventoryRows(250)">➕ Weitere 250 laden</button>' +
-                        '<button type="button" class="btn btn-sm" style="border-color:#60a5fa;color:#93c5fd;" onclick="loadMoreInventoryRows(0)">📋 Alle ' + rowsData.length + ' Geräte anzeigen</button>' +
-                    '</div>' +
-                '</td>' +
-            '</tr>';
     }
 
     if (html === '') {
@@ -4504,10 +4644,15 @@ function renderInventoryTable() {
             tfoot.innerHTML =
                 '<tr style="background:rgba(15,23,42,0.95);border-top:2px solid #3b82f6;font-weight:700;">' +
                     '<td colspan="' + colSpanCount + '" style="padding:10px 14px;color:#e2e8f0;font-size:12.5px;">' +
-                        '∑ Gesamtsumme (aktuelle Filterauswahl): <span style="color:#60a5fa;">' + rowsData.length + ' Geräte</span> ' +
-                        '&nbsp;•&nbsp; <span style="color:#34d399;">' + onlineTotal + ' Online</span> ' +
-                        '&nbsp;•&nbsp; <span style="color:#fca5a5;">' + offlineTotal + ' Offline</span> ' +
-                        '&nbsp;•&nbsp; <span style="color:#93c5fd;">' + snmpTotal + ' SNMP-Switches/Hosts</span>' +
+                        '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">' +
+                            '<div>' +
+                                '∑ Gesamtsumme (Filterauswahl): <span style="color:#60a5fa;">' + rowsData.length + ' Geräte</span> ' +
+                                '&nbsp;•&nbsp; <span style="color:#34d399;">' + onlineTotal + ' Online</span> ' +
+                                '&nbsp;•&nbsp; <span style="color:#fca5a5;">' + offlineTotal + ' Offline</span> ' +
+                                '&nbsp;•&nbsp; <span style="color:#93c5fd;">' + snmpTotal + ' SNMP-Switches/Hosts</span>' +
+                            '</div>' +
+                            paginationBarHtml +
+                        '</div>' +
                     '</td>' +
                 '</tr>';
         } else {
