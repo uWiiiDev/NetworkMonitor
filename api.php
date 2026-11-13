@@ -14,6 +14,9 @@
  * Kompatibel mit PHP 5.5+ (Ubuntu 14.04) bis PHP 8.x.
  */
 
+if (extension_loaded('zlib') && !ini_get('zlib.output_compression') && isset($_SERVER['HTTP_ACCEPT_ENCODING']) && strpos($_SERVER['HTTP_ACCEPT_ENCODING'], 'gzip') !== false) {
+    @ob_start('ob_gzhandler');
+}
 header('Content-Type: application/json; charset=utf-8');
 header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
 header('Pragma: no-cache');
@@ -79,10 +82,16 @@ try {
                     $hiddenCoreIds[(int)$dRow['id']] = (int)$dRow['scope_id'];
                     continue;
                 }
-                $profInfo = SnmpClient::detectSwitchCliProfile($dRow);
-                $dRow['cli_profile'] = $profInfo['profile'];
-                $dRow['cli_profile_label'] = $profInfo['label'];
-                $dRow['cli_profile_is_manual'] = !empty($profInfo['is_manual']) ? 1 : 0;
+                if ($dRow['device_type'] === 'switch' || $dRow['device_type'] === 'router' || $dRow['device_type'] === 'ap') {
+                    $profInfo = SnmpClient::detectSwitchCliProfile($dRow);
+                    $dRow['cli_profile'] = $profInfo['profile'];
+                    $dRow['cli_profile_label'] = $profInfo['label'];
+                    $dRow['cli_profile_is_manual'] = !empty($profInfo['is_manual']) ? 1 : 0;
+                } else {
+                    $dRow['cli_profile'] = 'cisco_ios';
+                    $dRow['cli_profile_label'] = '';
+                    $dRow['cli_profile_is_manual'] = 0;
+                }
                 $rawWrite = isset($dRow['switch_snmp_write_community']) ? (string)$dRow['switch_snmp_write_community'] : '';
                 if (preg_match('/^profile:[a-z0-9_]+\|(.*)$/i', $rawWrite, $wm)) {
                     $rawWrite = $wm[1];
@@ -174,7 +183,7 @@ try {
                 }
             } catch (Exception $e) {}
 
-            $nmapPath = trim((string)@shell_exec('which nmap 2>/dev/null'));
+            $nmapPath = is_executable('/usr/bin/nmap') ? '/usr/bin/nmap' : (is_executable('/bin/nmap') ? '/bin/nmap' : '');
             $snmpExt = extension_loaded('snmp');
 
             $fullConfAll = $db->getConfig();
@@ -182,15 +191,17 @@ try {
             if ($cronIntMin <= 0) {
                 $cronIntMin = 15;
             }
-            $crontabRaw = (string)@shell_exec('crontab -l 2>/dev/null');
-            $cronActive = false;
+            $cronActive = !empty($fullConfAll['scanner']['cron_active']);
             $detectedCronMin = $cronIntMin;
-            if ($crontabRaw !== '' && strpos($crontabRaw, 'cli_scan.php') !== false) {
-                $cronActive = true;
-                if (preg_match('/^\s*\*\/([0-9]+)\s+\*\s+\*\s+\*\s+\*.*cli_scan\.php/m', $crontabRaw, $cm)) {
-                    $detectedCronMin = (int)$cm[1];
-                } elseif (preg_match('/^\s*0\s+\*\s+\*\s+\*\s+\*.*cli_scan\.php/m', $crontabRaw)) {
-                    $detectedCronMin = 60;
+            if ($currentUser['role'] === 'admin') {
+                $crontabRaw = (string)@shell_exec('crontab -l 2>/dev/null');
+                if ($crontabRaw !== '' && strpos($crontabRaw, 'cli_scan.php') !== false) {
+                    $cronActive = true;
+                    if (preg_match('/^\s*\*\/([0-9]+)\s+\*\s+\*\s+\*\s+\*.*cli_scan\.php/m', $crontabRaw, $cm)) {
+                        $detectedCronMin = (int)$cm[1];
+                    } elseif (preg_match('/^\s*0\s+\*\s+\*\s+\*\s+\*.*cli_scan\.php/m', $crontabRaw)) {
+                        $detectedCronMin = 60;
+                    }
                 }
             }
             $cronScheduleExpr = ($detectedCronMin === 60) ? '0 * * * *' : ('*/' . $detectedCronMin . ' * * * *');

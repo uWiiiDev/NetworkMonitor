@@ -201,13 +201,28 @@ class Database
      */
     public static function getGitCommitShort()
     {
+        static $cachedHash = null;
+        if ($cachedHash !== null) {
+            return $cachedHash;
+        }
         $rootDir = realpath(__DIR__ . '/..');
-        if ($rootDir && is_dir($rootDir . '/.git')) {
-            $hash = trim((string)@shell_exec('git -C ' . escapeshellarg($rootDir) . ' rev-parse --short HEAD 2>/dev/null'));
-            if ($hash !== '' && preg_match('/^[0-9a-f]{6,12}$/i', $hash)) {
-                return $hash;
+        if ($rootDir && is_readable($rootDir . '/.git/HEAD')) {
+            $head = trim((string)@file_get_contents($rootDir . '/.git/HEAD'));
+            if (strpos($head, 'ref: ') === 0) {
+                $refPath = $rootDir . '/.git/' . trim(substr($head, 5));
+                if (is_readable($refPath)) {
+                    $full = trim((string)@file_get_contents($refPath));
+                    if (preg_match('/^[0-9a-f]{7,40}$/i', $full)) {
+                        $cachedHash = substr($full, 0, 7);
+                        return $cachedHash;
+                    }
+                }
+            } elseif (preg_match('/^[0-9a-f]{7,40}$/i', $head)) {
+                $cachedHash = substr($head, 0, 7);
+                return $cachedHash;
             }
         }
+        $cachedHash = '';
         return '';
     }
 

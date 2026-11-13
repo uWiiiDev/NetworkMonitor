@@ -21,6 +21,10 @@
 require_once __DIR__ . '/includes/db.php';
 require_once __DIR__ . '/includes/auth.php';
 
+if (extension_loaded('zlib') && !ini_get('zlib.output_compression') && php_sapi_name() !== 'cli') {
+    @ob_start('ob_gzhandler');
+}
+
 $db = Database::getInstance();
 $currentUser = Auth::getCurrentUser();
 if (!$currentUser) {
@@ -204,7 +208,7 @@ $gitShort = Database::getGitCommitShort();
                             <option value="all">Alle Netzwerk-Scopes</option>
                         </select>
 
-                        <input type="text" id="map-search" class="search-input" placeholder="Suche IP, Name, MAC, Dose..." oninput="renderCurrentView()" style="width:190px;">
+                        <input type="text" id="map-search" class="search-input" placeholder="Suche IP, Name, MAC, Dose..." oninput="onMapSearchInput()" style="width:190px;">
                         <button class="btn btn-sm" style="border-color:#3b82f6;background:rgba(59,130,246,0.16);color:#93c5fd;font-weight:600;" onclick="openMacFinderModal(document.getElementById('map-search').value)" title="MAC-Adresse, Netzwerkdose oder Gerät suchen und sofort sehen, an welchem Switch-Port es gesteckt ist">
                             🔍 MAC / Port / Dosen-Finder
                         </button>
@@ -339,7 +343,7 @@ $gitShort = Database::getGitCommitShort();
                 <div class="map-toolbar" style="flex-wrap:wrap;gap:8px;">
                     <div class="toolbar-group" style="flex-wrap:wrap;">
                         <div class="panel-title">Gefundene Hosts &amp; Managed Switches</div>
-                        <input type="text" id="inv-search" class="search-input" placeholder="Schnellsuche (IP, MAC, Port, Dose)..." oninput="renderInventoryTable()" style="width:210px;">
+                        <input type="text" id="inv-search" class="search-input" placeholder="Schnellsuche (IP, MAC, Port, Dose)..." oninput="onInvSearchInput()" style="width:210px;">
                         <button class="btn btn-sm" style="border-color:#3b82f6;background:rgba(59,130,246,0.16);color:#93c5fd;font-weight:600;" onclick="openMacFinderModal(document.getElementById('inv-search').value)" title="Gezielte MAC-Adress-, Netzwerkdosen- &amp; Switch-Port-Suche öffnen">
                             🔍 MAC / Port / Dosen-Finder
                         </button>
