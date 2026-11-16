@@ -909,6 +909,13 @@ $gitShort = Database::getGitCommitShort();
                     </div>
                 </div>
 
+                <div style="background:rgba(59,130,246,0.1);border:1px solid rgba(59,130,246,0.35);border-radius:8px;padding:9px 12px;">
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12.5px;font-weight:600;color:#93c5fd;">
+                        <input type="checkbox" id="scope-snmp-apply-all" checked>
+                        <span>🌐 Diese SNMP-Zugangsdaten allgemein für <b>alle Netzwerk-Scopes (alle Switche)</b> übernehmen</span>
+                    </label>
+                </div>
+
                 <div class="form-group">
                     <label>Beschreibung / Standort</label>
                     <input type="text" id="scope-desc" class="form-input" placeholder="Optionale Notiz zum Subnetz">

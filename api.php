@@ -443,6 +443,13 @@ try {
                 $prevStmt = $pdo->prepare("SELECT snmp_v3_auth_pass, snmp_v3_priv_pass FROM scopes WHERE id = :id");
                 $prevStmt->execute(array(':id' => $id));
                 $prevScope = $prevStmt->fetch();
+                if ((!$prevScope || empty($prevScope['snmp_v3_auth_pass'])) && $v3AuthPassIn === '') {
+                    $anyPassStmt = $pdo->query("SELECT snmp_v3_auth_pass, snmp_v3_priv_pass FROM scopes WHERE snmp_v3_auth_pass IS NOT NULL AND snmp_v3_auth_pass != '' LIMIT 1");
+                    $anyScope = $anyPassStmt ? $anyPassStmt->fetch() : null;
+                    if ($anyScope) {
+                        $prevScope = $anyScope;
+                    }
+                }
                 $finalAuthPass = ($v3AuthPassIn !== '' && $v3AuthPassIn !== '••••••••')
                     ? $v3AuthPassIn
                     : ($prevScope && isset($prevScope['snmp_v3_auth_pass']) ? $prevScope['snmp_v3_auth_pass'] : '');
@@ -480,6 +487,15 @@ try {
                     ':id'    => $id,
                 ));
             } else {
+                $anyPassStmt = $pdo->query("SELECT snmp_v3_auth_pass, snmp_v3_priv_pass FROM scopes WHERE snmp_v3_auth_pass IS NOT NULL AND snmp_v3_auth_pass != '' LIMIT 1");
+                $anyScope = $anyPassStmt ? $anyPassStmt->fetch() : null;
+                $finalAuthPass = ($v3AuthPassIn !== '' && $v3AuthPassIn !== '••••••••')
+                    ? $v3AuthPassIn
+                    : ($anyScope && isset($anyScope['snmp_v3_auth_pass']) ? $anyScope['snmp_v3_auth_pass'] : '');
+                $finalPrivPass = ($v3PrivPassIn !== '' && $v3PrivPassIn !== '••••••••')
+                    ? $v3PrivPassIn
+                    : ($anyScope && isset($anyScope['snmp_v3_priv_pass']) ? $anyScope['snmp_v3_priv_pass'] : '');
+
                 $stmt = $pdo->prepare("
                     INSERT INTO scopes (
                         name, cidr, gateway_ip, snmp_community, snmp_version,
@@ -502,9 +518,9 @@ try {
                     ':v3lvl' => $v3Level,
                     ':v3usr' => $v3User !== '' ? $v3User : null,
                     ':v3ap'  => $v3AuthProto,
-                    ':v3ak'  => ($v3AuthPassIn !== '' && $v3AuthPassIn !== '••••••••') ? $v3AuthPassIn : null,
+                    ':v3ak'  => $finalAuthPass !== '' ? $finalAuthPass : null,
                     ':v3pp'  => $v3PrivProto,
-                    ':v3pk'  => ($v3PrivPassIn !== '' && $v3PrivPassIn !== '••••••••') ? $v3PrivPassIn : null,
+                    ':v3pk'  => $finalPrivPass !== '' ? $finalPrivPass : null,
                     ':v3ctx' => $v3Context !== '' ? $v3Context : null,
                     ':desc'  => $desc,
                     ':vlan'  => $vlanId,
@@ -513,6 +529,33 @@ try {
                     ':now'   => date('Y-m-d H:i:s'),
                 ));
                 $id = (int)$pdo->lastInsertId();
+            }
+
+            // Falls der Haken "Für alle Netzwerk-Scopes übernehmen" gesetzt ist, auf sämtliche Scopes anwenden
+            if (!empty($input['apply_snmp_to_all'])) {
+                $allStmt = $pdo->prepare("
+                    UPDATE scopes SET
+                        snmp_community = :comm,
+                        snmp_version = :sver,
+                        snmp_v3_level = :v3lvl,
+                        snmp_v3_user = :v3usr,
+                        snmp_v3_auth_proto = :v3ap,
+                        snmp_v3_auth_pass = :v3ak,
+                        snmp_v3_priv_proto = :v3pp,
+                        snmp_v3_priv_pass = :v3pk,
+                        snmp_v3_context = :v3ctx
+                ");
+                $allStmt->execute(array(
+                    ':comm'  => $snmpComm,
+                    ':sver'  => $snmpVer,
+                    ':v3lvl' => $v3Level,
+                    ':v3usr' => $v3User !== '' ? $v3User : null,
+                    ':v3ap'  => $v3AuthProto,
+                    ':v3ak'  => $finalAuthPass !== '' ? $finalAuthPass : null,
+                    ':v3pp'  => $v3PrivProto,
+                    ':v3pk'  => $finalPrivPass !== '' ? $finalPrivPass : null,
+                    ':v3ctx' => $v3Context !== '' ? $v3Context : null,
+                ));
             }
 
             echo json_encode(array('ok' => true, 'scope_id' => $id));
