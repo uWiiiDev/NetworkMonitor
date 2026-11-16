@@ -13,15 +13,69 @@ class SnmpClient
     private $community;
     private $timeoutMs;
     private $sock = null;
+    private $isV3 = false;
+    private $v3Options = array();
 
     /**
-     * Initialisiert den SNMP-Client für eine Ziel-IP, Community und Timeout (in Millisekunden).
+     * Initialisiert den SNMP-Client für eine Ziel-IP, Community (oder SNMPv3-Options-Array) und Timeout (in Millisekunden).
+     *
+     * @param string       $ip        Ziel-IP-Adresse
+     * @param string|array $community SNMPv2c Community-String ODER SNMPv3-Konfigurationsarray
+     * @param int          $timeoutMs Timeout in Millisekunden
      */
     public function __construct($ip, $community = 'public', $timeoutMs = 500)
     {
         $this->ip = $ip;
-        $this->community = $community !== '' ? $community : 'public';
-        $this->timeoutMs = max(150, min(1500, (int)$timeoutMs));
+        $this->timeoutMs = max(150, min(2500, (int)$timeoutMs));
+        if (is_array($community)) {
+            $ver = isset($community['snmp_version']) ? strtolower(trim((string)$community['snmp_version'])) : '2c';
+            $v3User = isset($community['snmp_v3_user']) ? trim((string)$community['snmp_v3_user']) : '';
+            if (($ver === '3' || $ver === 'v3') && $v3User !== '') {
+                $this->isV3 = true;
+                $this->v3Options = array(
+                    'level'      => isset($community['snmp_v3_level']) && in_array($community['snmp_v3_level'], array('noAuthNoPriv', 'authNoPriv', 'authPriv'), true) ? $community['snmp_v3_level'] : 'authPriv',
+                    'user'       => $v3User,
+                    'auth_proto' => isset($community['snmp_v3_auth_proto']) && trim((string)$community['snmp_v3_auth_proto']) !== '' ? strtoupper(trim((string)$community['snmp_v3_auth_proto'])) : 'SHA',
+                    'auth_pass'  => isset($community['snmp_v3_auth_pass']) ? (string)$community['snmp_v3_auth_pass'] : '',
+                    'priv_proto' => isset($community['snmp_v3_priv_proto']) && trim((string)$community['snmp_v3_priv_proto']) !== '' ? strtoupper(trim((string)$community['snmp_v3_priv_proto'])) : 'AES',
+                    'priv_pass'  => isset($community['snmp_v3_priv_pass']) ? (string)$community['snmp_v3_priv_pass'] : '',
+                    'context'    => isset($community['snmp_v3_context']) ? trim((string)$community['snmp_v3_context']) : '',
+                );
+            }
+            $this->community = isset($community['snmp_community']) && trim((string)$community['snmp_community']) !== ''
+                ? trim((string)$community['snmp_community'])
+                : 'public';
+        } else {
+            $this->community = ($community !== '' && $community !== null) ? (string)$community : 'public';
+        }
+    }
+
+    /**
+     * Erzeugt aus einer Datenbank-Scope-Zeile (und einer optionalen gerätespezifischen Community)
+     * den passenden SNMP-Parameter (String für v2c oder Array für SNMPv3).
+     */
+    public static function buildScopeSnmpOptions(array $scopeRow, $customDeviceComm = '')
+    {
+        $customDeviceComm = trim((string)$customDeviceComm);
+        if ($customDeviceComm !== '') {
+            return $customDeviceComm;
+        }
+        $ver = isset($scopeRow['snmp_version']) ? strtolower(trim((string)$scopeRow['snmp_version'])) : '2c';
+        $v3User = isset($scopeRow['snmp_v3_user']) ? trim((string)$scopeRow['snmp_v3_user']) : '';
+        if (($ver === '3' || $ver === 'v3') && $v3User !== '') {
+            return array(
+                'snmp_version'       => '3',
+                'snmp_community'     => isset($scopeRow['snmp_community']) ? $scopeRow['snmp_community'] : 'public',
+                'snmp_v3_level'      => isset($scopeRow['snmp_v3_level']) ? $scopeRow['snmp_v3_level'] : 'authPriv',
+                'snmp_v3_user'       => $v3User,
+                'snmp_v3_auth_proto' => isset($scopeRow['snmp_v3_auth_proto']) ? $scopeRow['snmp_v3_auth_proto'] : 'SHA',
+                'snmp_v3_auth_pass'  => isset($scopeRow['snmp_v3_auth_pass']) ? $scopeRow['snmp_v3_auth_pass'] : '',
+                'snmp_v3_priv_proto' => isset($scopeRow['snmp_v3_priv_proto']) ? $scopeRow['snmp_v3_priv_proto'] : 'AES',
+                'snmp_v3_priv_pass'  => isset($scopeRow['snmp_v3_priv_pass']) ? $scopeRow['snmp_v3_priv_pass'] : '',
+                'snmp_v3_context'    => isset($scopeRow['snmp_v3_context']) ? $scopeRow['snmp_v3_context'] : '',
+            );
+        }
+        return !empty($scopeRow['snmp_community']) ? trim((string)$scopeRow['snmp_community']) : 'public';
     }
 
     public function __destruct()
@@ -65,7 +119,9 @@ class SnmpClient
         }
         $responsiveIps = array();
         $helper = new self('127.0.0.1', $community, $timeoutMs);
-        $packet = $helper->buildSnmpGetPacket('1.3.6.1.2.1.1.1.0');
+        $v2Packet = $helper->buildSnmpGetPacket('1.3.6.1.2.1.1.1.0');
+        $v3Packet = $helper->buildSnmpV3DiscoveryPacket();
+        $primaryPacket = $helper->isV3 ? $v3Packet : $v2Packet;
 
         $chunks = array_chunk($ipList, max(1, (int)$batchSize));
         $timeoutSec = $timeoutMs / 1000.0;
@@ -80,7 +136,7 @@ class SnmpClient
                 $sock = @stream_socket_client('udp://' . $ip . ':161', $errno, $errstr, 1, STREAM_CLIENT_CONNECT);
                 if ($sock) {
                     stream_set_blocking($sock, false);
-                    @fwrite($sock, $packet);
+                    @fwrite($sock, $primaryPacket);
                     $id = (int)$s = $sock;
                     $sockets[$id] = $sock;
                     $ipBySockId[$id] = $ip;
@@ -99,7 +155,11 @@ class SnmpClient
                 if (!$resent && $elapsed >= 0.18) {
                     $resent = true;
                     foreach ($sockets as $s) {
-                        @fwrite($s, $packet);
+                        @fwrite($s, $primaryPacket);
+                        if ($helper->isV3) {
+                            // Zusätzlich v2c-Paket für Netzwerkdrucker im selben Subnetz senden
+                            @fwrite($s, $v2Packet);
+                        }
                     }
                 }
                 $read = array_values($sockets);
@@ -121,7 +181,9 @@ class SnmpClient
                     $resp = @fread($rSock, 1500);
                     if ($resp && strlen($resp) >= 10) {
                         $decoded = $helper->decodeSnmpResponse($resp);
-                        if ($decoded !== null) {
+                        // Bei SNMPv3 antwortet der Agent auf das Discovery-Paket mit einem SNMPv3 Report-Paket (0x30 ... version=3 -> \x02\x01\x03)
+                        $isV3Report = ($helper->isV3 && ord($resp[0]) === 0x30 && strpos(substr($resp, 0, 12), "\x02\x01\x03") !== false);
+                        if ($decoded !== null || $isV3Report) {
                             $ip = $ipBySockId[$id];
                             $responsiveIps[$ip] = true;
                         }
@@ -137,6 +199,48 @@ class SnmpClient
         }
 
         return $responsiveIps;
+    }
+
+    /**
+     * Erzeugt ein RFC 3414 konformes SNMPv3 EngineID-Discovery-Paket (unauthentifizierter Reportable-Request).
+     * Jeder aktive SNMPv3-Switch antwortet darauf sofort mit seiner snmpEngineID (usmStatsUnknownEngineIDs).
+     */
+    public function buildSnmpV3DiscoveryPacket()
+    {
+        $msgId = mt_rand(1000, 60000);
+        // HeaderData: SEQUENCE { msgID, msgMaxSize(65507), msgFlags(0x04 = reportable), msgSecurityModel(3 = USM) }
+        $headerBody = $this->encodeInteger($msgId)
+                    . $this->encodeInteger(65507)
+                    . $this->berEncode(0x04, "\x04")
+                    . $this->encodeInteger(3);
+        $msgGlobalData = $this->berEncode(0x30, $headerBody);
+
+        // UsmSecurityParameters: SEQUENCE { engineID(""), engineBoots(0), engineTime(0), userName(""), authParams(""), privParams("") }
+        $usmBody = $this->berEncode(0x04, '')
+                 . $this->encodeInteger(0)
+                 . $this->encodeInteger(0)
+                 . $this->berEncode(0x04, '')
+                 . $this->berEncode(0x04, '')
+                 . $this->berEncode(0x04, '');
+        $usmSeq = $this->berEncode(0x30, $usmBody);
+        $msgSecurityParameters = $this->berEncode(0x04, $usmSeq);
+
+        // ScopedPDU: SEQUENCE { contextEngineID(""), contextName(""), GetRequest-PDU }
+        $reqId = mt_rand(1000, 60000);
+        $varbindList = $this->berEncode(0x30, '');
+        $pduBody = $this->encodeInteger($reqId)
+                 . $this->encodeInteger(0)
+                 . $this->encodeInteger(0)
+                 . $varbindList;
+        $pdu = $this->berEncode(0xA0, $pduBody);
+        $scopedPdu = $this->berEncode(0x30, $this->berEncode(0x04, '') . $this->berEncode(0x04, '') . $pdu);
+
+        // SNMPv3 Message: SEQUENCE { msgVersion(3), msgGlobalData, msgSecurityParameters, msgData }
+        $msgBody = $this->encodeInteger(3)
+                 . $msgGlobalData
+                 . $msgSecurityParameters
+                 . $scopedPdu;
+        return $this->berEncode(0x30, $msgBody);
     }
 
         /**
@@ -552,7 +656,7 @@ class SnmpClient
                 }
             }
 
-            // Cisco Catalyst IOS / IOS-XE: Per-VLAN MAC-Tabellen-Abfrage via Community-Indexing ("public@VLAN")
+            // Cisco Catalyst IOS / IOS-XE: Per-VLAN MAC-Tabellen-Abfrage via Community-Indexing ("public@VLAN") bzw. SNMPv3 Context ("vlan-VLAN")
             if ($isCiscoIos && count($vlansById) > 1) {
                 $queriedExtraVlans = 0;
                 foreach ($vlansById as $vid => $vMeta) {
@@ -563,7 +667,21 @@ class SnmpClient
                         break;
                     }
                     $queriedExtraVlans++;
-                    $vlanClient = new self($this->ip, $this->community . '@' . $vid, 350);
+                    if ($this->isV3) {
+                        $vlanOpts = array(
+                            'snmp_version'       => '3',
+                            'snmp_v3_level'      => $this->v3Options['level'],
+                            'snmp_v3_user'       => $this->v3Options['user'],
+                            'snmp_v3_auth_proto' => $this->v3Options['auth_proto'],
+                            'snmp_v3_auth_pass'  => $this->v3Options['auth_pass'],
+                            'snmp_v3_priv_proto' => $this->v3Options['priv_proto'],
+                            'snmp_v3_priv_pass'  => $this->v3Options['priv_pass'],
+                            'snmp_v3_context'    => 'vlan-' . $vid,
+                        );
+                        $vlanClient = new self($this->ip, $vlanOpts, 450);
+                    } else {
+                        $vlanClient = new self($this->ip, $this->community . '@' . $vid, 350);
+                    }
                     $vBpWalk = $vlanClient->walkOid('1.3.6.1.2.1.17.1.4.1.2', 108);
                     $vBpMap = $bridgePortToIfIndex;
                     foreach ($vBpWalk as $void => $vval) {
@@ -864,7 +982,93 @@ class SnmpClient
     }
 
     /**
-     * Fragt mehrere SNMP-OIDs gleichzeitig in gebündelten Multi-Varbind-UDP-Paketen ab.
+     * Baut die Kommandozeilen-Argumente für Net-SNMP v3 (snmpget / snmpbulkwalk / snmpwalk / snmpset) sicher zusammen.
+     */
+    private function buildV3CliArgs()
+    {
+        $lvl = isset($this->v3Options['level']) ? $this->v3Options['level'] : 'authPriv';
+        $usr = isset($this->v3Options['user']) ? $this->v3Options['user'] : '';
+        $aProto = isset($this->v3Options['auth_proto']) ? strtoupper(trim($this->v3Options['auth_proto'])) : 'SHA';
+        $aPass  = isset($this->v3Options['auth_pass']) ? (string)$this->v3Options['auth_pass'] : '';
+        $pProto = isset($this->v3Options['priv_proto']) ? strtoupper(trim($this->v3Options['priv_proto'])) : 'AES';
+        $pPass  = isset($this->v3Options['priv_pass']) ? (string)$this->v3Options['priv_pass'] : '';
+        $ctx    = isset($this->v3Options['context']) ? trim((string)$this->v3Options['context']) : '';
+
+        if (!in_array($aProto, array('MD5', 'SHA', 'SHA-224', 'SHA-256', 'SHA-384', 'SHA-512'), true)) {
+            $aProto = 'SHA';
+        }
+        if (!in_array($pProto, array('DES', 'AES', 'AES-128', 'AES-192', 'AES-256'), true)) {
+            $pProto = 'AES';
+        }
+        if ($pProto === 'AES-128') {
+            $pProto = 'AES';
+        }
+
+        $tSec = max(1, (int)ceil($this->timeoutMs / 1000.0));
+        $args = '-On -Oe -Ot -v3 -t ' . $tSec . ' -r 1 -l ' . escapeshellarg($lvl) . ' -u ' . escapeshellarg($usr);
+        if ($lvl === 'authNoPriv' || $lvl === 'authPriv') {
+            $args .= ' -a ' . escapeshellarg($aProto) . ' -A ' . escapeshellarg($aPass);
+        }
+        if ($lvl === 'authPriv') {
+            $args .= ' -x ' . escapeshellarg($pProto) . ' -X ' . escapeshellarg($pPass);
+        }
+        if ($ctx !== '') {
+            $args .= ' -n ' . escapeshellarg($ctx);
+        }
+        return $args;
+    }
+
+    /**
+     * Parst die Ausgabe von snmpget / snmpbulkwalk (-On -Oe -Ot) in ein assoziatives Array (oid => value).
+     */
+    private function parseNetSnmpOutput($rawOutput, $baseOidFilter = '')
+    {
+        $results = array();
+        if (!is_string($rawOutput) || trim($rawOutput) === '') {
+            return $results;
+        }
+        $lines = explode("\n", str_replace("\r", '', $rawOutput));
+        foreach ($lines as $line) {
+            $line = trim($line);
+            if ($line === '' || $line[0] !== '.') {
+                continue;
+            }
+            $eqPos = strpos($line, ' = ');
+            if ($eqPos === false) {
+                continue;
+            }
+            $oid = ltrim( trim(substr($line, 0, $eqPos)), '.' );
+            $valPart = trim(substr($line, $eqPos + 3));
+            if (stripos($valPart, 'No Such Object') !== false || stripos($valPart, 'No Such Instance') !== false || stripos($valPart, 'End of MIB') !== false) {
+                continue;
+            }
+            if ($baseOidFilter !== '' && strpos($oid, $baseOidFilter . '.') !== 0 && $oid !== $baseOidFilter) {
+                continue;
+            }
+            // Falls Hex-STRING vorliegt (z.B. binäre MAC-Adresse in LLDP), in Binärbytes zurückwandeln
+            if (stripos($valPart, 'Hex-STRING:') === 0) {
+                $hexStr = trim(substr($valPart, 11));
+                $hexTokens = preg_split('/\s+/', $hexStr);
+                $bin = '';
+                $allHex = !empty($hexTokens);
+                foreach ($hexTokens as $ht) {
+                    if (preg_match('/^[0-9A-Fa-f]{2}$/', $ht)) {
+                        $bin .= chr(hexdec($ht));
+                    } else {
+                        $allHex = false;
+                        break;
+                    }
+                }
+                $results[$oid] = $allHex ? $bin : $this->cleanSnmpValue($valPart);
+            } else {
+                $results[$oid] = $this->cleanSnmpValue($valPart);
+            }
+        }
+        return $results;
+    }
+
+    /**
+     * Fragt mehrere SNMP-OIDs gleichzeitig in gebündelten Multi-Varbind-UDP-Paketen (bzw. per SNMPv3 CLI) ab.
      * Spart bis zu 90 % der Netzwerk-Roundtrips gegenüber Einzelabfragen.
      */
     public function getOidsBatch(array $oids, $chunkSize = 14)
@@ -873,6 +1077,39 @@ class SnmpClient
         if (empty($oids)) {
             return $results;
         }
+        if ($this->isV3) {
+            $snmpGetBin = is_executable('/usr/bin/snmpget') ? '/usr/bin/snmpget' : 'snmpget';
+            $v3Args = $this->buildV3CliArgs();
+            foreach (array_chunk($oids, max(1, (int)$chunkSize)) as $chunk) {
+                $oidArgs = array();
+                foreach ($chunk as $o) {
+                    $cleanO = preg_replace('/[^0-9.]/', '', ltrim((string)$o, '.'));
+                    if ($cleanO !== '') {
+                        $oidArgs[] = escapeshellarg($cleanO);
+                    }
+                }
+                if (empty($oidArgs)) {
+                    continue;
+                }
+                $cmd = $snmpGetBin . ' ' . $v3Args . ' ' . escapeshellarg($this->ip) . ' ' . implode(' ', $oidArgs) . ' 2>/dev/null';
+                $out = (string)@shell_exec($cmd);
+                $parsed = $this->parseNetSnmpOutput($out);
+                foreach ($parsed as $k => $v) {
+                    $results[$k] = $v;
+                }
+            }
+            // Falls das Gerät über SNMPv3 nicht antwortet, aber ein Netzwerkdrucker im selben Scope per SNMPv2c erreichbar ist
+            if (empty($results) && $this->community !== '') {
+                $this->isV3 = false;
+                $v2Res = $this->getOidsBatch($oids, $chunkSize);
+                if (!empty($v2Res)) {
+                    return $v2Res;
+                }
+                $this->isV3 = true;
+            }
+            return $results;
+        }
+
         $sock = $this->getSocket();
         if (!$sock) {
             return $results;
@@ -909,10 +1146,15 @@ class SnmpClient
     }
 
     /**
-     * Fragt eine einzelne SNMP-OID über den persistenten ASN.1/BER-UDP-Socket ab.
+     * Fragt eine einzelne SNMP-OID über den persistenten ASN.1/BER-UDP-Socket (bzw. SNMPv3) ab.
      */
     public function getOid($oid)
     {
+        if ($this->isV3) {
+            $cleanO = ltrim((string)$oid, '.');
+            $batch = $this->getOidsBatch(array($cleanO), 1);
+            return isset($batch[$cleanO]) ? (string)$batch[$cleanO] : null;
+        }
         $pdu = $this->udpSnmpRequest(0xA0, $oid); // 0xA0 = GetRequest-PDU
         if ($pdu !== null && isset($pdu['value'])) {
             return (string)$pdu['value'];
@@ -921,12 +1163,31 @@ class SnmpClient
     }
 
     /**
-     * Führt einen hochperformanten SNMPv2c-Walk mittels GetBulkRequest (0xA5) über einen persistenten
-     * UDP-Socket durch (bzw. per GetNextRequest 0xA1 bei langsamen Embedded-/Drucker-Agenten).
+     * Führt einen hochperformanten SNMPv2c/v3-Walk mittels GetBulkRequest (0xA5 / snmpbulkwalk) durch.
      */
     public function walkOid($baseOid, $maxRows = 108, $useGetNext = false)
     {
         $baseOid = ltrim($baseOid, '.');
+        if ($this->isV3) {
+            $cleanBase = preg_replace('/[^0-9.]/', '', $baseOid);
+            if ($cleanBase === '') {
+                return array();
+            }
+            $v3Args = $this->buildV3CliArgs();
+            if (!$useGetNext && is_executable('/usr/bin/snmpbulkwalk')) {
+                $cmd = '/usr/bin/snmpbulkwalk -Cr16 ' . $v3Args . ' ' . escapeshellarg($this->ip) . ' ' . escapeshellarg($cleanBase) . ' 2>/dev/null';
+            } else {
+                $walkBin = is_executable('/usr/bin/snmpwalk') ? '/usr/bin/snmpwalk' : 'snmpwalk';
+                $cmd = $walkBin . ' ' . $v3Args . ' ' . escapeshellarg($this->ip) . ' ' . escapeshellarg($cleanBase) . ' 2>/dev/null';
+            }
+            $out = (string)@shell_exec($cmd);
+            $parsed = $this->parseNetSnmpOutput($out, $cleanBase);
+            if (count($parsed) > $maxRows) {
+                $parsed = array_slice($parsed, 0, $maxRows, true);
+            }
+            return $parsed;
+        }
+
         $sock = $this->getSocket();
         if (!$sock) {
             return array();

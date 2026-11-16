@@ -814,9 +814,9 @@ $gitShort = Database::getGitCommitShort();
 
     <!-- Modal: Scope anlegen / bearbeiten -->
     <div id="scope-modal" class="modal-backdrop">
-        <div class="modal">
+        <div class="modal" style="width:540px;max-width:95vw;">
             <div class="panel-header">
-                <span class="panel-title">Netzwerk-Scope (Subnetz) konfigurieren</span>
+                <span class="panel-title">Netzwerk-Scope (Subnetz &amp; SNMP v2c / v3) konfigurieren</span>
                 <button class="btn btn-sm" onclick="closeScopeModal()">×</button>
             </div>
             <div class="modal-body">
@@ -825,28 +825,90 @@ $gitShort = Database::getGitCommitShort();
                     <label>Bezeichnung des Netzwerks *</label>
                     <input type="text" id="scope-name" class="form-input" placeholder="z.B. Standort Hauptgebäude VLAN 10">
                 </div>
-                <div class="form-group">
-                    <label>Netzwerk-Scope (CIDR oder IP-Bereich) *</label>
-                    <input type="text" id="scope-cidr" class="form-input" placeholder="z.B. 192.168.178.0/24 oder 10.0.1.1-10.0.1.100">
-                </div>
-                <div class="form-group">
-                    <label>Gateway / Router IP-Adresse (optional, sonst .1)</label>
-                    <input type="text" id="scope-gw" class="form-input" placeholder="z.B. 192.168.178.1">
-                </div>
-                <div style="display:grid;grid-template-columns: 1fr 1fr;gap:10px;">
+                <div style="display:grid;grid-template-columns: 1.4fr 1fr;gap:10px;">
                     <div class="form-group">
-                        <label>SNMP v2c Community (für Switches)</label>
-                        <input type="text" id="scope-snmp" class="form-input" value="public" placeholder="public">
+                        <label>Netzwerk-Scope (CIDR oder IP-Bereich) *</label>
+                        <input type="text" id="scope-cidr" class="form-input" placeholder="z.B. 80.2.201.0/24">
+                    </div>
+                    <div class="form-group">
+                        <label>Gateway / Router IP (optional)</label>
+                        <input type="text" id="scope-gw" class="form-input" placeholder="z.B. 80.2.201.1">
+                    </div>
+                </div>
+                <div style="display:grid;grid-template-columns: 1.3fr 0.7fr 0.7fr;gap:10px;">
+                    <div class="form-group">
+                        <label>SNMP-Protokoll (für Switches)</label>
+                        <select id="scope-snmp-version" class="select-input" onchange="toggleScopeSnmpVersionFields()">
+                            <option value="2c">SNMP v2c (Community)</option>
+                            <option value="3">🔒 SNMP v3 (Auth &amp; Verschlüsselung)</option>
+                        </select>
                     </div>
                     <div class="form-group">
                         <label>VLAN-ID (optional)</label>
                         <input type="number" id="scope-vlan" class="form-input" placeholder="z.B. 10">
                     </div>
+                    <div class="form-group">
+                        <label>Farbe im Plan</label>
+                        <input type="color" id="scope-color" class="form-input" value="#3b82f6" style="height:36px;padding:3px;">
+                    </div>
                 </div>
-                <div class="form-group">
-                    <label>Farbe im Netzwerkplan</label>
-                    <input type="color" id="scope-color" class="form-input" value="#3b82f6" style="height:36px;padding:3px;">
+
+                <!-- SNMP v2c Felder -->
+                <div id="scope-snmp-v2-box" class="form-group">
+                    <label>SNMP v2c Community (Standard: public)</label>
+                    <input type="text" id="scope-snmp" class="form-input" value="public" placeholder="public">
                 </div>
+
+                <!-- SNMP v3 Felder (Auth & Verschlüsselung) -->
+                <div id="scope-snmp-v3-box" style="display:none;background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.35);border-radius:8px;padding:12px;flex-direction:column;gap:10px;">
+                    <div style="font-size:12px;font-weight:700;color:#6ee7b7;">🔒 SNMP v3 Zugangsdaten (lokal &amp; verschlüsselt auf dem Server gespeichert)</div>
+                    <div style="display:grid;grid-template-columns: 1fr 1fr;gap:10px;">
+                        <div class="form-group">
+                            <label>SNMPv3 Benutzername (Security Name) *</label>
+                            <input type="text" id="scope-v3-user" class="form-input" placeholder="z.B. snmpuser" autocomplete="off">
+                        </div>
+                        <div class="form-group">
+                            <label>Sicherheitsstufe (Security Level)</label>
+                            <select id="scope-v3-level" class="select-input" onchange="toggleScopeSnmpV3LevelFields()">
+                                <option value="authPriv">authPriv (Auth + Verschlüsselung)</option>
+                                <option value="authNoPriv">authNoPriv (Nur Authentifizierung)</option>
+                                <option value="noAuthNoPriv">noAuthNoPriv (Ohne Passwort)</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div id="scope-v3-auth-row" style="display:grid;grid-template-columns: 0.9fr 1.1fr;gap:10px;">
+                        <div class="form-group">
+                            <label>Auth-Protokoll</label>
+                            <select id="scope-v3-auth-proto" class="select-input">
+                                <option value="SHA">SHA (SHA-1)</option>
+                                <option value="SHA-256">SHA-256</option>
+                                <option value="SHA-384">SHA-384</option>
+                                <option value="SHA-512">SHA-512</option>
+                                <option value="MD5">MD5</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Auth-Passwort <span id="scope-v3-auth-saved" style="color:#34d399;font-size:10.5px;display:none;">(✓ hinterlegt)</span></label>
+                            <input type="password" id="scope-v3-auth-pass" class="form-input" placeholder="Auth-Passwort eingeben" autocomplete="new-password">
+                        </div>
+                    </div>
+                    <div id="scope-v3-priv-row" style="display:grid;grid-template-columns: 0.9fr 1.1fr;gap:10px;">
+                        <div class="form-group">
+                            <label>Verschlüsselung (Priv-Protokoll)</label>
+                            <select id="scope-v3-priv-proto" class="select-input">
+                                <option value="AES">AES (AES-128)</option>
+                                <option value="AES-192">AES-192</option>
+                                <option value="AES-256">AES-256</option>
+                                <option value="DES">DES</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Verschlüsselungs-Passwort (Priv) <span id="scope-v3-priv-saved" style="color:#34d399;font-size:10.5px;display:none;">(✓ hinterlegt)</span></label>
+                            <input type="password" id="scope-v3-priv-pass" class="form-input" placeholder="Priv-Passwort eingeben" autocomplete="new-password">
+                        </div>
+                    </div>
+                </div>
+
                 <div class="form-group">
                     <label>Beschreibung / Standort</label>
                     <input type="text" id="scope-desc" class="form-input" placeholder="Optionale Notiz zum Subnetz">

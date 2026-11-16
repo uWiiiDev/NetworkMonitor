@@ -53,9 +53,15 @@ try {
         // ---------------------------------------------------------------------
         case 'topology':
             $scopes = $pdo->query("SELECT * FROM scopes ORDER BY id ASC")->fetchAll();
-            if (!$canEditRole) {
-                for ($si = 0; $si < count($scopes); $si++) {
+            for ($si = 0; $si < count($scopes); $si++) {
+                $scopes[$si]['has_v3_auth_pass'] = !empty($scopes[$si]['snmp_v3_auth_pass']) ? 1 : 0;
+                $scopes[$si]['has_v3_priv_pass'] = !empty($scopes[$si]['snmp_v3_priv_pass']) ? 1 : 0;
+                // SNMPv3 Passwörter niemals im Klartext an den Browser übertragen
+                unset($scopes[$si]['snmp_v3_auth_pass']);
+                unset($scopes[$si]['snmp_v3_priv_pass']);
+                if (!$canEditRole) {
                     unset($scopes[$si]['snmp_community']);
+                    unset($scopes[$si]['snmp_v3_user']);
                 }
             }
             $rawDevices = $pdo->query("
@@ -323,7 +329,9 @@ try {
                 throw new InvalidArgumentException('Ungültige Geräte-ID.');
             }
             $devStmt = $pdo->prepare("
-                SELECT d.*, s.snmp_community AS scope_snmp_community
+                SELECT d.*, s.snmp_community AS scope_snmp_community, s.snmp_version AS scope_snmp_version,
+                       s.snmp_v3_level, s.snmp_v3_user, s.snmp_v3_auth_proto, s.snmp_v3_auth_pass,
+                       s.snmp_v3_priv_proto, s.snmp_v3_priv_pass, s.snmp_v3_context
                 FROM devices d
                 LEFT JOIN scopes s ON d.scope_id = s.id
                 WHERE d.id = :id
@@ -334,14 +342,25 @@ try {
             if (!$devRow) {
                 throw new InvalidArgumentException('Gerät nicht gefunden.');
             }
-            $comm = !empty($devRow['switch_snmp_community'])
-                ? trim($devRow['switch_snmp_community'])
-                : (!empty($devRow['scope_snmp_community']) ? trim($devRow['scope_snmp_community']) : 'public');
             require_once __DIR__ . '/includes/snmp_client.php';
-            $client = new SnmpClient($devRow['ip_address'], $comm, 1200);
+            $scopeArr = array(
+                'snmp_version'       => isset($devRow['scope_snmp_version']) ? $devRow['scope_snmp_version'] : '2c',
+                'snmp_community'     => isset($devRow['scope_snmp_community']) ? $devRow['scope_snmp_community'] : 'public',
+                'snmp_v3_level'      => isset($devRow['snmp_v3_level']) ? $devRow['snmp_v3_level'] : 'authPriv',
+                'snmp_v3_user'       => isset($devRow['snmp_v3_user']) ? $devRow['snmp_v3_user'] : '',
+                'snmp_v3_auth_proto' => isset($devRow['snmp_v3_auth_proto']) ? $devRow['snmp_v3_auth_proto'] : 'SHA',
+                'snmp_v3_auth_pass'  => isset($devRow['snmp_v3_auth_pass']) ? $devRow['snmp_v3_auth_pass'] : '',
+                'snmp_v3_priv_proto' => isset($devRow['snmp_v3_priv_proto']) ? $devRow['snmp_v3_priv_proto'] : 'AES',
+                'snmp_v3_priv_pass'  => isset($devRow['snmp_v3_priv_pass']) ? $devRow['snmp_v3_priv_pass'] : '',
+                'snmp_v3_context'    => isset($devRow['snmp_v3_context']) ? $devRow['snmp_v3_context'] : '',
+            );
+            $customComm = !empty($devRow['switch_snmp_community']) ? trim($devRow['switch_snmp_community']) : '';
+            $snmpOpts = SnmpClient::buildScopeSnmpOptions($scopeArr, $customComm);
+            $client = new SnmpClient($devRow['ip_address'], $snmpOpts, 1500);
             $snmpData = $client->probeDevice();
             if ($snmpData === null) {
-                throw new RuntimeException('SNMP-Abfrage auf ' . $devRow['ip_address'] . ' (Community "' . $comm . '") lieferte keine Antwort (Gerät evtl. im Energiesparmodus oder SNMP deaktiviert).');
+                $modeDesc = is_array($snmpOpts) ? ('SNMPv3 Benutzer "' . $snmpOpts['snmp_v3_user'] . '"') : ('SNMPv2c Community "' . $snmpOpts . '"');
+                throw new RuntimeException('SNMP-Abfrage auf ' . $devRow['ip_address'] . ' (' . $modeDesc . ') lieferte keine Antwort (Bitte SNMPv3 Auth/Priv-Passwort bzw. Community prüfen).');
             }
             $pdo->prepare("
                 UPDATE devices SET
@@ -380,6 +399,21 @@ try {
             $cidr = isset($input['cidr']) ? trim($input['cidr']) : '';
             $gatewayIp = isset($input['gateway_ip']) && trim($input['gateway_ip']) !== '' ? trim($input['gateway_ip']) : null;
             $snmpComm = isset($input['snmp_community']) && trim($input['snmp_community']) !== '' ? trim($input['snmp_community']) : 'public';
+            $snmpVer = (isset($input['snmp_version']) && trim((string)$input['snmp_version']) === '3') ? '3' : '2c';
+            $v3Level = isset($input['snmp_v3_level']) && in_array($input['snmp_v3_level'], array('noAuthNoPriv', 'authNoPriv', 'authPriv'), true)
+                ? $input['snmp_v3_level']
+                : 'authPriv';
+            $v3User = isset($input['snmp_v3_user']) ? trim((string)$input['snmp_v3_user']) : '';
+            $v3AuthProto = isset($input['snmp_v3_auth_proto']) && in_array(strtoupper(trim((string)$input['snmp_v3_auth_proto'])), array('MD5', 'SHA', 'SHA-224', 'SHA-256', 'SHA-384', 'SHA-512'), true)
+                ? strtoupper(trim((string)$input['snmp_v3_auth_proto']))
+                : 'SHA';
+            $v3AuthPassIn = isset($input['snmp_v3_auth_pass']) ? (string)$input['snmp_v3_auth_pass'] : '';
+            $v3PrivProto = isset($input['snmp_v3_priv_proto']) && in_array(strtoupper(trim((string)$input['snmp_v3_priv_proto'])), array('DES', 'AES', 'AES-128', 'AES-192', 'AES-256'), true)
+                ? strtoupper(trim((string)$input['snmp_v3_priv_proto']))
+                : 'AES';
+            $v3PrivPassIn = isset($input['snmp_v3_priv_pass']) ? (string)$input['snmp_v3_priv_pass'] : '';
+            $v3Context = isset($input['snmp_v3_context']) ? trim((string)$input['snmp_v3_context']) : '';
+
             $vlanId = isset($input['vlan_id']) && $input['vlan_id'] !== '' ? (int)$input['vlan_id'] : null;
             $color = isset($input['color']) && trim($input['color']) !== '' ? trim($input['color']) : '#3b82f6';
             $desc = isset($input['description']) ? trim($input['description']) : '';
@@ -387,6 +421,9 @@ try {
 
             if ($name === '' || $cidr === '') {
                 throw new InvalidArgumentException('Bitte Name und Subnetz (CIDR oder IP-Bereich) angeben.');
+            }
+            if ($snmpVer === '3' && $v3User === '') {
+                throw new InvalidArgumentException('Bitte für SNMPv3 einen Benutzernamen (Security Name) angeben.');
             }
 
             // Validiere CIDR/Range
@@ -403,9 +440,23 @@ try {
             }
 
             if ($id > 0) {
+                $prevStmt = $pdo->prepare("SELECT snmp_v3_auth_pass, snmp_v3_priv_pass FROM scopes WHERE id = :id");
+                $prevStmt->execute(array(':id' => $id));
+                $prevScope = $prevStmt->fetch();
+                $finalAuthPass = ($v3AuthPassIn !== '' && $v3AuthPassIn !== '••••••••')
+                    ? $v3AuthPassIn
+                    : ($prevScope && isset($prevScope['snmp_v3_auth_pass']) ? $prevScope['snmp_v3_auth_pass'] : '');
+                $finalPrivPass = ($v3PrivPassIn !== '' && $v3PrivPassIn !== '••••••••')
+                    ? $v3PrivPassIn
+                    : ($prevScope && isset($prevScope['snmp_v3_priv_pass']) ? $prevScope['snmp_v3_priv_pass'] : '');
+
                 $stmt = $pdo->prepare("
                     UPDATE scopes SET
                         name = :name, cidr = :cidr, gateway_ip = :gw, snmp_community = :comm,
+                        snmp_version = :sver, snmp_v3_level = :v3lvl, snmp_v3_user = :v3usr,
+                        snmp_v3_auth_proto = :v3ap, snmp_v3_auth_pass = :v3ak,
+                        snmp_v3_priv_proto = :v3pp, snmp_v3_priv_pass = :v3pk,
+                        snmp_v3_context = :v3ctx,
                         vlan_id = :vlan, color = :color, description = :desc, is_active = :act
                     WHERE id = :id
                 ");
@@ -414,6 +465,14 @@ try {
                     ':cidr'  => $cidr,
                     ':gw'    => $gatewayIp,
                     ':comm'  => $snmpComm,
+                    ':sver'  => $snmpVer,
+                    ':v3lvl' => $v3Level,
+                    ':v3usr' => $v3User !== '' ? $v3User : null,
+                    ':v3ap'  => $v3AuthProto,
+                    ':v3ak'  => $finalAuthPass !== '' ? $finalAuthPass : null,
+                    ':v3pp'  => $v3PrivProto,
+                    ':v3pk'  => $finalPrivPass !== '' ? $finalPrivPass : null,
+                    ':v3ctx' => $v3Context !== '' ? $v3Context : null,
                     ':vlan'  => $vlanId,
                     ':color' => $color,
                     ':desc'  => $desc,
@@ -422,14 +481,31 @@ try {
                 ));
             } else {
                 $stmt = $pdo->prepare("
-                    INSERT INTO scopes (name, cidr, gateway_ip, snmp_community, snmp_version, description, vlan_id, color, is_active, created_at)
-                    VALUES (:name, :cidr, :gw, :comm, '2c', :desc, :vlan, :color, :act, :now)
+                    INSERT INTO scopes (
+                        name, cidr, gateway_ip, snmp_community, snmp_version,
+                        snmp_v3_level, snmp_v3_user, snmp_v3_auth_proto, snmp_v3_auth_pass,
+                        snmp_v3_priv_proto, snmp_v3_priv_pass, snmp_v3_context,
+                        description, vlan_id, color, is_active, created_at
+                    ) VALUES (
+                        :name, :cidr, :gw, :comm, :sver,
+                        :v3lvl, :v3usr, :v3ap, :v3ak,
+                        :v3pp, :v3pk, :v3ctx,
+                        :desc, :vlan, :color, :act, :now
+                    )
                 ");
                 $stmt->execute(array(
                     ':name'  => $name,
                     ':cidr'  => $cidr,
                     ':gw'    => $gatewayIp,
                     ':comm'  => $snmpComm,
+                    ':sver'  => $snmpVer,
+                    ':v3lvl' => $v3Level,
+                    ':v3usr' => $v3User !== '' ? $v3User : null,
+                    ':v3ap'  => $v3AuthProto,
+                    ':v3ak'  => ($v3AuthPassIn !== '' && $v3AuthPassIn !== '••••••••') ? $v3AuthPassIn : null,
+                    ':v3pp'  => $v3PrivProto,
+                    ':v3pk'  => ($v3PrivPassIn !== '' && $v3PrivPassIn !== '••••••••') ? $v3PrivPassIn : null,
+                    ':v3ctx' => $v3Context !== '' ? $v3Context : null,
                     ':desc'  => $desc,
                     ':vlan'  => $vlanId,
                     ':color' => $color,

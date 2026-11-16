@@ -1193,6 +1193,10 @@ function renderScopesList() {
 
         selectHtml += '<option value="' + s.id + '"' + isOptSel + '>' + escapeHtml(s.name) + ' (' + escapeHtml(s.cidr) + ')</option>';
 
+        var snmpLabel = (String(s.snmp_version) === '3' && s.snmp_v3_user)
+            ? ('SNMPv3 (' + s.snmp_v3_user + ' • ' + (s.snmp_v3_auth_proto || 'SHA') + '/' + (s.snmp_v3_priv_proto || 'AES') + ')')
+            : ('SNMP: ' + (s.snmp_community || 'public'));
+
         html += '<div class="scope-card ' + isSel + '" onclick="filterByScope(' + s.id + ')">' +
                 '<div class="scope-header">' +
                 '<div class="scope-name"><span class="scope-dot" style="background:' + (s.color || '#3b82f6') + '"></span>' + escapeHtml(s.name) + '</div>' +
@@ -1200,7 +1204,7 @@ function renderScopesList() {
                 '</div>' +
                 '<div class="scope-meta">' +
                 '<span>' + vlanBadge + 'GW: ' + escapeHtml(s.gateway_ip || '-') + '</span>' +
-                '<span>SNMP: ' + escapeHtml(s.snmp_community || 'public') + '</span>' +
+                '<span>' + escapeHtml(snmpLabel) + '</span>' +
                 '</div>' +
                 '<div class="scope-meta">' +
                 '<span>Scan: ' + escapeHtml(lastScan) + '</span>' +
@@ -3493,6 +3497,33 @@ function seedDemoData() {
 /**
  * Öffnet das Formular zum Anlegen oder Bearbeiten eines IP-Scopes.
  */
+/**
+ * Schaltet im Scope-Dialog zwischen SNMP v2c (Community) und SNMP v3 (Benutzer, Auth & Priv) um.
+ */
+function toggleScopeSnmpVersionFields() {
+    var verEl = document.getElementById('scope-snmp-version');
+    var v2Box = document.getElementById('scope-snmp-v2-box');
+    var v3Box = document.getElementById('scope-snmp-v3-box');
+    var isV3 = (verEl && verEl.value === '3');
+    if (v2Box) v2Box.style.display = isV3 ? 'none' : 'flex';
+    if (v3Box) v3Box.style.display = isV3 ? 'flex' : 'none';
+    if (isV3) {
+        toggleScopeSnmpV3LevelFields();
+    }
+}
+
+/**
+ * Blendet je nach gewählter SNMPv3-Sicherheitsstufe (authPriv / authNoPriv / noAuthNoPriv) die Passwortfelder ein/aus.
+ */
+function toggleScopeSnmpV3LevelFields() {
+    var lvlEl = document.getElementById('scope-v3-level');
+    var authRow = document.getElementById('scope-v3-auth-row');
+    var privRow = document.getElementById('scope-v3-priv-row');
+    var lvl = lvlEl ? lvlEl.value : 'authPriv';
+    if (authRow) authRow.style.display = (lvl === 'authNoPriv' || lvl === 'authPriv') ? 'grid' : 'none';
+    if (privRow) privRow.style.display = (lvl === 'authPriv') ? 'grid' : 'none';
+}
+
 function openScopeModal(scopeId) {
     var modal = document.getElementById('scope-modal');
     var s = null;
@@ -3512,6 +3543,36 @@ function openScopeModal(scopeId) {
     document.getElementById('scope-vlan').value = s && s.vlan_id ? s.vlan_id : '';
     document.getElementById('scope-color').value = s ? (s.color || '#3b82f6') : '#3b82f6';
     document.getElementById('scope-desc').value = s ? (s.description || '') : '';
+
+    var verEl = document.getElementById('scope-snmp-version');
+    if (verEl) verEl.value = (s && String(s.snmp_version) === '3') ? '3' : '2c';
+    var v3UserEl = document.getElementById('scope-v3-user');
+    if (v3UserEl) v3UserEl.value = s ? (s.snmp_v3_user || '') : '';
+    var v3LvlEl = document.getElementById('scope-v3-level');
+    if (v3LvlEl) v3LvlEl.value = (s && s.snmp_v3_level) ? s.snmp_v3_level : 'authPriv';
+    var v3AuthProtoEl = document.getElementById('scope-v3-auth-proto');
+    if (v3AuthProtoEl) v3AuthProtoEl.value = (s && s.snmp_v3_auth_proto) ? s.snmp_v3_auth_proto : 'SHA';
+    var v3PrivProtoEl = document.getElementById('scope-v3-priv-proto');
+    if (v3PrivProtoEl) v3PrivProtoEl.value = (s && s.snmp_v3_priv_proto) ? s.snmp_v3_priv_proto : 'AES';
+
+    var hasAuthPass = !!(s && parseInt(s.has_v3_auth_pass || 0, 10) === 1);
+    var hasPrivPass = !!(s && parseInt(s.has_v3_priv_pass || 0, 10) === 1);
+    var v3AuthPassEl = document.getElementById('scope-v3-auth-pass');
+    if (v3AuthPassEl) {
+        v3AuthPassEl.value = '';
+        v3AuthPassEl.placeholder = hasAuthPass ? '•••••••• (Leer lassen zum Beibehalten)' : 'Auth-Passwort eingeben';
+    }
+    var v3PrivPassEl = document.getElementById('scope-v3-priv-pass');
+    if (v3PrivPassEl) {
+        v3PrivPassEl.value = '';
+        v3PrivPassEl.placeholder = hasPrivPass ? '•••••••• (Leer lassen zum Beibehalten)' : 'Priv-Passwort eingeben';
+    }
+    var authSavedBadge = document.getElementById('scope-v3-auth-saved');
+    if (authSavedBadge) authSavedBadge.style.display = hasAuthPass ? 'inline' : 'none';
+    var privSavedBadge = document.getElementById('scope-v3-priv-saved');
+    if (privSavedBadge) privSavedBadge.style.display = hasPrivPass ? 'inline' : 'none';
+
+    toggleScopeSnmpVersionFields();
     modal.classList.add('open');
 }
 
@@ -3523,7 +3584,7 @@ function closeScopeModal() {
 }
 
 /**
- * Speichert die eingegebenen Scope-Daten (Name, CIDR, Gateway, SNMP-Community, VLAN, Farbe).
+ * Speichert die eingegebenen Scope-Daten (Name, CIDR, Gateway, SNMP v2c/v3, VLAN, Farbe).
  */
 function saveScopeForm() {
     var payload = {
@@ -3532,6 +3593,13 @@ function saveScopeForm() {
         cidr: document.getElementById('scope-cidr').value,
         gateway_ip: document.getElementById('scope-gw').value,
         snmp_community: document.getElementById('scope-snmp').value,
+        snmp_version: document.getElementById('scope-snmp-version') ? document.getElementById('scope-snmp-version').value : '2c',
+        snmp_v3_user: document.getElementById('scope-v3-user') ? document.getElementById('scope-v3-user').value : '',
+        snmp_v3_level: document.getElementById('scope-v3-level') ? document.getElementById('scope-v3-level').value : 'authPriv',
+        snmp_v3_auth_proto: document.getElementById('scope-v3-auth-proto') ? document.getElementById('scope-v3-auth-proto').value : 'SHA',
+        snmp_v3_auth_pass: document.getElementById('scope-v3-auth-pass') ? document.getElementById('scope-v3-auth-pass').value : '',
+        snmp_v3_priv_proto: document.getElementById('scope-v3-priv-proto') ? document.getElementById('scope-v3-priv-proto').value : 'AES',
+        snmp_v3_priv_pass: document.getElementById('scope-v3-priv-pass') ? document.getElementById('scope-v3-priv-pass').value : '',
         vlan_id: document.getElementById('scope-vlan').value,
         color: document.getElementById('scope-color').value,
         description: document.getElementById('scope-desc').value,

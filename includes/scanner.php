@@ -69,7 +69,10 @@ class NetworkScanner
             $gatewayIp = ($rawGw !== '' && filter_var($rawGw, FILTER_VALIDATE_IP))
                 ? $rawGw
                 : (!empty($ipList) ? $ipList[0] : null);
-            $community = !empty($scope['snmp_community']) ? $scope['snmp_community'] : $this->config['default_snmp_community'];
+            $community = SnmpClient::buildScopeSnmpOptions($scope);
+            if (!is_array($community) && $community === 'public' && !empty($this->config['default_snmp_community'])) {
+                $community = $this->config['default_snmp_community'];
+            }
 
             // 1. Live-Hosts & Latenz ermitteln (Nmap falls vorhanden, sonst Parallel-Ping + ARP-Cache)
             $liveHosts = $this->discoverLiveHosts($scope['cidr'], $ipList);
@@ -305,7 +308,7 @@ class NetworkScanner
                     || stripos((string)$hostname, 'printer') !== false;
                 if (isset($responsiveSnmpIps[$ip]) || $customSnmpComm !== '' || $wasSnmpBefore || $hasPrinterPort) {
                     $devComm = ($customSnmpComm !== '') ? $customSnmpComm : $community;
-                    $probeTimeoutMs = ($hasPrinterPort || (isset($prevDevicesByIp[$ip]) && $prevDevicesByIp[$ip]['device_type'] === 'printer'))
+                    $probeTimeoutMs = ($hasPrinterPort || is_array($devComm) || (isset($prevDevicesByIp[$ip]) && $prevDevicesByIp[$ip]['device_type'] === 'printer'))
                         ? max(1000, (int)$this->config['snmp_timeout_ms'])
                         : (int)$this->config['snmp_timeout_ms'];
                     $snmpClient = new SnmpClient($ip, $devComm, $probeTimeoutMs);

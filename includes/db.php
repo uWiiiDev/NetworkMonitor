@@ -296,6 +296,14 @@ class Database
                 $this->pdo->exec($stmt);
             }
         }
+        $this->ensureColumnExists('scopes', 'snmp_version', "VARCHAR(10) NOT NULL DEFAULT '2c'");
+        $this->ensureColumnExists('scopes', 'snmp_v3_level', "VARCHAR(20) NOT NULL DEFAULT 'authPriv'");
+        $this->ensureColumnExists('scopes', 'snmp_v3_user', 'VARCHAR(100) DEFAULT NULL');
+        $this->ensureColumnExists('scopes', 'snmp_v3_auth_proto', "VARCHAR(20) NOT NULL DEFAULT 'SHA'");
+        $this->ensureColumnExists('scopes', 'snmp_v3_auth_pass', 'VARCHAR(255) DEFAULT NULL');
+        $this->ensureColumnExists('scopes', 'snmp_v3_priv_proto', "VARCHAR(20) NOT NULL DEFAULT 'AES'");
+        $this->ensureColumnExists('scopes', 'snmp_v3_priv_pass', 'VARCHAR(255) DEFAULT NULL');
+        $this->ensureColumnExists('scopes', 'snmp_v3_context', 'VARCHAR(100) DEFAULT NULL');
         $this->ensureColumnExists('devices', 'is_hidden', 'TINYINT(1) NOT NULL DEFAULT 0');
         $this->ensureColumnExists('devices', 'custom_group', 'VARCHAR(100) DEFAULT NULL');
         $this->ensureColumnExists('devices', 'service_info', 'TEXT DEFAULT NULL');
@@ -379,6 +387,14 @@ class Database
             )
         ");
 
+        $this->ensureColumnExists('scopes', 'snmp_version', "TEXT NOT NULL DEFAULT '2c'");
+        $this->ensureColumnExists('scopes', 'snmp_v3_level', "TEXT NOT NULL DEFAULT 'authPriv'");
+        $this->ensureColumnExists('scopes', 'snmp_v3_user', 'TEXT DEFAULT NULL');
+        $this->ensureColumnExists('scopes', 'snmp_v3_auth_proto', "TEXT NOT NULL DEFAULT 'SHA'");
+        $this->ensureColumnExists('scopes', 'snmp_v3_auth_pass', 'TEXT DEFAULT NULL');
+        $this->ensureColumnExists('scopes', 'snmp_v3_priv_proto', "TEXT NOT NULL DEFAULT 'AES'");
+        $this->ensureColumnExists('scopes', 'snmp_v3_priv_pass', 'TEXT DEFAULT NULL');
+        $this->ensureColumnExists('scopes', 'snmp_v3_context', 'TEXT DEFAULT NULL');
         $this->ensureColumnExists('devices', 'is_hidden', 'INTEGER NOT NULL DEFAULT 0');
         $this->ensureColumnExists('devices', 'custom_group', 'TEXT DEFAULT NULL');
         $this->ensureColumnExists('devices', 'service_info', 'TEXT DEFAULT NULL');
